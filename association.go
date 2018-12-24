@@ -17,43 +17,43 @@ const receiveMTU = 8192
 
 var errAssociationClosed = errors.New("The association is closed")
 
-// AssociationState is an enum for the states that an Association will transition
+// associationState is an enum for the states that an Association will transition
 // through while connecting
 // https://tools.ietf.org/html/rfc4960#section-13.2
-type AssociationState uint8
+type associationState uint8
 
-// AssociationState enums
+// associationState enums
 const (
-	Open AssociationState = iota + 1
-	CookieEchoed
-	CookieWait
-	Established
-	ShutdownAckSent
-	ShutdownPending
-	ShutdownReceived
-	ShutdownSent
+	open associationState = iota + 1
+	cookieEchoed
+	cookieWait
+	established
+	shutdownAckSent
+	shutdownPending
+	shutdownReceived
+	shutdownSent
 )
 
-func (a AssociationState) String() string {
+func (a associationState) String() string {
 	switch a {
-	case Open:
+	case open:
 		return "Open"
-	case CookieEchoed:
+	case cookieEchoed:
 		return "CookieEchoed"
-	case CookieWait:
+	case cookieWait:
 		return "CookieWait"
-	case Established:
+	case established:
 		return "Established"
-	case ShutdownPending:
+	case shutdownPending:
 		return "ShutdownPending"
-	case ShutdownSent:
+	case shutdownSent:
 		return "ShutdownSent"
-	case ShutdownReceived:
+	case shutdownReceived:
 		return "ShutdownReceived"
-	case ShutdownAckSent:
+	case shutdownAckSent:
 		return "ShutdownAckSent"
 	default:
-		return fmt.Sprintf("Invalid AssociationState %d", a)
+		return fmt.Sprintf("Invalid associationState %d", a)
 	}
 }
 
@@ -81,7 +81,7 @@ type Association struct {
 
 	peerVerificationTag uint32
 	myVerificationTag   uint32
-	state               AssociationState
+	state               associationState
 	//peerTransportList
 	//primaryPath
 	//overallErrorCount
@@ -149,7 +149,7 @@ func createAssocation(nextConn net.Conn) *Association {
 		myMaxMTU:                  1200,
 		myVerificationTag:         r.Uint32(),
 		myNextTSN:                 tsn,
-		state:                     Open,
+		state:                     open,
 		streams:                   make(map[uint16]*Stream),
 		acceptCh:                  make(chan *Stream),
 		doneCh:                    make(chan struct{}),
@@ -166,7 +166,7 @@ func (a *Association) init() {
 	if err != nil {
 		fmt.Printf("Failed to send init: %v", err)
 	}
-	a.setState(CookieWait)
+	a.setState(cookieWait)
 }
 
 // Close ends the SCTP Association and cleans up any state
@@ -286,7 +286,7 @@ func min(a, b uint16) uint16 {
 }
 
 // setState sets the state of the Association.
-func (a *Association) setState(state AssociationState) {
+func (a *Association) setState(state associationState) {
 	if a.state != state {
 		a.state = state
 	}
@@ -582,9 +582,9 @@ func (a *Association) handleChunk(p *packet, c chunk) ([]*packet, error) {
 	switch c := c.(type) {
 	case *chunkInit:
 		switch a.state {
-		case Open:
+		case open:
 			return pack(a.handleInit(p, c)), nil
-		case CookieWait:
+		case cookieWait:
 			// https://tools.ietf.org/html/rfc4960#section-5.2.1
 			// Upon receipt of an INIT in the COOKIE-WAIT state, an endpoint MUST
 			// respond with an INIT ACK using the same parameters it sent in its
@@ -593,7 +593,7 @@ func (a *Association) handleChunk(p *packet, c chunk) ([]*packet, error) {
 			// address that the original INIT (sent by this endpoint) was sent.
 			return pack(a.handleInit(p, c)), nil
 
-		case CookieEchoed:
+		case cookieEchoed:
 			// https://tools.ietf.org/html/rfc4960#section-5.2.1
 			// Upon receipt of an INIT in the COOKIE-ECHOED state, an endpoint MUST
 			// respond with an INIT ACK using the same parameters it sent in its
@@ -607,12 +607,12 @@ func (a *Association) handleChunk(p *packet, c chunk) ([]*packet, error) {
 
 	case *chunkInitAck:
 		switch a.state {
-		case CookieWait:
+		case cookieWait:
 			r, err := a.handleInitAck(p, c)
 			if err != nil {
 				return nil, err
 			}
-			a.setState(CookieEchoed)
+			a.setState(cookieEchoed)
 			return pack(r), nil
 		default:
 			return nil, errors.Errorf("TODO Handle Init acks when in state %s", a.state.String())
@@ -651,7 +651,7 @@ func (a *Association) handleChunk(p *packet, c chunk) ([]*packet, error) {
 				destinationPort: a.destinationPort,
 				chunks:          []chunk{&chunkCookieAck{}},
 			}
-			a.setState(Established)
+			a.setState(established)
 			close(a.handshakeCompletedCh)
 
 			return pack(p), nil
@@ -659,8 +659,8 @@ func (a *Association) handleChunk(p *packet, c chunk) ([]*packet, error) {
 
 	case *chunkCookieAck:
 		switch a.state {
-		case CookieEchoed:
-			a.setState(Established)
+		case cookieEchoed:
+			a.setState(established)
 			close(a.handshakeCompletedCh)
 			return nil, nil
 		default:
