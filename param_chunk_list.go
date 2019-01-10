@@ -16,7 +16,10 @@ func (c *paramChunkList) marshal() ([]byte, error) {
 }
 
 func (c *paramChunkList) unmarshal(raw []byte) (param, error) {
-	c.paramHeader.unmarshal(raw)
+	err := c.paramHeader.unmarshal(raw)
+	if err != nil {
+		return nil, err
+	}
 	for _, t := range c.raw {
 		c.chunkTypes = append(c.chunkTypes, chunkType(t))
 	}

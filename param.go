@@ -30,6 +30,8 @@ func buildParam(t paramType, rawParam []byte) (param, error) {
 		return (&paramStateCookie{}).unmarshal(rawParam)
 	case heartbeatInfo:
 		return (&paramHeartbeatInfo{}).unmarshal(rawParam)
+	case outSSNResetReq:
+		return (&paramOutgoingResetRequest{}).unmarshal(rawParam)
 	}
 	return nil, errors.Errorf("Unhandled ParamType %v", t)
 }

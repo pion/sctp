@@ -49,7 +49,10 @@ func (r *paramRequestedHMACAlgorithm) marshal() ([]byte, error) {
 }
 
 func (r *paramRequestedHMACAlgorithm) unmarshal(raw []byte) (param, error) {
-	r.paramHeader.unmarshal(raw)
+	err := r.paramHeader.unmarshal(raw)
+	if err != nil {
+		return nil, err
+	}
 
 	i := 0
 	for i < len(r.raw) {

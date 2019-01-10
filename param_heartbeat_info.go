@@ -12,7 +12,10 @@ func (h *paramHeartbeatInfo) marshal() ([]byte, error) {
 }
 
 func (h *paramHeartbeatInfo) unmarshal(raw []byte) (param, error) {
-	h.paramHeader.unmarshal(raw)
+	err := h.paramHeader.unmarshal(raw)
+	if err != nil {
+		return nil, err
+	}
 	h.heartbeatInformation = h.raw
 	return h, nil
 }

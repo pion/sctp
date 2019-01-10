@@ -36,7 +36,10 @@ func (s *paramStateCookie) marshal() ([]byte, error) {
 }
 
 func (s *paramStateCookie) unmarshal(raw []byte) (param, error) {
-	s.paramHeader.unmarshal(raw)
+	err := s.paramHeader.unmarshal(raw)
+	if err != nil {
+		return nil, err
+	}
 	s.cookie = s.raw
 	return s, nil
 }
