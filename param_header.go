@@ -3,6 +3,8 @@ package sctp
 import (
 	"encoding/binary"
 	"fmt"
+
+	"errors"
 )
 
 type paramHeader struct {
@@ -26,13 +28,21 @@ func (p *paramHeader) marshal() ([]byte, error) {
 	return rawParam, nil
 }
 
-func (p *paramHeader) unmarshal(raw []byte) {
+func (p *paramHeader) unmarshal(raw []byte) error {
+	if len(raw) < paramHeaderLength {
+		return errors.New("param header too short")
+	}
+
 	paramLengthPlusHeader := binary.BigEndian.Uint16(raw[2:])
-	paramLength := paramLengthPlusHeader - initOptionalVarHeaderLength
+	if len(raw) < int(paramLengthPlusHeader) {
+		return errors.New("param shorter than its self reported length")
+	}
 
 	p.typ = paramType(binary.BigEndian.Uint16(raw[0:]))
-	p.raw = raw[paramHeaderLength : paramHeaderLength+paramLength]
+	p.raw = raw[paramHeaderLength:paramLengthPlusHeader]
 	p.len = int(paramLengthPlusHeader)
+
+	return nil
 }
 
 func (p *paramHeader) length() int {

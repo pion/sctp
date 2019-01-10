@@ -11,6 +11,9 @@ func (f *paramForwardTSNSupported) marshal() ([]byte, error) {
 }
 
 func (f *paramForwardTSNSupported) unmarshal(raw []byte) (param, error) {
-	f.paramHeader.unmarshal(raw)
+	err := f.paramHeader.unmarshal(raw)
+	if err != nil {
+		return nil, err
+	}
 	return f, nil
 }

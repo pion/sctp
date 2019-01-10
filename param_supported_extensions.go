@@ -16,7 +16,10 @@ func (s *paramSupportedExtensions) marshal() ([]byte, error) {
 }
 
 func (s *paramSupportedExtensions) unmarshal(raw []byte) (param, error) {
-	s.paramHeader.unmarshal(raw)
+	err := s.paramHeader.unmarshal(raw)
+	if err != nil {
+		return nil, err
+	}
 
 	for _, t := range s.raw {
 		s.ChunkTypes = append(s.ChunkTypes, chunkType(t))

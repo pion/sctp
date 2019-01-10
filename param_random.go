@@ -12,7 +12,10 @@ func (r *paramRandom) marshal() ([]byte, error) {
 }
 
 func (r *paramRandom) unmarshal(raw []byte) (param, error) {
-	r.paramHeader.unmarshal(raw)
+	err := r.paramHeader.unmarshal(raw)
+	if err != nil {
+		return nil, err
+	}
 	r.randomData = r.raw
 	return r, nil
 }
