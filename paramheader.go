@@ -4,7 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"errors"
+	"github.com/pkg/errors"
 )
 
 type paramHeader struct {
@@ -34,11 +34,18 @@ func (p *paramHeader) unmarshal(raw []byte) error {
 	}
 
 	paramLengthPlusHeader := binary.BigEndian.Uint16(raw[2:])
+	if int(paramLengthPlusHeader) < paramHeaderLength {
+		return errors.Errorf("param self reported length (%d) smaller than header length (%d)", int(paramLengthPlusHeader), paramHeaderLength)
+	}
 	if len(raw) < int(paramLengthPlusHeader) {
-		return errors.New("param shorter than its self reported length")
+		return errors.Errorf("param length (%d) shorter than its self reported length (%d)", len(raw), int(paramLengthPlusHeader))
 	}
 
-	p.typ = paramType(binary.BigEndian.Uint16(raw[0:]))
+	typ, err := parseParamType(raw[0:])
+	if err != nil {
+		return errors.Wrap(err, "failed to parse param type")
+	}
+	p.typ = typ
 	p.raw = raw[paramHeaderLength:paramLengthPlusHeader]
 	p.len = int(paramLengthPlusHeader)
 

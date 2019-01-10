@@ -1,8 +1,6 @@
 package sctp
 
 import (
-	"encoding/binary"
-
 	"github.com/pkg/errors"
 )
 
@@ -51,7 +49,10 @@ func (h *chunkHeartbeat) unmarshal(raw []byte) error {
 		return errors.Errorf("Heartbeat is not long enough to contain Heartbeat Info %d", len(raw))
 	}
 
-	pType := paramType(binary.BigEndian.Uint16(raw[chunkHeaderSize:]))
+	pType, err := parseParamType(raw[chunkHeaderSize:])
+	if err != nil {
+		return errors.Wrap(err, "failed to parse param type")
+	}
 	if pType != heartbeatInfo {
 		return errors.Errorf("Heartbeat should only have HEARTBEAT param, instead have %s", pType.String())
 	}

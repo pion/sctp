@@ -71,7 +71,7 @@ func (r *paramOutgoingResetRequest) unmarshal(raw []byte) (param, error) {
 		return nil, err
 	}
 	if len(r.raw) < paramOutgoingResetRequestStreamIdentifiersOffset {
-		return nil, errors.New("param header too short")
+		return nil, errors.New("outgoing SSN reset request parameter too short")
 	}
 	r.reconfigRequestSequenceNumber = binary.BigEndian.Uint32(r.raw)
 	r.reconfigResponseSequenceNumber = binary.BigEndian.Uint32(r.raw[4:])

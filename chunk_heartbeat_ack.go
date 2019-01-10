@@ -72,8 +72,7 @@ func (h *chunkHeartbeatAck) marshal() ([]byte, error) {
 		// parameter except the last parameter in the chunk.*  The receiver
 		// MUST ignore the padding.
 		if idx != len(h.params)-1 {
-			padding := make([]byte, getPadding(len(pp)))
-			out = append(out, padding...)
+			out = padByte(out, getPadding(len(pp)))
 		}
 	}
 
