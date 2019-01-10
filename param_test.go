@@ -1,7 +1,6 @@
 package sctp
 
 import (
-	"encoding/binary"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -11,11 +10,14 @@ func TestBuildParam_Success(t *testing.T) {
 	tt := []struct {
 		binary []byte
 	}{
-		{[]byte{0x0, 0xd, 0x0, 0x10, 0x0, 0x0, 0x0, 0x1, 0x0, 0x0, 0x0, 0x2, 0x0, 0x0, 0x0, 0x3}},
+		{testChunkReconfigParamA},
 	}
 
 	for i, tc := range tt {
-		pType := paramType(binary.BigEndian.Uint16(tc.binary))
+		pType, err := parseParamType(tc.binary)
+		if err != nil {
+			t.Fatalf("failed to parse param type: %v", err)
+		}
 		p, err := buildParam(pType, tc.binary)
 		if err != nil {
 			t.Fatalf("failed to unmarshal #%d: %v", i, err)
@@ -24,7 +26,7 @@ func TestBuildParam_Success(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to marshal: %v", err)
 		}
-		assert.Equal(t, b, tc.binary)
+		assert.Equal(t, tc.binary, b)
 	}
 }
 
@@ -33,12 +35,16 @@ func TestBuildParam_Failure(t *testing.T) {
 		name   string
 		binary []byte
 	}{
-		{"invalid ParamType", []byte{0x0, 0xd, 0x0, 0x14, 0x0, 0x0, 0x0, 0x1}},
+		{"invalid ParamType", []byte{0x0, 0x0}},
+		{"build failure", testChunkReconfigParamA[:8]},
 	}
 
 	for i, tc := range tt {
-		pType := paramType(binary.BigEndian.Uint16(tc.binary))
-		_, err := buildParam(pType, tc.binary)
+		pType, err := parseParamType(tc.binary)
+		if err != nil {
+			t.Fatalf("failed to parse param type: %v", err)
+		}
+		_, err = buildParam(pType, tc.binary)
 		if err == nil {
 			t.Errorf("expected unmarshal #%d: '%s' to fail.", i, tc.name)
 		}
