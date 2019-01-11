@@ -12,6 +12,7 @@ func TestChunkReconfig_Success(t *testing.T) {
 	}{
 		{append([]byte{0x82, 0x0, 0x0, 0x1a}, testChunkReconfigParamA...)}, // Note: chunk trailing padding is added in packet.marshal
 		{append([]byte{0x82, 0x0, 0x0, 0x14}, testChunkReconfigParamB...)},
+		{append([]byte{0x82, 0x0, 0x0, 0x10}, testChunkReconfigResponce...)},
 		{append(append([]byte{0x82, 0x0, 0x0, 0x2c}, padByte(testChunkReconfigParamA, 2)...), testChunkReconfigParamB...)},
 		{append(append([]byte{0x82, 0x0, 0x0, 0x2a}, testChunkReconfigParamB...), testChunkReconfigParamA...)}, // Note: chunk trailing padding is added in packet.marshal
 	}
