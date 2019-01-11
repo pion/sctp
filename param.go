@@ -27,6 +27,8 @@ func buildParam(t paramType, rawParam []byte) (param, error) {
 		return (&paramHeartbeatInfo{}).unmarshal(rawParam)
 	case outSSNResetReq:
 		return (&paramOutgoingResetRequest{}).unmarshal(rawParam)
+	case reconfigResp:
+		return (&paramReconfigResponse{}).unmarshal(rawParam)
 	}
 	return nil, errors.Errorf("Unhandled ParamType %v", t)
 }
