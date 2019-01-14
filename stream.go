@@ -20,6 +20,8 @@ type Stream struct {
 	sequenceNumber  uint16
 
 	readNotifier chan struct{}
+	readErr      error
+	writeErr     error
 	closeCh      chan struct{}
 }
 
@@ -43,13 +45,17 @@ func (s *Stream) setDefaultPayloadType(defaultPayloadType PayloadProtocolIdentif
 	s.defaultPayloadType = defaultPayloadType
 }
 
-// Read reads a packet of len(p) bytes, dropping the Payload Protocol Identifier
+// Read reads a packet of len(p) bytes, dropping the Payload Protocol Identifier.
+// Returns EOF when the stream is reset or an error if the stream is closed
+// otherwise.
 func (s *Stream) Read(p []byte) (int, error) {
 	n, _, err := s.ReadSCTP(p)
 	return n, err
 }
 
-// ReadSCTP reads a packet of len(p) bytes and returns the associated Payload Protocol Identifier
+// ReadSCTP reads a packet of len(p) bytes and returns the associated Payload Protocol Identifier.
+// Returns EOF when the stream is reset or an error if the stream is closed
+// otherwise.
 func (s *Stream) ReadSCTP(p []byte) (int, PayloadProtocolIdentifier, error) {
 	for range s.readNotifier {
 		s.lock.Lock()
@@ -62,7 +68,10 @@ func (s *Stream) ReadSCTP(p []byte) (int, PayloadProtocolIdentifier, error) {
 		}
 	}
 
-	return 0, PayloadProtocolIdentifier(0), errors.New("stream closed")
+	s.lock.RLock()
+	err := s.readErr
+	s.lock.RUnlock()
+	return 0, PayloadProtocolIdentifier(0), err
 }
 
 func (s *Stream) handleData(pd *chunkPayloadData) {
@@ -86,6 +95,13 @@ func (s *Stream) Write(p []byte) (n int, err error) {
 func (s *Stream) WriteSCTP(p []byte, ppi PayloadProtocolIdentifier) (n int, err error) {
 	if len(p) > math.MaxUint16 {
 		return 0, errors.Errorf("Outbound packet larger than maximum message size %v", math.MaxUint16)
+	}
+
+	s.lock.RLock()
+	err = s.writeErr
+	s.lock.RUnlock()
+	if err != nil {
+		return 0, err
 	}
 
 	chunks := s.packetize(p, ppi)
@@ -121,21 +137,23 @@ func (s *Stream) packetize(raw []byte, ppi PayloadProtocolIdentifier) []*chunkPa
 	return chunks
 }
 
-// Close closes the conn and releases any Read calls
+// Close closes the write-direction of the stream.
+// Future calls to Write are not permitted after calling Close.
 func (s *Stream) Close() error {
-	s.unregister()
+	s.lock.Lock()
+	if s.writeErr != nil {
+		s.lock.Unlock()
+		return nil // already closed
+	}
+	s.writeErr = errors.New("Stream closed")
 
-	// TODO: reset stream?
+	a := s.association
+	sid := s.streamIdentifier
+	s.lock.Unlock()
+
+	// Reset the outgoing stream
 	// https://tools.ietf.org/html/rfc6525
+	a.sendResetRequest(sid)
 
 	return nil
-}
-
-func (s *Stream) unregister() {
-	a := s.association
-	close(s.closeCh)
-	a.lock.Lock()
-	defer a.lock.Unlock()
-	close(s.readNotifier)
-	delete(a.streams, s.streamIdentifier)
 }

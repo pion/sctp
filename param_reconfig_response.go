@@ -36,13 +36,13 @@ type paramReconfigResponse struct {
 type reconfigResult uint32
 
 const (
-	reconfigResultSuccessNOP                    = 0
-	reconfigResultSuccessPerformed              = 1
-	reconfigResultDenied                        = 2
-	reconfigResultErrorWrongSSN                 = 3
-	reconfigResultErrorRequestAlreadyInProgress = 4
-	reconfigResultErrorBadSequenceNumber        = 5
-	reconfigResultInProgress                    = 6
+	reconfigResultSuccessNOP                    reconfigResult = 0
+	reconfigResultSuccessPerformed              reconfigResult = 1
+	reconfigResultDenied                        reconfigResult = 2
+	reconfigResultErrorWrongSSN                 reconfigResult = 3
+	reconfigResultErrorRequestAlreadyInProgress reconfigResult = 4
+	reconfigResultErrorBadSequenceNumber        reconfigResult = 5
+	reconfigResultInProgress                    reconfigResult = 6
 )
 
 func (r *paramReconfigResponse) marshal() ([]byte, error) {

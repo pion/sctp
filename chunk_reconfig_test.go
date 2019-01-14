@@ -24,13 +24,6 @@ func TestChunkReconfig_Success(t *testing.T) {
 			t.Fatalf("failed to unmarshal #%d: %v", i, err)
 		}
 
-		// Reset the raw values
-		/*actual.chunkHeader.raw = []byte{}
-		actual.paramA.(*paramOutgoingResetRequest).paramHeader.raw = []byte{}
-		if actual.paramB != nil {
-			actual.paramB.(*paramOutgoingResetRequest).paramHeader.raw = []byte{}
-		}*/
-
 		b, err := actual.marshal()
 		if err != nil {
 			t.Fatalf("failed to marshal: %v", err)
