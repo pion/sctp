@@ -3,6 +3,7 @@ package sctp
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 
@@ -75,7 +76,7 @@ func (a associationState) String() string {
 //               Note: No "CLOSED" state is illustrated since if a
 //               association is "CLOSED" its TCB SHOULD be removed.
 type Association struct {
-	lock sync.Mutex
+	lock sync.RWMutex
 
 	nextConn net.Conn
 
@@ -96,6 +97,10 @@ type Association struct {
 	//reassemblyQueue
 	//localTransportAddressList
 	//associationPTMU
+
+	// Reconfig
+	ongoingReconfig *chunkReconfig
+	myNextRSN       uint32
 
 	// Non-RFC internal data
 	sourcePort                uint16
@@ -149,6 +154,7 @@ func createAssocation(nextConn net.Conn) *Association {
 		myMaxMTU:                  1200,
 		myVerificationTag:         r.Uint32(),
 		myNextTSN:                 tsn,
+		myNextRSN:                 tsn,
 		state:                     open,
 		streams:                   make(map[uint16]*Stream),
 		acceptCh:                  make(chan *Stream),
@@ -185,10 +191,9 @@ func (a *Association) Close() error {
 func (a *Association) readLoop() {
 	defer func() {
 		a.lock.Lock()
+		closeErr := errors.New("association closed")
 		for _, s := range a.streams {
-			close(s.closeCh)
-			close(s.readNotifier)
-			delete(a.streams, s.streamIdentifier)
+			a.unregisterStream(s, closeErr)
 		}
 		a.lock.Unlock()
 		close(a.acceptCh)
@@ -202,11 +207,21 @@ func (a *Association) readLoop() {
 		if err != nil {
 			return
 		}
-
 		if err = a.handleInbound(buffer[:n]); err != nil {
 			fmt.Println(errors.Wrap(err, "Failed to push SCTP packet"))
 		}
 	}
+}
+
+// unregisterStream un-registers a stream from the association
+// The caller should hold the association write lock.
+func (a *Association) unregisterStream(s *Stream, err error) {
+	close(s.closeCh)
+	close(s.readNotifier)
+	s.lock.Lock()
+	delete(a.streams, s.streamIdentifier)
+	s.readErr = err
+	s.lock.Unlock()
 }
 
 // HandleInbound parses incoming raw packets
@@ -309,9 +324,21 @@ func (a *Association) createInit() *packet {
 	init.initiateTag = a.myVerificationTag
 	init.advertisedReceiverWindowCredit = a.myReceiverWindowCredit
 
+	setSupportedExtensions(&init.chunkInitCommon)
+
 	outbound.chunks = []chunk{init}
 
 	return outbound
+}
+
+func setSupportedExtensions(init *chunkInitCommon) {
+	// TODO RFC5061 https://tools.ietf.org/html/rfc6525#section-5.2
+	// An implementation supporting this (Supported Extensions Parameter)
+	// extension MUST list the ASCONF, the ASCONF-ACK, and the AUTH chunks
+	// in its INIT and INIT-ACK parameters.
+	init.params = append(init.params, &paramSupportedExtensions{
+		ChunkTypes: []chunkType{RECONFIG},
+	})
 }
 
 // The caller should hold the lock.
@@ -347,6 +374,8 @@ func (a *Association) handleInit(p *packet, i *chunkInit) *packet {
 	}
 
 	initAck.params = []param{a.myCookie}
+
+	setSupportedExtensions(&initAck.chunkInitCommon)
 
 	outbound.chunks = []chunk{initAck}
 
@@ -506,17 +535,95 @@ func (a *Association) handleSack(d *chunkSelectiveAck) ([]*packet, error) {
 				return nil, errors.Errorf("Requested non-existent TSN %v", d.cumulativeTSNAck+uint32(i))
 			}
 
-			sackDataPackets = append(sackDataPackets, &packet{
-				verificationTag: a.peerVerificationTag,
-				sourcePort:      a.sourcePort,
-				destinationPort: a.destinationPort,
-				chunks:          []chunk{pp},
-			})
+			sackDataPackets = append(sackDataPackets, a.createPacket([]chunk{pp}))
 		}
 		prevEnd = g.end
 	}
 
 	return sackDataPackets, nil
+}
+
+// createPacket wraps chunks in a packet.
+// The caller should hold the read lock.
+func (a *Association) createPacket(cs []chunk) *packet {
+	return &packet{
+		verificationTag: a.peerVerificationTag,
+		sourcePort:      a.sourcePort,
+		destinationPort: a.destinationPort,
+		chunks:          cs,
+	}
+}
+
+func (a *Association) handleReconfig(c *chunkReconfig) ([]*packet, error) {
+	pp := make([]*packet, 0)
+
+	p, err := a.handleReconfigParam(c.paramA)
+	if err != nil {
+		return nil, err
+	}
+	if p != nil {
+		pp = append(pp, p)
+	}
+
+	if c.paramB != nil {
+		p, err = a.handleReconfigParam(c.paramB)
+		if err != nil {
+			return nil, err
+		}
+		if p != nil {
+			pp = append(pp, p)
+		}
+	}
+	return pp, nil
+}
+
+func (a *Association) sendResetRequest(streamIdentifier uint16) error {
+	p := a.createResetPacket(streamIdentifier)
+	return a.send(p)
+}
+
+func (a *Association) createResetPacket(streamIdentifier uint16) *packet {
+	a.lock.RLock()
+	lastTSN := a.myNextTSN - 1
+	a.lock.RUnlock()
+	a.ongoingReconfig = &chunkReconfig{
+		paramA: &paramOutgoingResetRequest{
+			reconfigRequestSequenceNumber: a.generateNextRSN(),
+			senderLastTSN:                 lastTSN,
+			streamIdentifiers:             []uint16{streamIdentifier},
+		},
+	}
+	return a.createPacket([]chunk{a.ongoingReconfig})
+}
+
+func (a *Association) handleReconfigParam(raw param) (*packet, error) {
+	switch p := raw.(type) {
+	case *paramOutgoingResetRequest:
+		result := reconfigResultSuccessPerformed
+		for _, id := range p.streamIdentifiers {
+			s, ok := a.streams[id]
+			if !ok {
+				continue
+			}
+			a.unregisterStream(s, io.EOF)
+		}
+
+		// TODO: Re-transmission
+		return a.createPacket([]chunk{&chunkReconfig{
+			paramA: &paramReconfigResponse{
+				reconfigResponseSequenceNumber: p.reconfigRequestSequenceNumber,
+				result:                         result,
+			},
+		}}), nil
+
+	case *paramReconfigResponse:
+		// Reset the ongoing config
+		// TODO: Stop re-transmission
+		a.ongoingReconfig = nil
+		return nil, nil
+	default:
+		return nil, errors.Errorf("unexpected parameter type %T", p)
+	}
 }
 
 // sendPayloadData sends the data chunks.
@@ -553,6 +660,13 @@ func (a *Association) generateNextTSN() uint32 {
 	tsn := a.myNextTSN
 	a.myNextTSN++
 	return tsn
+}
+
+// generateNextRSN returns the myNextRSN and increases it. The caller should hold the lock.
+func (a *Association) generateNextRSN() uint32 {
+	rsn := a.myNextRSN
+	a.myNextRSN++
+	return rsn
 }
 
 // send sends a packet over nextConn. The caller should hold the lock.
@@ -674,7 +788,14 @@ func (a *Association) handleChunk(p *packet, c chunk) ([]*packet, error) {
 	case *chunkSelectiveAck:
 		p, err := a.handleSack(c)
 		if err != nil {
-			return nil, errors.Wrap(err, "Failure handling SACK")
+			return nil, errors.Wrap(err, "failure handling SACK")
+		}
+		return p, nil
+
+	case *chunkReconfig:
+		p, err := a.handleReconfig(c)
+		if err != nil {
+			return nil, errors.Wrap(err, "failure handling reconfig")
 		}
 		return p, nil
 

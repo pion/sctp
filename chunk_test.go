@@ -161,3 +161,21 @@ func TestSelectAckChunk(t *testing.T) {
 		t.Error("Failed to cast Chunk -> SelectiveAck")
 	}
 }
+
+func TestReconfigChunk(t *testing.T) {
+	pkt := &packet{}
+	rawPkt := []byte{0x13, 0x88, 0x13, 0x88, 0xb6, 0xa5, 0x12, 0xe5, 0x75, 0x3b, 0x12, 0xd3, 0x82, 0x0, 0x0, 0x16, 0x0, 0xd, 0x0, 0x12, 0x4e, 0x1c, 0xb9, 0xe6, 0x3a, 0x74, 0x8d, 0xff, 0x4e, 0x1c, 0xb9, 0xe6, 0x0, 0x1, 0x0, 0x0}
+	err := pkt.unmarshal(rawPkt)
+	if err != nil {
+		t.Error(errors.Wrap(err, "Unmarshal failed, has chunk"))
+	}
+
+	c, ok := pkt.chunks[0].(*chunkReconfig)
+	if !ok {
+		t.Error("Failed to cast Chunk -> Reconfig")
+	}
+
+	if c.paramA.(*paramOutgoingResetRequest).streamIdentifiers[0] != uint16(1) {
+		t.Error(errors.Errorf("unexpected stream identifier: %d", c.paramA.(*paramOutgoingResetRequest).streamIdentifiers[0]))
+	}
+}

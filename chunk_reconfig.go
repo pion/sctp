@@ -82,6 +82,12 @@ func (c *chunkReconfig) marshal() ([]byte, error) {
 	return c.chunkHeader.marshal()
 }
 
+func (c *chunkReconfig) check() (abort bool, err error) {
+	// TODO: check allowed combinations:
+	// https://tools.ietf.org/html/rfc6525#section-3.1
+	return true, nil
+}
+
 // String makes chunkReconfig printable
 func (c *chunkReconfig) String() string {
 	res := fmt.Sprintf("Param A:\n %s", c.paramA)
