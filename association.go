@@ -99,8 +99,9 @@ type Association struct {
 	//associationPTMU
 
 	// Reconfig
-	ongoingReconfig *chunkReconfig
-	myNextRSN       uint32
+	ongoingReconfigOutgoing *chunkReconfig // TODO: Re-transmission
+	ongoingResetRequest     *paramOutgoingResetRequest
+	myNextRSN               uint32
 
 	// Non-RFC internal data
 	sourcePort                uint16
@@ -419,7 +420,9 @@ func (a *Association) handleInitAck(p *packet, i *chunkInitAck) (*packet, error)
 }
 
 // The caller should hold the lock.
-func (a *Association) handleData(d *chunkPayloadData) *packet {
+func (a *Association) handleData(d *chunkPayloadData) []*packet {
+	reply := make([]*packet, 0)
+
 	a.payloadQueue.push(d, a.peerLastTSN)
 
 	pd, popOk := a.payloadQueue.pop(a.peerLastTSN + 1)
@@ -427,6 +430,15 @@ func (a *Association) handleData(d *chunkPayloadData) *packet {
 	for popOk {
 		s := a.getOrCreateStream(pd.streamIdentifier)
 		s.handleData(pd)
+
+		if a.ongoingResetRequest != nil &&
+			a.ongoingResetRequest.senderLastTSN < a.peerLastTSN {
+			resp := a.resetStreams()
+			if resp != nil {
+				reply = append(reply, resp)
+			}
+			break
+		}
 
 		a.peerLastTSN++
 		pd, popOk = a.payloadQueue.pop(a.peerLastTSN + 1)
@@ -444,8 +456,9 @@ func (a *Association) handleData(d *chunkPayloadData) *packet {
 	sack.duplicateTSN = a.payloadQueue.popDuplicates()
 	sack.gapAckBlocks = a.payloadQueue.getGapAckBlocks(a.peerLastTSN)
 	outbound.chunks = []chunk{sack}
+	reply = append(reply, outbound)
 
-	return outbound
+	return reply
 }
 
 // OpenStream opens a stream
@@ -586,20 +599,46 @@ func (a *Association) createResetPacket(streamIdentifier uint16) *packet {
 	a.lock.RLock()
 	lastTSN := a.myNextTSN - 1
 	a.lock.RUnlock()
-	a.ongoingReconfig = &chunkReconfig{
+
+	// TODO: Re-transmission
+	a.ongoingReconfigOutgoing = &chunkReconfig{
+
 		paramA: &paramOutgoingResetRequest{
 			reconfigRequestSequenceNumber: a.generateNextRSN(),
 			senderLastTSN:                 lastTSN,
 			streamIdentifiers:             []uint16{streamIdentifier},
 		},
 	}
-	return a.createPacket([]chunk{a.ongoingReconfig})
+	return a.createPacket([]chunk{a.ongoingReconfigOutgoing})
+
 }
 
 func (a *Association) handleReconfigParam(raw param) (*packet, error) {
+	// TODO: Check RSN
 	switch p := raw.(type) {
 	case *paramOutgoingResetRequest:
-		result := reconfigResultSuccessPerformed
+		a.ongoingResetRequest = p
+		resp := a.resetStreams()
+		if resp != nil {
+			return resp, nil
+		}
+		return nil, nil
+
+	case *paramReconfigResponse:
+		// Reset the ongoing config
+		// TODO: Stop re-transmission
+		a.ongoingReconfigOutgoing = nil
+
+		return nil, nil
+	default:
+		return nil, errors.Errorf("unexpected parameter type %T", p)
+	}
+}
+
+func (a *Association) resetStreams() *packet {
+	result := reconfigResultSuccessPerformed
+	p := a.ongoingResetRequest
+	if p.senderLastTSN <= a.peerLastTSN {
 		for _, id := range p.streamIdentifiers {
 			s, ok := a.streams[id]
 			if !ok {
@@ -607,23 +646,17 @@ func (a *Association) handleReconfigParam(raw param) (*packet, error) {
 			}
 			a.unregisterStream(s, io.EOF)
 		}
-
-		// TODO: Re-transmission
-		return a.createPacket([]chunk{&chunkReconfig{
-			paramA: &paramReconfigResponse{
-				reconfigResponseSequenceNumber: p.reconfigRequestSequenceNumber,
-				result:                         result,
-			},
-		}}), nil
-
-	case *paramReconfigResponse:
-		// Reset the ongoing config
-		// TODO: Stop re-transmission
-		a.ongoingReconfig = nil
-		return nil, nil
-	default:
-		return nil, errors.Errorf("unexpected parameter type %T", p)
+		a.ongoingResetRequest = nil
+	} else {
+		result = reconfigResultInProgress
 	}
+
+	return a.createPacket([]chunk{&chunkReconfig{
+		paramA: &paramReconfigResponse{
+			reconfigResponseSequenceNumber: p.reconfigRequestSequenceNumber,
+			result:                         result,
+		},
+	}})
 }
 
 // sendPayloadData sends the data chunks.
@@ -783,7 +816,7 @@ func (a *Association) handleChunk(p *packet, c chunk) ([]*packet, error) {
 
 		// TODO Abort
 	case *chunkPayloadData:
-		return pack(a.handleData(c)), nil
+		return a.handleData(c), nil
 
 	case *chunkSelectiveAck:
 		p, err := a.handleSack(c)
