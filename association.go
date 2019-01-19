@@ -217,12 +217,13 @@ func (a *Association) readLoop() {
 // unregisterStream un-registers a stream from the association
 // The caller should hold the association write lock.
 func (a *Association) unregisterStream(s *Stream, err error) {
-	close(s.closeCh)
-	close(s.readNotifier)
 	s.lock.Lock()
 	delete(a.streams, s.streamIdentifier)
 	s.readErr = err
+	n := s.readNotifier
+	s.readNotifier = nil
 	s.lock.Unlock()
+	n.Broadcast()
 }
 
 // HandleInbound parses incoming raw packets
@@ -491,8 +492,7 @@ func (a *Association) createStream(streamIdentifier uint16, accept bool) *Stream
 		association:      a,
 		streamIdentifier: streamIdentifier,
 		reassemblyQueue:  &reassemblyQueue{},
-		readNotifier:     make(chan struct{}),
-		closeCh:          make(chan struct{}),
+		readNotifier:     sync.NewCond(&sync.Mutex{}),
 	}
 
 	a.streams[streamIdentifier] = s

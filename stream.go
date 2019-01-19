@@ -20,10 +20,10 @@ type Stream struct {
 	reassemblyQueue *reassemblyQueue
 	sequenceNumber  uint16
 
-	readNotifier chan struct{}
-	readErr      error
-	writeErr     error
-	closeCh      chan struct{}
+	readNotifier *sync.Cond
+
+	readErr  error
+	writeErr error
 }
 
 // StreamIdentifier returns the Stream identifier associated to the stream.
@@ -58,7 +58,7 @@ func (s *Stream) Read(p []byte) (int, error) {
 // Returns EOF when the stream is reset or an error if the stream is closed
 // otherwise.
 func (s *Stream) ReadSCTP(p []byte) (int, PayloadProtocolIdentifier, error) {
-	for range s.readNotifier {
+	for {
 		s.lock.Lock()
 		userData, ppi, ok := s.reassemblyQueue.pop() // TODO: pop into p?
 		s.lock.Unlock()
@@ -69,12 +69,23 @@ func (s *Stream) ReadSCTP(p []byte) (int, PayloadProtocolIdentifier, error) {
 			}
 			return n, ppi, nil
 		}
-	}
 
-	s.lock.RLock()
-	err := s.readErr
-	s.lock.RUnlock()
-	return 0, PayloadProtocolIdentifier(0), err
+		s.lock.RLock()
+		err := s.readErr
+		if err != nil {
+			s.lock.RUnlock()
+			return 0, PayloadProtocolIdentifier(0), err
+		}
+
+		notifier := s.readNotifier
+		s.lock.RUnlock()
+		// Wait for read notification
+		if notifier != nil {
+			notifier.L.Lock()
+			notifier.Wait()
+			notifier.L.Unlock()
+		}
+	}
 }
 
 func (s *Stream) handleData(pd *chunkPayloadData) {
@@ -82,11 +93,8 @@ func (s *Stream) handleData(pd *chunkPayloadData) {
 	s.reassemblyQueue.push(pd)
 	s.lock.Unlock()
 
-	// Notify the reader
-	select {
-	case s.readNotifier <- struct{}{}:
-	case <-s.closeCh:
-	}
+	// Notify the reader asynchronously
+	s.readNotifier.Signal()
 }
 
 // Write writes len(p) bytes from p with the default Payload Protocol Identifier
