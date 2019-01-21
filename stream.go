@@ -153,7 +153,5 @@ func (s *Stream) Close() error {
 
 	// Reset the outgoing stream
 	// https://tools.ietf.org/html/rfc6525
-	a.sendResetRequest(sid)
-
-	return nil
+	return a.sendResetRequest(sid)
 }

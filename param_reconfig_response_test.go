@@ -59,3 +59,23 @@ func TestParamReconfigResponse_Failure(t *testing.T) {
 		}
 	}
 }
+
+func TestReconfigResultStringer(t *testing.T) {
+	tt := []struct {
+		result   reconfigResult
+		expected string
+	}{
+		{reconfigResultSuccessNOP, "0: Success - Nothing to do"},
+		{reconfigResultSuccessPerformed, "1: Success - Performed"},
+		{reconfigResultDenied, "2: Denied"},
+		{reconfigResultErrorWrongSSN, "3: Error - Wrong SSN"},
+		{reconfigResultErrorRequestAlreadyInProgress, "4: Error - Request already in progress"},
+		{reconfigResultErrorBadSequenceNumber, "5: Error - Bad Sequence Number"},
+		{reconfigResultInProgress, "6: In progress"},
+	}
+
+	for i, tc := range tt {
+		actual := tc.result.String()
+		assert.Equal(t, tc.expected, actual, "Test case %d", i)
+	}
+}
