@@ -3,7 +3,7 @@ package sctp
 import (
 	"testing"
 
-	"gotest.tools/assert"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestReassemblyQueue_push(t *testing.T) {
@@ -17,7 +17,7 @@ func TestReassemblyQueue_push(t *testing.T) {
 	b, ppi, ok := r.pop()
 	if ok {
 		assert.Equal(t, ppi, PayloadTypeWebRTCBinary)
-		assert.DeepEqual(t, b, []byte{0, 1, 2, 3})
+		assert.Equal(t, b, []byte{0, 1, 2, 3})
 	} else {
 		t.Error("Unable to assemble message")
 	}
@@ -34,7 +34,7 @@ func TestReassemblyQueue_push(t *testing.T) {
 	b, ppi, ok = r.pop()
 	if ok {
 		assert.Equal(t, ppi, PayloadTypeWebRTCBinary)
-		assert.DeepEqual(t, b, []byte{0, 1})
+		assert.Equal(t, b, []byte{0, 1})
 	} else {
 		t.Error("Unable to assemble unordered message")
 	}
@@ -42,7 +42,7 @@ func TestReassemblyQueue_push(t *testing.T) {
 	b, ppi, ok = r.pop()
 	if ok {
 		assert.Equal(t, ppi, PayloadTypeWebRTCBinary)
-		assert.DeepEqual(t, b, []byte{0, 1, 2, 3})
+		assert.Equal(t, b, []byte{0, 1, 2, 3})
 	} else {
 		t.Error("Unable to assemble message after unordered message")
 	}
