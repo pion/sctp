@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/pkg/errors"
-	"gotest.tools/assert"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestInitChunk(t *testing.T) {
@@ -68,7 +68,7 @@ func TestChromeChunk1Init(t *testing.T) {
 		t.Error(errors.Wrap(err, "Remarshal failed"))
 	}
 
-	assert.DeepEqual(t, rawPkt, rawPkt2)
+	assert.Equal(t, rawPkt, rawPkt2)
 }
 
 func TestChromeChunk2InitAck(t *testing.T) {
@@ -84,7 +84,7 @@ func TestChromeChunk2InitAck(t *testing.T) {
 		t.Error(errors.Wrap(err, "Remarshal failed"))
 	}
 
-	assert.DeepEqual(t, rawPkt, rawPkt2)
+	assert.Equal(t, rawPkt, rawPkt2)
 }
 
 func TestInitMarshalUnmarshal(t *testing.T) {
