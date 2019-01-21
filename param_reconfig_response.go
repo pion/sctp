@@ -2,6 +2,7 @@ package sctp
 
 import (
 	"encoding/binary"
+	"fmt"
 
 	"errors"
 )
@@ -44,6 +45,27 @@ const (
 	reconfigResultErrorBadSequenceNumber        reconfigResult = 5
 	reconfigResultInProgress                    reconfigResult = 6
 )
+
+func (t reconfigResult) String() string {
+	switch t {
+	case reconfigResultSuccessNOP:
+		return "0: Success - Nothing to do"
+	case reconfigResultSuccessPerformed:
+		return "1: Success - Performed"
+	case reconfigResultDenied:
+		return "2: Denied"
+	case reconfigResultErrorWrongSSN:
+		return "3: Error - Wrong SSN"
+	case reconfigResultErrorRequestAlreadyInProgress:
+		return "4: Error - Request already in progress"
+	case reconfigResultErrorBadSequenceNumber:
+		return "5: Error - Bad Sequence Number"
+	case reconfigResultInProgress:
+		return "6: In progress"
+	default:
+		return fmt.Sprintf("Unknown reconfigResult: %d", t)
+	}
+}
 
 func (r *paramReconfigResponse) marshal() ([]byte, error) {
 	r.typ = reconfigResp
