@@ -1,6 +1,7 @@
 package sctp
 
 import (
+	"io"
 	"math"
 	"sync"
 
@@ -63,7 +64,9 @@ func (s *Stream) ReadSCTP(p []byte) (int, PayloadProtocolIdentifier, error) {
 		s.lock.Unlock()
 		if ok {
 			n := copy(p, userData)
-			// TODO: check small buffer
+			if n < len(userData) {
+				return n, ppi, io.ErrShortBuffer
+			}
 			return n, ppi, nil
 		}
 	}
