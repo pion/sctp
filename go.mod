@@ -1,8 +1,7 @@
 module github.com/pions/sctp
 
 require (
-	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/pions/transport v0.0.0-20190110151433-e7cbf7d5f464
 	github.com/pkg/errors v0.8.0
-	github.com/pmezard/go-difflib v1.0.0 // indirect
-	github.com/stretchr/testify v1.2.2
+	github.com/stretchr/testify v1.3.0
 )
