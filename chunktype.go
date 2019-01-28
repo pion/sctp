@@ -24,6 +24,7 @@ const (
 	CWR              chunkType = 13
 	SHUTDOWNCOMPLETE chunkType = 14
 	RECONFIG         chunkType = 130
+	FORWARDTSN       chunkType = 192
 )
 
 func (c chunkType) String() string {
@@ -58,6 +59,8 @@ func (c chunkType) String() string {
 		return "Shutdown Complete"
 	case RECONFIG:
 		return "Re-configuration Chunk (RE-CONFIG)"
+	case FORWARDTSN:
+		return "FORWARD TSN"
 	default:
 		return fmt.Sprintf("Unknown ChunkType: %d", c)
 	}

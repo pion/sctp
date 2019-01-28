@@ -179,3 +179,21 @@ func TestReconfigChunk(t *testing.T) {
 		t.Error(errors.Errorf("unexpected stream identifier: %d", c.paramA.(*paramOutgoingResetRequest).streamIdentifiers[0]))
 	}
 }
+
+func TestForwardTSNChunk(t *testing.T) {
+	pkt := &packet{}
+	rawPkt := append([]byte{0x13, 0x88, 0x13, 0x88, 0xb6, 0xa5, 0x12, 0xe5, 0x1f, 0x9d, 0xa0, 0xfb}, testChunkForwardTSN...)
+	err := pkt.unmarshal(rawPkt)
+	if err != nil {
+		t.Error(errors.Wrap(err, "Unmarshal failed, has chunk"))
+	}
+
+	c, ok := pkt.chunks[0].(*chunkForwardTSN)
+	if !ok {
+		t.Error("Failed to cast Chunk -> Forward TSN")
+	}
+
+	if c.newCumulativeTSN != uint32(3) {
+		t.Errorf("unexpected New Cumulative TSN: %d", c.newCumulativeTSN)
+	}
+}
