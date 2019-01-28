@@ -91,6 +91,8 @@ func (p *packet) unmarshal(raw []byte) error {
 			c = &chunkSelectiveAck{}
 		case RECONFIG:
 			c = &chunkReconfig{}
+		case FORWARDTSN:
+			c = &chunkForwardTSN{}
 		default:
 			return errors.Errorf("Failed to unmarshal, contains unknown chunk type %s", chunkType(raw[offset]).String())
 		}
