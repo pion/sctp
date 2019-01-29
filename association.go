@@ -348,7 +348,7 @@ func setSupportedExtensions(init *chunkInitCommon) {
 	// extension MUST list the ASCONF, the ASCONF-ACK, and the AUTH chunks
 	// in its INIT and INIT-ACK parameters.
 	init.params = append(init.params, &paramSupportedExtensions{
-		ChunkTypes: []chunkType{RECONFIG},
+		ChunkTypes: []chunkType{RECONFIG, FORWARDTSN},
 	})
 }
 
