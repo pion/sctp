@@ -780,6 +780,12 @@ func (a *Association) handleChunk(p *packet, c chunk) ([]*packet, error) {
 			fmt.Printf("error cause: %s\n", e)
 		}
 
+	case *chunkError:
+		fmt.Println("Error chunk, with errors:")
+		for _, e := range c.errorCauses {
+			fmt.Printf("error cause: %s\n", e)
+		}
+
 	case *chunkHeartbeat:
 		hbi, ok := c.params[0].(*paramHeartbeatInfo)
 		if !ok {
