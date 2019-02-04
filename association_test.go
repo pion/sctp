@@ -8,9 +8,10 @@ import (
 	"time"
 
 	"github.com/pions/transport/test"
+	"github.com/stretchr/testify/assert"
 )
 
-func TestAssociationInit(t *testing.T) {
+func TestAssocInit(t *testing.T) {
 	rawPkt := []byte{0x13, 0x88, 0x13, 0x88, 0x00, 0x00, 0x00, 0x00, 0x81, 0x46, 0x9d, 0xfc, 0x01, 0x00, 0x00, 0x56, 0x55,
 		0xb9, 0x64, 0xa5, 0x00, 0x02, 0x00, 0x00, 0x04, 0x00, 0x08, 0x00, 0xe8, 0x6d, 0x10, 0x30, 0xc0, 0x00, 0x00, 0x04, 0x80,
 		0x08, 0x00, 0x09, 0xc0, 0x0f, 0xc1, 0x80, 0x82, 0x00, 0x00, 0x00, 0x80, 0x02, 0x00, 0x24, 0x9f, 0xeb, 0xbb, 0x5c, 0x50,
@@ -25,7 +26,7 @@ func TestAssociationInit(t *testing.T) {
 	}
 }
 
-func TestStressDuplex(t *testing.T) {
+func TestAssocStressDuplex(t *testing.T) {
 	// Limit runtime in case of deadlocks
 	lim := test.TimeOut(time.Second * 20)
 	defer lim.Stop()
@@ -223,4 +224,515 @@ func (c *dumbConn) SetReadDeadline(t time.Time) error {
 // SetWriteDeadline is a stub
 func (c *dumbConn) SetWriteDeadline(t time.Time) error {
 	return nil
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// testConn, connBridge for emulating dtls.Conn
+
+type testConn struct {
+	br     *connBridge
+	id     int
+	readCh chan []byte
+}
+
+func (conn *testConn) Read(b []byte) (int, error) {
+	select {
+	case data, ok := <-conn.readCh:
+		if !ok {
+			return 0, fmt.Errorf("testConn closed")
+		}
+		n := copy(b, data)
+		return n, nil
+	}
+}
+
+func (conn *testConn) Write(b []byte) (int, error) {
+	n := len(b)
+	conn.br.push(b, conn.id)
+	return n, nil
+}
+
+func (conn *testConn) Close() error {
+	close(conn.readCh)
+	return nil
+}
+
+// Unused
+func (conn *testConn) LocalAddr() net.Addr                { return nil }
+func (conn *testConn) RemoteAddr() net.Addr               { return nil }
+func (conn *testConn) SetDeadline(t time.Time) error      { return nil }
+func (conn *testConn) SetReadDeadline(t time.Time) error  { return nil }
+func (conn *testConn) SetWriteDeadline(t time.Time) error { return nil }
+
+type connBridge struct {
+	mutex sync.RWMutex
+	conn0 *testConn
+	conn1 *testConn
+
+	queue0to1 [][]byte
+	queue1to0 [][]byte
+}
+
+func inverse(s [][]byte) error {
+	if len(s) < 2 {
+		return fmt.Errorf("inverse requires more than on item in the array")
+	}
+
+	for i, j := 0, len(s)-1; i < j; i, j = i+1, j-1 {
+		s[i], s[j] = s[j], s[i]
+	}
+	return nil
+}
+
+func newConnBridge() *connBridge {
+	br := &connBridge{
+		queue0to1: make([][]byte, 0),
+		queue1to0: make([][]byte, 0),
+	}
+
+	br.conn0 = &testConn{
+		br:     br,
+		id:     0,
+		readCh: make(chan []byte),
+	}
+	br.conn1 = &testConn{
+		br:     br,
+		id:     1,
+		readCh: make(chan []byte),
+	}
+
+	return br
+}
+
+func (br *connBridge) push(d []byte, fromID int) {
+	br.mutex.Lock()
+	defer br.mutex.Unlock()
+
+	if fromID == 0 {
+		br.queue0to1 = append(br.queue0to1, d)
+	} else {
+		br.queue1to0 = append(br.queue1to0, d)
+	}
+}
+
+func (br *connBridge) reorder(fromID int) error {
+	br.mutex.Lock()
+	defer br.mutex.Unlock()
+
+	var err error
+
+	if fromID == 0 {
+		err = inverse(br.queue0to1)
+	} else {
+		err = inverse(br.queue1to0)
+	}
+
+	return err
+}
+
+func (br *connBridge) tick() int {
+	br.mutex.Lock()
+	defer br.mutex.Unlock()
+
+	var n int
+
+	if len(br.queue0to1) > 0 {
+		select {
+		case br.conn1.readCh <- br.queue0to1[0]:
+			n++
+			fmt.Printf("conn1 received data (%d bytes)\n", len(br.queue0to1[0]))
+			br.queue0to1 = br.queue0to1[1:]
+		default:
+		}
+	}
+
+	if len(br.queue1to0) > 0 {
+		select {
+		case br.conn0.readCh <- br.queue1to0[0]:
+			n++
+			fmt.Printf("conn0 received data (%d bytes)\n", len(br.queue1to0[0]))
+			br.queue1to0 = br.queue1to0[1:]
+		default:
+		}
+	}
+
+	if n > 0 {
+		fmt.Printf("tick: processed %d packet(s)\n", n)
+	}
+
+	return n
+}
+
+// Repeat tick() call until no more outstanding inflight packet
+func (br *connBridge) process() {
+	for {
+		time.Sleep(10 * time.Millisecond)
+		n := br.tick()
+		if n == 0 {
+			break
+		}
+	}
+}
+
+func createNewAssociationPair(br *connBridge) (*Association, *Association, error) {
+	var a0 *Association
+	var a1 *Association
+	var err error
+
+	handshake0Ch := make(chan bool)
+	handshake1Ch := make(chan bool)
+
+	go func() {
+		a0, err = Client(br.conn0)
+		handshake0Ch <- true
+	}()
+	go func() {
+		a1, err = Client(br.conn1)
+		handshake1Ch <- true
+	}()
+
+	a0handshakeDone := false
+	a1handshakeDone := false
+loop1:
+	for i := 0; i < 100; i++ {
+		time.Sleep(10 * time.Millisecond)
+		br.tick()
+
+		select {
+		case a0handshakeDone = <-handshake0Ch:
+			fmt.Println("a0 handshake complete")
+			if a1handshakeDone {
+				break loop1
+			}
+		case a1handshakeDone = <-handshake1Ch:
+			fmt.Println("a1 handshake complete")
+			if a0handshakeDone {
+				break loop1
+			}
+		default:
+		}
+	}
+
+	if err != nil {
+		return nil, nil, err
+	}
+	return a0, a1, nil
+}
+
+func closeAssociationPair(br *connBridge, a0, a1 *Association) error {
+	close0Ch := make(chan bool)
+	close1Ch := make(chan bool)
+
+	go func() {
+		fmt.Println("closing a0..")
+		a0.Close()
+		close0Ch <- true
+	}()
+	go func() {
+		fmt.Println("closing a1..")
+		a1.Close()
+		close1Ch <- true
+	}()
+
+	a0closed := false
+	a1closed := false
+loop1:
+	for i := 0; i < 100; i++ {
+		time.Sleep(10 * time.Millisecond)
+		br.tick()
+
+		select {
+		case a0closed = <-close0Ch:
+			fmt.Println("a0 closed")
+			if a1closed {
+				break loop1
+			}
+		case a1closed = <-close1Ch:
+			fmt.Println("a1 closed")
+			if a0closed {
+				break loop1
+			}
+		default:
+		}
+	}
+
+	return nil
+}
+
+func establishSessionPair(br *connBridge, a0, a1 *Association, si uint16) (*Stream, *Stream, error) {
+	helloMsg := "Hello" // mimic datachannel.channelOpen
+	s0, err := a0.OpenStream(si, PayloadTypeWebRTCBinary)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	_, err = s0.WriteSCTP([]byte(helloMsg), PayloadTypeWebRTCDCEP)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	br.process()
+
+	s1, err := a1.AcceptStream()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if s0.streamIdentifier != s1.streamIdentifier {
+		return nil, nil, fmt.Errorf("SI should match")
+	}
+
+	br.process()
+
+	buf := make([]byte, 1024)
+	n, ppi, err := s1.ReadSCTP(buf)
+	if err != nil {
+		return nil, nil, fmt.Errorf("faild to read data")
+	}
+
+	if n != len(helloMsg) {
+		return nil, nil, fmt.Errorf("received data must by 3 bytes")
+	}
+
+	if ppi != PayloadTypeWebRTCDCEP {
+		fmt.Errorf("unexpected ppi")
+	}
+
+	if string(buf[:n]) != helloMsg {
+		return nil, nil, fmt.Errorf("received data mismatch")
+	}
+
+	return s0, s1, nil
+}
+
+func TestAssocReliableSimple(t *testing.T) {
+	const si uint16 = 123
+	var err error
+	br := newConnBridge()
+
+	a0, a1, err := createNewAssociationPair(br)
+	if !assert.Nil(t, err, "failed to create associations") {
+		assert.FailNow(t, "failed due to earlier error")
+	}
+
+	s0, s1, err := establishSessionPair(br, a0, a1, si)
+	assert.Nil(t, err, "failed to establish session pair")
+
+	msg := "ABC"
+
+	n, err := s0.WriteSCTP([]byte(msg), PayloadTypeWebRTCBinary)
+	if err != nil {
+		assert.FailNow(t, "failed due to earlier error")
+	}
+	assert.Equal(t, n, len(msg), "unexpected length of received data")
+
+	br.process()
+
+	buf := make([]byte, 32)
+	n, ppi, err := s1.ReadSCTP(buf)
+	if !assert.Nil(t, err, "ReadSCTP failed") {
+		assert.FailNow(t, "failed due to earlier error")
+	}
+	assert.Equal(t, n, len(msg), "unexpected length of received data")
+	assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
+
+	br.process()
+	err = closeAssociationPair(br, a0, a1)
+}
+
+func TestAssocReliableOrdered(t *testing.T) {
+	const si uint16 = 123
+	var err error
+	var n int
+	var ppi PayloadProtocolIdentifier
+	br := newConnBridge()
+
+	a0, a1, err := createNewAssociationPair(br)
+	if !assert.Nil(t, err, "failed to create associations") {
+		assert.FailNow(t, "failed due to earlier error")
+	}
+
+	s0, s1, err := establishSessionPair(br, a0, a1, si)
+	assert.Nil(t, err, "failed to establish session pair")
+
+	msg1 := "ABC"
+	n, err = s0.WriteSCTP([]byte(msg1), PayloadTypeWebRTCBinary)
+	assert.Nil(t, err, "WriteSCTP failed")
+	assert.Equal(t, n, len(msg1), "unexpected length of received data")
+	msg2 := "DEFG"
+	n, err = s0.WriteSCTP([]byte(msg2), PayloadTypeWebRTCBinary)
+	assert.Nil(t, err, "WriteSCTP failed")
+	assert.Equal(t, n, len(msg2), "unexpected length of received data")
+
+	err = br.reorder(0)
+	assert.Nil(t, err, "reorder failed")
+	br.process()
+
+	buf := make([]byte, 32)
+
+	n, ppi, err = s1.ReadSCTP(buf)
+	if !assert.Nil(t, err, "ReadSCTP failed") {
+		assert.FailNow(t, "failed due to earlier error")
+	}
+	assert.Equal(t, n, len(msg1), "unexpected length of received data")
+	assert.Equal(t, msg1, string(buf[:n]), "unexpected received data")
+	assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
+
+	n, ppi, err = s1.ReadSCTP(buf)
+	if !assert.Nil(t, err, "ReadSCTP failed") {
+		assert.FailNow(t, "failed due to earlier error")
+	}
+	assert.Equal(t, n, len(msg2), "unexpected length of received data")
+	assert.Equal(t, msg2, string(buf[:n]), "unexpected received data")
+	assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
+
+	br.process()
+	err = closeAssociationPair(br, a0, a1)
+}
+
+func TestAssocReliableFragmented(t *testing.T) {
+	const si uint16 = 123
+	var err error
+	var n int
+	var ppi PayloadProtocolIdentifier
+	br := newConnBridge()
+
+	a0, a1, err := createNewAssociationPair(br)
+	if !assert.Nil(t, err, "failed to create associations") {
+		assert.FailNow(t, "failed due to earlier error")
+	}
+
+	s0, s1, err := establishSessionPair(br, a0, a1, si)
+	assert.Nil(t, err, "failed to establish session pair")
+
+	s0.SetReliabilityParams(false, ReliabilityTypeReliable, 0)
+	s1.SetReliabilityParams(false, ReliabilityTypeReliable, 0)
+
+	a0.myMaxMTU = 4
+
+	msg := "ABCDEFG"
+	n, err = s0.WriteSCTP([]byte(msg), PayloadTypeWebRTCBinary)
+	assert.Nil(t, err, "WriteSCTP failed")
+	assert.Equal(t, n, len(msg), "unexpected length of received data")
+
+	br.process()
+
+	buf := make([]byte, 32)
+
+	br.process()
+
+	n, ppi, err = s1.ReadSCTP(buf)
+	if !assert.Nil(t, err, "ReadSCTP failed") {
+		assert.FailNow(t, "failed due to earlier error")
+	}
+
+	assert.Equal(t, n, len(msg), "unexpected length of received data")
+	assert.Equal(t, msg, string(buf[:n]), "unexpected received data")
+	assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
+
+	br.process()
+	err = closeAssociationPair(br, a0, a1)
+}
+
+func TestAssocReliableFragmentsReordered(t *testing.T) {
+	const si uint16 = 123
+	var err error
+	var n int
+	var ppi PayloadProtocolIdentifier
+	br := newConnBridge()
+
+	a0, a1, err := createNewAssociationPair(br)
+	if !assert.Nil(t, err, "failed to create associations") {
+		assert.FailNow(t, "failed due to earlier error")
+	}
+
+	s0, s1, err := establishSessionPair(br, a0, a1, si)
+	assert.Nil(t, err, "failed to establish session pair")
+
+	s0.SetReliabilityParams(true, ReliabilityTypeReliable, 0)
+	s1.SetReliabilityParams(true, ReliabilityTypeReliable, 0)
+
+	a0.myMaxMTU = 4
+
+	msg := "ABCDEFG"
+	n, err = s0.WriteSCTP([]byte(msg), PayloadTypeWebRTCBinary)
+	assert.Nil(t, err, "WriteSCTP failed")
+	assert.Equal(t, n, len(msg), "unexpected length of received data")
+
+	err = br.reorder(0)
+	assert.Nil(t, err, "reorder failed")
+	br.process()
+
+	buf := make([]byte, 32)
+
+	br.process()
+
+	n, ppi, err = s1.ReadSCTP(buf)
+	if !assert.Nil(t, err, "ReadSCTP failed") {
+		assert.FailNow(t, "failed due to earlier error")
+	}
+
+	assert.Equal(t, n, len(msg), "unexpected length of received data")
+	assert.Equal(t, msg, string(buf[:n]), "unexpected received data")
+	assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
+
+	br.process()
+	err = closeAssociationPair(br, a0, a1)
+}
+
+func TestAssocReliableUnordered(t *testing.T) {
+	const si uint16 = 123
+	var err error
+	var n int
+	var ppi PayloadProtocolIdentifier
+	br := newConnBridge()
+
+	a0, a1, err := createNewAssociationPair(br)
+	if !assert.Nil(t, err, "failed to create associations") {
+		assert.FailNow(t, "failed due to earlier error")
+	}
+
+	s0, s1, err := establishSessionPair(br, a0, a1, si)
+	assert.Nil(t, err, "failed to establish session pair")
+
+	s0.SetReliabilityParams(true, ReliabilityTypeReliable, 0)
+	s1.SetReliabilityParams(true, ReliabilityTypeReliable, 0)
+
+	msg1 := "ABC"
+	n, err = s0.WriteSCTP([]byte(msg1), PayloadTypeWebRTCBinary)
+	assert.Nil(t, err, "WriteSCTP failed")
+	assert.Equal(t, n, len(msg1), "unexpected length of received data")
+	msg2 := "DEFG"
+	n, err = s0.WriteSCTP([]byte(msg2), PayloadTypeWebRTCBinary)
+	assert.Nil(t, err, "WriteSCTP failed")
+	assert.Equal(t, n, len(msg2), "unexpected length of received data")
+
+	err = br.reorder(0)
+	assert.Nil(t, err, "reorder failed")
+	br.process()
+
+	buf := make([]byte, 32)
+
+	n, ppi, err = s1.ReadSCTP(buf)
+	if !assert.Nil(t, err, "ReadSCTP failed") {
+		assert.FailNow(t, "failed due to earlier error")
+	}
+	fmt.Printf("First data received: %s\n", string(buf[:n]))
+	assert.Equal(t, n, len(msg2), "unexpected length of received data")
+	assert.Equal(t, msg2, string(buf[:n]), "unexpected received data")
+	assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
+
+	br.process()
+
+	n, ppi, err = s1.ReadSCTP(buf)
+	if !assert.Nil(t, err, "ReadSCTP failed") {
+		assert.FailNow(t, "failed due to earlier error")
+	}
+
+	assert.Equal(t, n, len(msg1), "unexpected length of received data")
+	assert.Equal(t, msg1, string(buf[:n]), "unexpected received data")
+	assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
+
+	br.process()
+	err = closeAssociationPair(br, a0, a1)
 }
