@@ -1,7 +1,6 @@
 package sctp
 
 import (
-	"io"
 	"math"
 	"sync"
 
@@ -89,18 +88,14 @@ func (s *Stream) Read(p []byte) (int, error) {
 func (s *Stream) ReadSCTP(p []byte) (int, PayloadProtocolIdentifier, error) {
 	for {
 		s.lock.Lock()
-		userData, ppi, ok := s.reassemblyQueue.pop() // TODO: pop into p?
+		n, ppi, err := s.reassemblyQueue.read(p)
 		s.lock.Unlock()
-		if ok {
-			n := copy(p, userData)
-			if n < len(userData) {
-				return n, ppi, io.ErrShortBuffer
-			}
+		if err == nil {
 			return n, ppi, nil
 		}
 
 		s.lock.RLock()
-		err := s.readErr
+		err = s.readErr
 		if err != nil {
 			s.lock.RUnlock()
 			return 0, PayloadProtocolIdentifier(0), err
@@ -117,9 +112,9 @@ func (s *Stream) ReadSCTP(p []byte) (int, PayloadProtocolIdentifier, error) {
 	}
 }
 
-func (s *Stream) handleData(pd *chunkPayloadData) {
+func (s *Stream) handleData(pdChunks []*chunkPayloadData) {
 	s.lock.Lock()
-	s.reassemblyQueue.push(pd)
+	s.reassemblyQueue.push(pdChunks)
 	s.lock.Unlock()
 
 	// Notify the reader asynchronously

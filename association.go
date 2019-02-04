@@ -431,27 +431,41 @@ func (a *Association) handleInitAck(p *packet, i *chunkInitAck) (*packet, error)
 
 // The caller should hold the lock.
 func (a *Association) handleData(d *chunkPayloadData) []*packet {
-	reply := make([]*packet, 0)
-
+	fmt.Printf("handleData: tsn=%d ssn=%d si=%d data=%v\n",
+		d.tsn,
+		d.streamSequenceNumber,
+		d.streamIdentifier,
+		d.userData)
 	a.payloadQueue.push(d, a.peerLastTSN)
 
-	pd, popOk := a.payloadQueue.pop(a.peerLastTSN + 1)
+	if chunks, ok := a.payloadQueue.getCompleteChunks(
+		d.streamIdentifier, d.streamSequenceNumber); ok {
 
+		fmt.Println("CmplChnks - was OK!!")
+		s := a.getOrCreateStream(d.streamIdentifier)
+		s.handleData(chunks)
+	} else {
+		fmt.Println("CmplChnks - wasn't ok")
+	}
+
+	reply := make([]*packet, 0)
+
+	// Advance peerLastTSN
+	_, popOk := a.payloadQueue.popComplete(a.peerLastTSN + 1)
 	for popOk {
-		s := a.getOrCreateStream(pd.streamIdentifier)
-		s.handleData(pd)
-
 		if a.ongoingResetRequest != nil &&
 			a.ongoingResetRequest.senderLastTSN < a.peerLastTSN {
 			resp := a.resetStreams()
 			if resp != nil {
+				fmt.Printf("RESET RESPONSE: %+v\n", resp)
 				reply = append(reply, resp)
 			}
 			break
 		}
 
 		a.peerLastTSN++
-		pd, popOk = a.payloadQueue.pop(a.peerLastTSN + 1)
+		fmt.Printf("discard tsn=%d\n", a.peerLastTSN)
+		_, popOk = a.payloadQueue.popComplete(a.peerLastTSN + 1)
 	}
 
 	outbound := &packet{}
