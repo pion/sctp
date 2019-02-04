@@ -8,6 +8,15 @@ import (
 	"github.com/pkg/errors"
 )
 
+const (
+	// ReliabilityTypeReliable is used for reliable transmission
+	ReliabilityTypeReliable byte = 0
+	// ReliabilityTypeRexmit is used for partial reliability by retransmission count
+	ReliabilityTypeRexmit byte = 1
+	// ReliabilityTypeTimed is used for partial reliability by retransmission duration
+	ReliabilityTypeTimed byte = 2
+)
+
 // Stream represents an SCTP stream
 type Stream struct {
 	association *Association
@@ -24,6 +33,10 @@ type Stream struct {
 
 	readErr  error
 	writeErr error
+
+	unordered        bool
+	reliabilityType  byte
+	reliabilityValue uint32
 }
 
 // StreamIdentifier returns the Stream identifier associated to the stream.
@@ -44,6 +57,22 @@ func (s *Stream) SetDefaultPayloadType(defaultPayloadType PayloadProtocolIdentif
 // setDefaultPayloadType sets the defaultPayloadType. The caller should hold the lock.
 func (s *Stream) setDefaultPayloadType(defaultPayloadType PayloadProtocolIdentifier) {
 	s.defaultPayloadType = defaultPayloadType
+}
+
+// SetReliabilityParams sets reliability parameters for this stream.
+func (s *Stream) SetReliabilityParams(unordered bool, relType byte, relVal uint32) {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+
+	s.setReliabilityParams(unordered, relType, relVal)
+}
+
+// setReliabilityParams sets reliability parameters for this stream.
+// The caller should hold the lock.
+func (s *Stream) setReliabilityParams(unordered bool, relType byte, relVal uint32) {
+	s.unordered = unordered
+	s.reliabilityType = relType
+	s.reliabilityValue = relVal
 }
 
 // Read reads a packet of len(p) bytes, dropping the Payload Protocol Identifier.
@@ -127,23 +156,35 @@ func (s *Stream) packetize(raw []byte, ppi PayloadProtocolIdentifier) []*chunkPa
 	i := uint16(0)
 	remaining := uint16(len(raw))
 
+	unordered := ppi != PayloadTypeWebRTCDCEP && s.unordered
+
 	var chunks []*chunkPayloadData
 	for remaining != 0 {
 		l := min(s.association.myMaxMTU, remaining)
-		chunks = append(chunks, &chunkPayloadData{
+		chunk := &chunkPayloadData{
 			streamIdentifier:     s.streamIdentifier,
 			userData:             raw[i : i+l],
+			unordered:            unordered,
 			beginingFragment:     i == 0,
 			endingFragment:       remaining-l == 0,
 			immediateSack:        false,
 			payloadType:          ppi,
 			streamSequenceNumber: s.sequenceNumber,
-		})
+		}
+
+		chunks = append(chunks, chunk)
+
 		remaining -= l
 		i += l
 	}
 
-	s.sequenceNumber++
+	// RFC 4960 Sec 6.6
+	// Note: When transmitting ordered and unordered data, an endpoint does
+	// not increment its Stream Sequence Number when transmitting a DATA
+	// chunk with U flag set to 1.
+	if !unordered {
+		s.sequenceNumber++
+	}
 
 	return chunks
 }
