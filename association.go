@@ -436,22 +436,18 @@ func (a *Association) handleData(d *chunkPayloadData) []*packet {
 		d.streamSequenceNumber,
 		d.streamIdentifier,
 		d.userData)
-	a.payloadQueue.push(d, a.peerLastTSN)
 
-	if chunks, ok := a.payloadQueue.getCompleteChunks(
-		d.streamIdentifier, d.streamSequenceNumber); ok {
-
-		fmt.Println("CmplChnks - was OK!!")
+	added := a.payloadQueue.push(d, a.peerLastTSN)
+	if added {
+		// Pass the new chunk to session level as soon as it arrives
 		s := a.getOrCreateStream(d.streamIdentifier)
-		s.handleData(chunks)
-	} else {
-		fmt.Println("CmplChnks - wasn't ok")
+		s.handleData(d)
 	}
 
 	reply := make([]*packet, 0)
 
-	// Advance peerLastTSN
-	_, popOk := a.payloadQueue.popComplete(a.peerLastTSN + 1)
+	// Try to advance peerLastTSN
+	_, popOk := a.payloadQueue.pop(a.peerLastTSN + 1)
 	for popOk {
 		if a.ongoingResetRequest != nil &&
 			a.ongoingResetRequest.senderLastTSN < a.peerLastTSN {
@@ -465,7 +461,7 @@ func (a *Association) handleData(d *chunkPayloadData) []*packet {
 
 		a.peerLastTSN++
 		fmt.Printf("discard tsn=%d\n", a.peerLastTSN)
-		_, popOk = a.payloadQueue.popComplete(a.peerLastTSN + 1)
+		_, popOk = a.payloadQueue.pop(a.peerLastTSN + 1)
 	}
 
 	outbound := &packet{}
