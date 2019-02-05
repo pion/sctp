@@ -54,10 +54,6 @@ type chunkPayloadData struct {
 	streamSequenceNumber uint16
 	payloadType          PayloadProtocolIdentifier
 	userData             []byte
-
-	// use by receiver. indicates whether this chunk has been processed and
-	// ok to be removed from payloadQueue.
-	complete bool
 }
 
 const (

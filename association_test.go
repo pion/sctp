@@ -275,7 +275,7 @@ type connBridge struct {
 
 func inverse(s [][]byte) error {
 	if len(s) < 2 {
-		return fmt.Errorf("inverse requires more than on item in the array")
+		return fmt.Errorf("inverse requires more than one item in the array")
 	}
 
 	for i, j := 0, len(s)-1; i < j; i, j = i+1, j-1 {

@@ -32,32 +32,23 @@ func (r *payloadQueue) pushNoCheck(p *chunkPayloadData) {
 	r.orderedPackets.sort()
 }
 
-func (r *payloadQueue) push(p *chunkPayloadData, cumulativeTSN uint32) {
+func (r *payloadQueue) push(p *chunkPayloadData, cumulativeTSN uint32) bool {
 	_, ok := r.orderedPackets.search(p.tsn)
 
 	// If the Data payload is already in our queue or older than our cumulativeTSN marker
 	if ok || p.tsn <= cumulativeTSN {
 		// Found the packet, log in dups
 		r.dupTSN = append(r.dupTSN, p.tsn)
-		return
+		return false
 	}
 
 	r.orderedPackets = append(r.orderedPackets, p)
 	r.orderedPackets.sort()
+	return true
 }
 
 func (r *payloadQueue) pop(tsn uint32) (*chunkPayloadData, bool) {
 	if len(r.orderedPackets) > 0 && tsn == r.orderedPackets[0].tsn {
-		pd := r.orderedPackets[0]
-		r.orderedPackets = r.orderedPackets[1:]
-		return pd, true
-	}
-
-	return nil, false
-}
-
-func (r *payloadQueue) popComplete(tsn uint32) (*chunkPayloadData, bool) {
-	if len(r.orderedPackets) > 0 && tsn == r.orderedPackets[0].tsn && r.orderedPackets[0].complete {
 		pd := r.orderedPackets[0]
 		r.orderedPackets = r.orderedPackets[1:]
 		return pd, true
@@ -108,52 +99,4 @@ func (r *payloadQueue) getGapAckBlocks(cumulativeTSN uint32) (gapAckBlocks []gap
 	})
 
 	return gapAckBlocks
-}
-
-func (r *payloadQueue) getCompleteChunks(si, ssn uint16) ([]*chunkPayloadData, bool) {
-	chunks := make([]*chunkPayloadData, 0)
-	ok := false
-	var lastTSN uint32
-	var n int
-	for _, p := range r.orderedPackets {
-		if p.streamIdentifier == si && p.streamSequenceNumber == ssn {
-			if n == 0 {
-				// Assume, the begining chunk
-				if !p.beginingFragment {
-					// begining fragment is missing
-					return chunks, false
-				}
-			} else {
-				// Fragments must have contiguous TSN
-				// From RFC 4960 Section 3.3.1:
-				//   When a user message is fragmented into multiple chunks, the TSNs are
-				//   used by the receiver to reassemble the message.  This means that the
-				//   TSNs for each fragment of a fragmented user message MUST be strictly
-				//   sequential.
-				if p.tsn != lastTSN+1 {
-					// mid or end fragment is missing
-					return chunks, false
-				}
-			}
-
-			chunks = append(chunks, p)
-
-			if p.endingFragment {
-				// begining fragment is missing
-				ok = true
-				break
-			}
-
-			n++
-			lastTSN = p.tsn
-		}
-	}
-
-	if ok {
-		for _, p := range chunks {
-			p.complete = true
-		}
-	}
-
-	return chunks, ok
 }

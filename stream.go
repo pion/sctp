@@ -112,13 +112,15 @@ func (s *Stream) ReadSCTP(p []byte) (int, PayloadProtocolIdentifier, error) {
 	}
 }
 
-func (s *Stream) handleData(pdChunks []*chunkPayloadData) {
+func (s *Stream) handleData(pd *chunkPayloadData) {
 	s.lock.Lock()
-	s.reassemblyQueue.push(pdChunks)
+	complete := s.reassemblyQueue.push(pd)
 	s.lock.Unlock()
 
-	// Notify the reader asynchronously
-	s.readNotifier.Signal()
+	// Notify the reader asynchronously if have complete set of chunks
+	if complete {
+		s.readNotifier.Signal()
+	}
 }
 
 // Write writes len(p) bytes from p with the default Payload Protocol Identifier
