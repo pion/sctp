@@ -284,6 +284,14 @@ func inverse(s [][]byte) error {
 	return nil
 }
 
+// drop n packets from the slice starting from offset
+func drop(s [][]byte, offset, n int) [][]byte {
+	if offset+n < len(s) {
+		n = len(s) - offset
+	}
+	return append(s[:offset], s[offset+n-1:]...)
+}
+
 func newConnBridge() *connBridge {
 	br := &connBridge{
 		queue0to1: make([][]byte, 0),
@@ -330,6 +338,17 @@ func (br *connBridge) reorder(fromID int) error {
 	return err
 }
 
+func (br *connBridge) drop(fromID, offset, n int) {
+	br.mutex.Lock()
+	defer br.mutex.Unlock()
+
+	if fromID == 0 {
+		br.queue0to1 = drop(br.queue0to1, offset, n)
+	} else {
+		br.queue1to0 = drop(br.queue1to0, offset, n)
+	}
+}
+
 func (br *connBridge) tick() int {
 	br.mutex.Lock()
 	defer br.mutex.Unlock()
@@ -340,7 +359,7 @@ func (br *connBridge) tick() int {
 		select {
 		case br.conn1.readCh <- br.queue0to1[0]:
 			n++
-			fmt.Printf("conn1 received data (%d bytes)\n", len(br.queue0to1[0]))
+			//fmt.Printf("conn1 received data (%d bytes)\n", len(br.queue0to1[0]))
 			br.queue0to1 = br.queue0to1[1:]
 		default:
 		}
@@ -350,15 +369,15 @@ func (br *connBridge) tick() int {
 		select {
 		case br.conn0.readCh <- br.queue1to0[0]:
 			n++
-			fmt.Printf("conn0 received data (%d bytes)\n", len(br.queue1to0[0]))
+			//fmt.Printf("conn0 received data (%d bytes)\n", len(br.queue1to0[0]))
 			br.queue1to0 = br.queue1to0[1:]
 		default:
 		}
 	}
 
-	if n > 0 {
-		fmt.Printf("tick: processed %d packet(s)\n", n)
-	}
+	//  if n > 0 {
+	//		fmt.Printf("tick: processed %d packet(s)\n", n)
+	//	}
 
 	return n
 }
@@ -400,12 +419,12 @@ loop1:
 
 		select {
 		case a0handshakeDone = <-handshake0Ch:
-			fmt.Println("a0 handshake complete")
+			//fmt.Println("a0 handshake complete")
 			if a1handshakeDone {
 				break loop1
 			}
 		case a1handshakeDone = <-handshake1Ch:
-			fmt.Println("a1 handshake complete")
+			//fmt.Println("a1 handshake complete")
 			if a0handshakeDone {
 				break loop1
 			}
@@ -424,12 +443,12 @@ func closeAssociationPair(br *connBridge, a0, a1 *Association) error {
 	close1Ch := make(chan bool)
 
 	go func() {
-		fmt.Println("closing a0..")
+		//fmt.Println("closing a0..")
 		a0.Close()
 		close0Ch <- true
 	}()
 	go func() {
-		fmt.Println("closing a1..")
+		//fmt.Println("closing a1..")
 		a1.Close()
 		close1Ch <- true
 	}()
@@ -443,12 +462,12 @@ loop1:
 
 		select {
 		case a0closed = <-close0Ch:
-			fmt.Println("a0 closed")
+			//fmt.Println("a0 closed")
 			if a1closed {
 				break loop1
 			}
 		case a1closed = <-close1Ch:
-			fmt.Println("a1 closed")
+			//fmt.Println("a1 closed")
 			if a0closed {
 				break loop1
 			}
@@ -505,234 +524,361 @@ func establishSessionPair(br *connBridge, a0, a1 *Association, si uint16) (*Stre
 	return s0, s1, nil
 }
 
-func TestAssocReliableSimple(t *testing.T) {
+func TestAssocReliable(t *testing.T) {
 	const si uint16 = 123
-	var err error
-	br := newConnBridge()
 
-	a0, a1, err := createNewAssociationPair(br)
-	if !assert.Nil(t, err, "failed to create associations") {
-		assert.FailNow(t, "failed due to earlier error")
-	}
+	t.Run("Simple", func(t *testing.T) {
+		br := newConnBridge()
 
-	s0, s1, err := establishSessionPair(br, a0, a1, si)
-	assert.Nil(t, err, "failed to establish session pair")
+		a0, a1, err := createNewAssociationPair(br)
+		if !assert.Nil(t, err, "failed to create associations") {
+			assert.FailNow(t, "failed due to earlier error")
+		}
 
-	msg := "ABC"
+		s0, s1, err := establishSessionPair(br, a0, a1, si)
+		assert.Nil(t, err, "failed to establish session pair")
 
-	n, err := s0.WriteSCTP([]byte(msg), PayloadTypeWebRTCBinary)
-	if err != nil {
-		assert.FailNow(t, "failed due to earlier error")
-	}
-	assert.Equal(t, n, len(msg), "unexpected length of received data")
+		msg := "ABC"
 
-	br.process()
+		n, err := s0.WriteSCTP([]byte(msg), PayloadTypeWebRTCBinary)
+		if err != nil {
+			assert.FailNow(t, "failed due to earlier error")
+		}
+		assert.Equal(t, n, len(msg), "unexpected length of received data")
 
-	buf := make([]byte, 32)
-	n, ppi, err := s1.ReadSCTP(buf)
-	if !assert.Nil(t, err, "ReadSCTP failed") {
-		assert.FailNow(t, "failed due to earlier error")
-	}
-	assert.Equal(t, n, len(msg), "unexpected length of received data")
-	assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
+		br.process()
 
-	br.process()
-	err = closeAssociationPair(br, a0, a1)
+		buf := make([]byte, 32)
+		n, ppi, err := s1.ReadSCTP(buf)
+		if !assert.Nil(t, err, "ReadSCTP failed") {
+			assert.FailNow(t, "failed due to earlier error")
+		}
+		assert.Equal(t, n, len(msg), "unexpected length of received data")
+		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
+
+		br.process()
+		err = closeAssociationPair(br, a0, a1)
+	})
+
+	t.Run("ordered reordered", func(t *testing.T) {
+		var n int
+		var ppi PayloadProtocolIdentifier
+		br := newConnBridge()
+
+		a0, a1, err := createNewAssociationPair(br)
+		if !assert.Nil(t, err, "failed to create associations") {
+			assert.FailNow(t, "failed due to earlier error")
+		}
+
+		s0, s1, err := establishSessionPair(br, a0, a1, si)
+		assert.Nil(t, err, "failed to establish session pair")
+
+		msg1 := "ABC"
+		n, err = s0.WriteSCTP([]byte(msg1), PayloadTypeWebRTCBinary)
+		assert.Nil(t, err, "WriteSCTP failed")
+		assert.Equal(t, n, len(msg1), "unexpected length of received data")
+		msg2 := "DEFG"
+		n, err = s0.WriteSCTP([]byte(msg2), PayloadTypeWebRTCBinary)
+		assert.Nil(t, err, "WriteSCTP failed")
+		assert.Equal(t, n, len(msg2), "unexpected length of received data")
+
+		err = br.reorder(0)
+		assert.Nil(t, err, "reorder failed")
+		br.process()
+
+		buf := make([]byte, 32)
+
+		n, ppi, err = s1.ReadSCTP(buf)
+		if !assert.Nil(t, err, "ReadSCTP failed") {
+			assert.FailNow(t, "failed due to earlier error")
+		}
+		assert.Equal(t, n, len(msg1), "unexpected length of received data")
+		assert.Equal(t, msg1, string(buf[:n]), "unexpected received data")
+		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
+
+		n, ppi, err = s1.ReadSCTP(buf)
+		if !assert.Nil(t, err, "ReadSCTP failed") {
+			assert.FailNow(t, "failed due to earlier error")
+		}
+		assert.Equal(t, n, len(msg2), "unexpected length of received data")
+		assert.Equal(t, msg2, string(buf[:n]), "unexpected received data")
+		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
+
+		br.process()
+		err = closeAssociationPair(br, a0, a1)
+	})
+
+	t.Run("ordered fragmentated then defragmented", func(t *testing.T) {
+		var n int
+		var ppi PayloadProtocolIdentifier
+		br := newConnBridge()
+
+		a0, a1, err := createNewAssociationPair(br)
+		if !assert.Nil(t, err, "failed to create associations") {
+			assert.FailNow(t, "failed due to earlier error")
+		}
+
+		s0, s1, err := establishSessionPair(br, a0, a1, si)
+		assert.Nil(t, err, "failed to establish session pair")
+
+		s0.SetReliabilityParams(false, ReliabilityTypeReliable, 0)
+		s1.SetReliabilityParams(false, ReliabilityTypeReliable, 0)
+
+		a0.myMaxMTU = 4
+
+		msg := "ABCDEFG"
+		n, err = s0.WriteSCTP([]byte(msg), PayloadTypeWebRTCBinary)
+		assert.Nil(t, err, "WriteSCTP failed")
+		assert.Equal(t, n, len(msg), "unexpected length of received data")
+
+		br.process()
+
+		buf := make([]byte, 32)
+
+		br.process()
+
+		n, ppi, err = s1.ReadSCTP(buf)
+		if !assert.Nil(t, err, "ReadSCTP failed") {
+			assert.FailNow(t, "failed due to earlier error")
+		}
+
+		assert.Equal(t, n, len(msg), "unexpected length of received data")
+		assert.Equal(t, msg, string(buf[:n]), "unexpected received data")
+		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
+
+		br.process()
+		err = closeAssociationPair(br, a0, a1)
+	})
+
+	t.Run("unordered fragmentated then defragmented", func(t *testing.T) {
+		var n int
+		var ppi PayloadProtocolIdentifier
+		br := newConnBridge()
+
+		a0, a1, err := createNewAssociationPair(br)
+		if !assert.Nil(t, err, "failed to create associations") {
+			assert.FailNow(t, "failed due to earlier error")
+		}
+
+		s0, s1, err := establishSessionPair(br, a0, a1, si)
+		assert.Nil(t, err, "failed to establish session pair")
+
+		s0.SetReliabilityParams(true, ReliabilityTypeReliable, 0)
+		s1.SetReliabilityParams(true, ReliabilityTypeReliable, 0)
+
+		a0.myMaxMTU = 4
+
+		msg := "ABCDEFG"
+		n, err = s0.WriteSCTP([]byte(msg), PayloadTypeWebRTCBinary)
+		assert.Nil(t, err, "WriteSCTP failed")
+		assert.Equal(t, n, len(msg), "unexpected length of received data")
+
+		err = br.reorder(0)
+		assert.Nil(t, err, "reorder failed")
+		br.process()
+
+		buf := make([]byte, 32)
+
+		br.process()
+
+		n, ppi, err = s1.ReadSCTP(buf)
+		if !assert.Nil(t, err, "ReadSCTP failed") {
+			assert.FailNow(t, "failed due to earlier error")
+		}
+
+		assert.Equal(t, n, len(msg), "unexpected length of received data")
+		assert.Equal(t, msg, string(buf[:n]), "unexpected received data")
+		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
+
+		br.process()
+		err = closeAssociationPair(br, a0, a1)
+	})
+
+	t.Run("unordered", func(t *testing.T) {
+		var n int
+		var ppi PayloadProtocolIdentifier
+		br := newConnBridge()
+
+		a0, a1, err := createNewAssociationPair(br)
+		if !assert.Nil(t, err, "failed to create associations") {
+			assert.FailNow(t, "failed due to earlier error")
+		}
+
+		s0, s1, err := establishSessionPair(br, a0, a1, si)
+		assert.Nil(t, err, "failed to establish session pair")
+
+		s0.SetReliabilityParams(true, ReliabilityTypeReliable, 0)
+		s1.SetReliabilityParams(true, ReliabilityTypeReliable, 0)
+
+		msg1 := "ABC"
+		n, err = s0.WriteSCTP([]byte(msg1), PayloadTypeWebRTCBinary)
+		assert.Nil(t, err, "WriteSCTP failed")
+		assert.Equal(t, n, len(msg1), "unexpected length of received data")
+		msg2 := "DEFG"
+		n, err = s0.WriteSCTP([]byte(msg2), PayloadTypeWebRTCBinary)
+		assert.Nil(t, err, "WriteSCTP failed")
+		assert.Equal(t, n, len(msg2), "unexpected length of received data")
+
+		err = br.reorder(0)
+		assert.Nil(t, err, "reorder failed")
+		br.process()
+
+		buf := make([]byte, 32)
+
+		n, ppi, err = s1.ReadSCTP(buf)
+		if !assert.Nil(t, err, "ReadSCTP failed") {
+			assert.FailNow(t, "failed due to earlier error")
+		}
+		fmt.Printf("First data received: %s\n", string(buf[:n]))
+		assert.Equal(t, n, len(msg2), "unexpected length of received data")
+		assert.Equal(t, msg2, string(buf[:n]), "unexpected received data")
+		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
+
+		br.process()
+
+		n, ppi, err = s1.ReadSCTP(buf)
+		if !assert.Nil(t, err, "ReadSCTP failed") {
+			assert.FailNow(t, "failed due to earlier error")
+		}
+
+		assert.Equal(t, n, len(msg1), "unexpected length of received data")
+		assert.Equal(t, msg1, string(buf[:n]), "unexpected received data")
+		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
+
+		br.process()
+		err = closeAssociationPair(br, a0, a1)
+	})
+
+	t.Run("retransmission", func(t *testing.T) {
+		var n int
+		var ppi PayloadProtocolIdentifier
+		br := newConnBridge()
+
+		a0, a1, err := createNewAssociationPair(br)
+		if !assert.Nil(t, err, "failed to create associations") {
+			assert.FailNow(t, "failed due to earlier error")
+		}
+
+		s0, s1, err := establishSessionPair(br, a0, a1, si)
+		assert.Nil(t, err, "failed to establish session pair")
+
+		msg1 := "ABC"
+		n, err = s0.WriteSCTP([]byte(msg1), PayloadTypeWebRTCBinary)
+		assert.Nil(t, err, "WriteSCTP failed")
+		assert.Equal(t, n, len(msg1), "unexpected length of received data")
+		msg2 := "DEFG"
+		n, err = s0.WriteSCTP([]byte(msg2), PayloadTypeWebRTCBinary)
+		assert.Nil(t, err, "WriteSCTP failed")
+		assert.Equal(t, n, len(msg2), "unexpected length of received data")
+
+		br.drop(0, 0, 1) // drop the first packet (second one should be sacked)
+		assert.Nil(t, err, "reorder failed")
+		br.process()
+
+		buf := make([]byte, 32)
+
+		n, ppi, err = s1.ReadSCTP(buf)
+		if !assert.Nil(t, err, "ReadSCTP failed") {
+			assert.FailNow(t, "failed due to earlier error")
+		}
+		assert.Equal(t, n, len(msg1), "unexpected length of received data")
+		assert.Equal(t, msg1, string(buf[:n]), "unexpected received data")
+		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
+
+		n, ppi, err = s1.ReadSCTP(buf)
+		if !assert.Nil(t, err, "ReadSCTP failed") {
+			assert.FailNow(t, "failed due to earlier error")
+		}
+		assert.Equal(t, n, len(msg2), "unexpected length of received data")
+		assert.Equal(t, msg2, string(buf[:n]), "unexpected received data")
+		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
+
+		br.process()
+		err = closeAssociationPair(br, a0, a1)
+	})
 }
 
-func TestAssocReliableOrdered(t *testing.T) {
-	const si uint16 = 123
-	var err error
-	var n int
-	var ppi PayloadProtocolIdentifier
-	br := newConnBridge()
+func TestCreateForwardTSN(t *testing.T) {
 
-	a0, a1, err := createNewAssociationPair(br)
-	if !assert.Nil(t, err, "failed to create associations") {
-		assert.FailNow(t, "failed due to earlier error")
-	}
+	t.Run("forward one abndoned", func(t *testing.T) {
+		conn := &testConn{
+			br:     nil,
+			id:     0,
+			readCh: nil,
+		}
 
-	s0, s1, err := establishSessionPair(br, a0, a1, si)
-	assert.Nil(t, err, "failed to establish session pair")
+		a := createAssocation(conn)
 
-	msg1 := "ABC"
-	n, err = s0.WriteSCTP([]byte(msg1), PayloadTypeWebRTCBinary)
-	assert.Nil(t, err, "WriteSCTP failed")
-	assert.Equal(t, n, len(msg1), "unexpected length of received data")
-	msg2 := "DEFG"
-	n, err = s0.WriteSCTP([]byte(msg2), PayloadTypeWebRTCBinary)
-	assert.Nil(t, err, "WriteSCTP failed")
-	assert.Equal(t, n, len(msg2), "unexpected length of received data")
+		a.cumulativeTSNAckPoint = 9
+		a.advancedPeerTSNAckPoint = 10
+		a.inflightQueue.pushNoCheck(&chunkPayloadData{
+			beginingFragment:     true,
+			endingFragment:       true,
+			tsn:                  10,
+			streamIdentifier:     1,
+			streamSequenceNumber: 2,
+			userData:             []byte("ABC"),
+			nSent:                1,
+			abandoned:            true,
+		})
 
-	err = br.reorder(0)
-	assert.Nil(t, err, "reorder failed")
-	br.process()
+		fwdtsn := a.createForwardTSN()
 
-	buf := make([]byte, 32)
+		assert.Equal(t, uint32(10), fwdtsn.newCumulativeTSN, "should be able to serialize")
+		assert.Equal(t, 1, len(fwdtsn.streams), "there should be one stream")
+		assert.Equal(t, uint16(1), fwdtsn.streams[0].identifier, "si should be 1")
+		assert.Equal(t, uint16(2), fwdtsn.streams[0].sequence, "ssn should be 2")
+	})
 
-	n, ppi, err = s1.ReadSCTP(buf)
-	if !assert.Nil(t, err, "ReadSCTP failed") {
-		assert.FailNow(t, "failed due to earlier error")
-	}
-	assert.Equal(t, n, len(msg1), "unexpected length of received data")
-	assert.Equal(t, msg1, string(buf[:n]), "unexpected received data")
-	assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
+	t.Run("forward two abndoned with the same SI", func(t *testing.T) {
+		conn := &testConn{
+			br:     nil,
+			id:     0,
+			readCh: nil,
+		}
 
-	n, ppi, err = s1.ReadSCTP(buf)
-	if !assert.Nil(t, err, "ReadSCTP failed") {
-		assert.FailNow(t, "failed due to earlier error")
-	}
-	assert.Equal(t, n, len(msg2), "unexpected length of received data")
-	assert.Equal(t, msg2, string(buf[:n]), "unexpected received data")
-	assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
+		a := createAssocation(conn)
 
-	br.process()
-	err = closeAssociationPair(br, a0, a1)
-}
+		a.cumulativeTSNAckPoint = 9
+		a.advancedPeerTSNAckPoint = 12
+		a.inflightQueue.pushNoCheck(&chunkPayloadData{
+			beginingFragment:     true,
+			endingFragment:       true,
+			tsn:                  10,
+			streamIdentifier:     1,
+			streamSequenceNumber: 2,
+			userData:             []byte("ABC"),
+			nSent:                1,
+			abandoned:            true,
+		})
+		a.inflightQueue.pushNoCheck(&chunkPayloadData{
+			beginingFragment:     true,
+			endingFragment:       true,
+			tsn:                  11,
+			streamIdentifier:     1,
+			streamSequenceNumber: 3,
+			userData:             []byte("DEF"),
+			nSent:                1,
+			abandoned:            true,
+		})
+		a.inflightQueue.pushNoCheck(&chunkPayloadData{
+			beginingFragment:     true,
+			endingFragment:       true,
+			tsn:                  12,
+			streamIdentifier:     2,
+			streamSequenceNumber: 1,
+			userData:             []byte("123"),
+			nSent:                1,
+			abandoned:            true,
+		})
 
-func TestAssocReliableFragmented(t *testing.T) {
-	const si uint16 = 123
-	var err error
-	var n int
-	var ppi PayloadProtocolIdentifier
-	br := newConnBridge()
+		fwdtsn := a.createForwardTSN()
 
-	a0, a1, err := createNewAssociationPair(br)
-	if !assert.Nil(t, err, "failed to create associations") {
-		assert.FailNow(t, "failed due to earlier error")
-	}
-
-	s0, s1, err := establishSessionPair(br, a0, a1, si)
-	assert.Nil(t, err, "failed to establish session pair")
-
-	s0.SetReliabilityParams(false, ReliabilityTypeReliable, 0)
-	s1.SetReliabilityParams(false, ReliabilityTypeReliable, 0)
-
-	a0.myMaxMTU = 4
-
-	msg := "ABCDEFG"
-	n, err = s0.WriteSCTP([]byte(msg), PayloadTypeWebRTCBinary)
-	assert.Nil(t, err, "WriteSCTP failed")
-	assert.Equal(t, n, len(msg), "unexpected length of received data")
-
-	br.process()
-
-	buf := make([]byte, 32)
-
-	br.process()
-
-	n, ppi, err = s1.ReadSCTP(buf)
-	if !assert.Nil(t, err, "ReadSCTP failed") {
-		assert.FailNow(t, "failed due to earlier error")
-	}
-
-	assert.Equal(t, n, len(msg), "unexpected length of received data")
-	assert.Equal(t, msg, string(buf[:n]), "unexpected received data")
-	assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
-
-	br.process()
-	err = closeAssociationPair(br, a0, a1)
-}
-
-func TestAssocReliableFragmentsReordered(t *testing.T) {
-	const si uint16 = 123
-	var err error
-	var n int
-	var ppi PayloadProtocolIdentifier
-	br := newConnBridge()
-
-	a0, a1, err := createNewAssociationPair(br)
-	if !assert.Nil(t, err, "failed to create associations") {
-		assert.FailNow(t, "failed due to earlier error")
-	}
-
-	s0, s1, err := establishSessionPair(br, a0, a1, si)
-	assert.Nil(t, err, "failed to establish session pair")
-
-	s0.SetReliabilityParams(true, ReliabilityTypeReliable, 0)
-	s1.SetReliabilityParams(true, ReliabilityTypeReliable, 0)
-
-	a0.myMaxMTU = 4
-
-	msg := "ABCDEFG"
-	n, err = s0.WriteSCTP([]byte(msg), PayloadTypeWebRTCBinary)
-	assert.Nil(t, err, "WriteSCTP failed")
-	assert.Equal(t, n, len(msg), "unexpected length of received data")
-
-	err = br.reorder(0)
-	assert.Nil(t, err, "reorder failed")
-	br.process()
-
-	buf := make([]byte, 32)
-
-	br.process()
-
-	n, ppi, err = s1.ReadSCTP(buf)
-	if !assert.Nil(t, err, "ReadSCTP failed") {
-		assert.FailNow(t, "failed due to earlier error")
-	}
-
-	assert.Equal(t, n, len(msg), "unexpected length of received data")
-	assert.Equal(t, msg, string(buf[:n]), "unexpected received data")
-	assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
-
-	br.process()
-	err = closeAssociationPair(br, a0, a1)
-}
-
-func TestAssocReliableUnordered(t *testing.T) {
-	const si uint16 = 123
-	var err error
-	var n int
-	var ppi PayloadProtocolIdentifier
-	br := newConnBridge()
-
-	a0, a1, err := createNewAssociationPair(br)
-	if !assert.Nil(t, err, "failed to create associations") {
-		assert.FailNow(t, "failed due to earlier error")
-	}
-
-	s0, s1, err := establishSessionPair(br, a0, a1, si)
-	assert.Nil(t, err, "failed to establish session pair")
-
-	s0.SetReliabilityParams(true, ReliabilityTypeReliable, 0)
-	s1.SetReliabilityParams(true, ReliabilityTypeReliable, 0)
-
-	msg1 := "ABC"
-	n, err = s0.WriteSCTP([]byte(msg1), PayloadTypeWebRTCBinary)
-	assert.Nil(t, err, "WriteSCTP failed")
-	assert.Equal(t, n, len(msg1), "unexpected length of received data")
-	msg2 := "DEFG"
-	n, err = s0.WriteSCTP([]byte(msg2), PayloadTypeWebRTCBinary)
-	assert.Nil(t, err, "WriteSCTP failed")
-	assert.Equal(t, n, len(msg2), "unexpected length of received data")
-
-	err = br.reorder(0)
-	assert.Nil(t, err, "reorder failed")
-	br.process()
-
-	buf := make([]byte, 32)
-
-	n, ppi, err = s1.ReadSCTP(buf)
-	if !assert.Nil(t, err, "ReadSCTP failed") {
-		assert.FailNow(t, "failed due to earlier error")
-	}
-	fmt.Printf("First data received: %s\n", string(buf[:n]))
-	assert.Equal(t, n, len(msg2), "unexpected length of received data")
-	assert.Equal(t, msg2, string(buf[:n]), "unexpected received data")
-	assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
-
-	br.process()
-
-	n, ppi, err = s1.ReadSCTP(buf)
-	if !assert.Nil(t, err, "ReadSCTP failed") {
-		assert.FailNow(t, "failed due to earlier error")
-	}
-
-	assert.Equal(t, n, len(msg1), "unexpected length of received data")
-	assert.Equal(t, msg1, string(buf[:n]), "unexpected received data")
-	assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
-
-	br.process()
-	err = closeAssociationPair(br, a0, a1)
+		assert.Equal(t, uint32(12), fwdtsn.newCumulativeTSN, "should be able to serialize")
+		assert.Equal(t, 2, len(fwdtsn.streams), "there should be one stream")
+		assert.Equal(t, uint16(1), fwdtsn.streams[0].identifier, "si should be 1")
+		assert.Equal(t, uint16(3), fwdtsn.streams[0].sequence, "ssn should be 3")
+		assert.Equal(t, uint16(2), fwdtsn.streams[1].identifier, "si should be 2")
+		assert.Equal(t, uint16(1), fwdtsn.streams[1].sequence, "ssn should be 1")
+	})
 }

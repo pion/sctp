@@ -94,7 +94,6 @@ type Association struct {
 	//ackState
 	//inboundStreams
 	//outboundStreams
-	//reassemblyQueue
 	//localTransportAddressList
 	//associationPTMU
 
@@ -104,16 +103,17 @@ type Association struct {
 	myNextRSN               uint32
 
 	// Non-RFC internal data
-	sourcePort                uint16
-	destinationPort           uint16
-	myMaxNumInboundStreams    uint16
-	myMaxNumOutboundStreams   uint16
-	myReceiverWindowCredit    uint32
-	myCookie                  *paramStateCookie
-	payloadQueue              *payloadQueue
-	inflightQueue             *payloadQueue
-	myMaxMTU                  uint16
-	peerCumulativeTSNAckPoint uint32
+	sourcePort              uint16
+	destinationPort         uint16
+	myMaxNumInboundStreams  uint16
+	myMaxNumOutboundStreams uint16
+	myReceiverWindowCredit  uint32
+	myCookie                *paramStateCookie
+	payloadQueue            *payloadQueue
+	inflightQueue           *payloadQueue
+	myMaxMTU                uint16
+	cumulativeTSNAckPoint   uint32
+	advancedPeerTSNAckPoint uint32
 
 	streams              map[uint16]*Stream
 	acceptCh             chan *Stream
@@ -155,22 +155,23 @@ func createAssocation(nextConn net.Conn) *Association {
 
 	tsn := r.Uint32()
 	return &Association{
-		nextConn:                  nextConn,
-		myMaxNumOutboundStreams:   math.MaxUint16,
-		myMaxNumInboundStreams:    math.MaxUint16,
-		myReceiverWindowCredit:    10 * 1500, // 10 Max MTU packets buffer
-		payloadQueue:              &payloadQueue{},
-		inflightQueue:             &payloadQueue{},
-		myMaxMTU:                  1200,
-		myVerificationTag:         r.Uint32(),
-		myNextTSN:                 tsn,
-		myNextRSN:                 tsn,
-		state:                     open,
-		streams:                   make(map[uint16]*Stream),
-		acceptCh:                  make(chan *Stream),
-		doneCh:                    make(chan struct{}),
-		handshakeCompletedCh:      make(chan struct{}),
-		peerCumulativeTSNAckPoint: tsn - 1,
+		nextConn:                nextConn,
+		myMaxNumOutboundStreams: math.MaxUint16,
+		myMaxNumInboundStreams:  math.MaxUint16,
+		myReceiverWindowCredit:  10 * 1500, // 10 Max MTU packets buffer
+		payloadQueue:            &payloadQueue{},
+		inflightQueue:           &payloadQueue{},
+		myMaxMTU:                1200,
+		myVerificationTag:       r.Uint32(),
+		myNextTSN:               tsn,
+		myNextRSN:               tsn,
+		state:                   open,
+		streams:                 make(map[uint16]*Stream),
+		acceptCh:                make(chan *Stream),
+		doneCh:                  make(chan struct{}),
+		handshakeCompletedCh:    make(chan struct{}),
+		cumulativeTSNAckPoint:   tsn - 1,
+		advancedPeerTSNAckPoint: tsn - 1,
 	}
 }
 
@@ -431,11 +432,13 @@ func (a *Association) handleInitAck(p *packet, i *chunkInitAck) (*packet, error)
 
 // The caller should hold the lock.
 func (a *Association) handleData(d *chunkPayloadData) []*packet {
-	fmt.Printf("handleData: tsn=%d ssn=%d si=%d data=%v\n",
-		d.tsn,
-		d.streamSequenceNumber,
-		d.streamIdentifier,
-		d.userData)
+	/*
+		fmt.Printf("handleData: tsn=%d ssn=%d si=%d data=%v\n",
+			d.tsn,
+			d.streamSequenceNumber,
+			d.streamIdentifier,
+			d.userData)
+	*/
 
 	added := a.payloadQueue.push(d, a.peerLastTSN)
 	if added {
@@ -510,7 +513,7 @@ func (a *Association) createStream(streamIdentifier uint16, accept bool) *Stream
 	s := &Stream{
 		association:      a,
 		streamIdentifier: streamIdentifier,
-		reassemblyQueue:  &reassemblyQueue{},
+		reassemblyQueue:  newReassemblyQueue(streamIdentifier),
 		readNotifier:     sync.NewCond(&sync.Mutex{}),
 	}
 
@@ -541,38 +544,100 @@ func (a *Association) handleSack(d *chunkSelectiveAck) ([]*packet, error) {
 	// order SACK.
 
 	// This is an old SACK, toss
-	if a.peerCumulativeTSNAckPoint > d.cumulativeTSNAck {
+	if a.cumulativeTSNAckPoint > d.cumulativeTSNAck {
 		return nil, errors.Errorf("SACK Cumulative ACK %v is older than ACK point %v",
-			d.cumulativeTSNAck, a.peerCumulativeTSNAckPoint)
+			d.cumulativeTSNAck, a.cumulativeTSNAckPoint)
 	}
 
 	// New ack point, so pop all ACKed packets from inflightQueue
 	// We add 1 because the "currentAckPoint" has already been popped from the inflight queue
 	// For the first SACK we take care of this by setting the ackpoint to cumAck - 1
-	for i := a.peerCumulativeTSNAckPoint + 1; i <= d.cumulativeTSNAck; i++ {
-		_, ok := a.inflightQueue.pop(i)
-		if !ok {
+	for i := a.cumulativeTSNAckPoint + 1; i <= d.cumulativeTSNAck; i++ {
+		if _, ok := a.inflightQueue.pop(i); !ok {
 			return nil, errors.Errorf("TSN %v unable to be popped from inflight queue", i)
 		}
 	}
 
-	a.peerCumulativeTSNAckPoint = d.cumulativeTSNAck
+	a.cumulativeTSNAckPoint = d.cumulativeTSNAck
 
-	var sackDataPackets []*packet
-	var prevEnd uint16
+	// Mark selectively acknowledged chunks as "acked"
 	for _, g := range d.gapAckBlocks {
-		for i := prevEnd + 1; i < g.start; i++ {
-			pp, ok := a.inflightQueue.get(d.cumulativeTSNAck + uint32(i))
+		for i := g.start; i <= g.end; i++ {
+			c, ok := a.inflightQueue.get(d.cumulativeTSNAck + uint32(i))
 			if !ok {
 				return nil, errors.Errorf("Requested non-existent TSN %v", d.cumulativeTSNAck+uint32(i))
 			}
 
-			sackDataPackets = append(sackDataPackets, a.createPacket([]chunk{pp}))
+			fmt.Printf("tsn=%d has been sacked\n", c.tsn)
+			c.acked = true
 		}
-		prevEnd = g.end
 	}
 
-	return sackDataPackets, nil
+	// RFC 3758 Sec 3.5 C1
+	if a.advancedPeerTSNAckPoint < a.cumulativeTSNAckPoint {
+		a.advancedPeerTSNAckPoint = a.cumulativeTSNAckPoint
+	}
+
+	// RFC 3758 Sec 3.5 C2
+	for i := a.advancedPeerTSNAckPoint + 1; ; i++ {
+		c, ok := a.inflightQueue.get(i)
+		if !ok {
+			break
+		}
+		if !c.abandoned {
+			break
+		}
+		a.advancedPeerTSNAckPoint = i
+	}
+
+	// RFC 3758 Sec 3.5 C3
+	var fwdtsn *chunkForwardTSN
+	if a.advancedPeerTSNAckPoint > a.cumulativeTSNAckPoint {
+		fwdtsn = a.createForwardTSN()
+	}
+
+	packets := []*packet{}
+	if fwdtsn != nil {
+		packets = append(packets, a.createPacket([]chunk{fwdtsn}))
+	}
+
+	// TODO: this should be trigged by T3-rtx timer
+	packets = append(packets, a.getPayloadDataToSend(false)...)
+	return packets, nil
+}
+
+func (a *Association) createForwardTSN() *chunkForwardTSN {
+	// RFC 3758 Sec 3.5 C4
+	streamMap := map[uint16]uint16{} // to report only once per SI
+	for i := a.cumulativeTSNAckPoint + 1; i <= a.advancedPeerTSNAckPoint; i++ {
+		c, ok := a.inflightQueue.get(i)
+		if !ok {
+			break
+		}
+		ssn, ok := streamMap[c.streamIdentifier]
+		if !ok {
+			streamMap[c.streamIdentifier] = c.streamSequenceNumber
+		} else {
+			// to report only once with greatest SSN
+			if ssn < c.streamSequenceNumber {
+				streamMap[c.streamIdentifier] = c.streamSequenceNumber
+			}
+		}
+	}
+
+	fwdtsn := &chunkForwardTSN{
+		newCumulativeTSN: a.advancedPeerTSNAckPoint,
+		streams:          []chunkForwardTSNStream{},
+	}
+
+	for si, ssn := range streamMap {
+		fwdtsn.streams = append(fwdtsn.streams, chunkForwardTSNStream{
+			identifier: si,
+			sequence:   ssn,
+		})
+	}
+
+	return fwdtsn
 }
 
 // createPacket wraps chunks in a packet.
@@ -607,6 +672,67 @@ func (a *Association) handleReconfig(c *chunkReconfig) ([]*packet, error) {
 		}
 	}
 	return pp, nil
+}
+
+func (a *Association) handleForwardTSN(c *chunkForwardTSN) []*packet {
+	// From RFC 3758 Sec 3.6:
+	//   the receiver MUST perform the same TSN handling, including duplicate
+	//   detection, gap detection, SACK generation, cumulative TSN
+	//   advancement, etc. as defined in RFC 2960 [2]---with the following
+	//   exceptions and additions.
+
+	//   When a FORWARD TSN chunk arrives, the data receiver MUST first update
+	//   its cumulative TSN point to the value carried in the FORWARD TSN
+	//   chunk,
+
+	// Advance peerLastTSN
+	for a.peerLastTSN < c.newCumulativeTSN {
+		a.payloadQueue.pop(a.peerLastTSN + 1) // may not exist
+		a.peerLastTSN++
+	}
+
+	// From RFC 3758 Sec 3.6:
+	//   .. and then MUST further advance its cumulative TSN point locally
+	//   if possible
+	// Meaning, if peerLastTSN+1 points to a chunk that is received,
+	// advance peerLastTSN until peerLastTSN+1 points to unreceived chunk.
+	_, popOk := a.payloadQueue.pop(a.peerLastTSN + 1) // may not exist
+	for popOk {
+		a.peerLastTSN++
+		_, popOk = a.payloadQueue.pop(a.peerLastTSN + 1)
+	}
+
+	// Report new peerLastTSN value and abandoned largest SSN value to
+	// corresponding streams so that the abandoned streams can be removed
+	// from the reassemblyQueue.
+	for _, forwarded := range c.streams {
+		if s, ok := a.streams[forwarded.identifier]; ok {
+			s.handleForwardTSN(c.newCumulativeTSN, forwarded.sequence)
+		}
+	}
+
+	// From RFC 3758 Sec 3.6:
+	//   Note, if the "New Cumulative TSN" value carried in the arrived
+	//   FORWARD TSN chunk is found to be behind or at the current cumulative
+	//   TSN point, the data receiver MUST treat this FORWARD TSN as out-of-
+	//   date and MUST NOT update its Cumulative TSN.  The receiver SHOULD
+	//   send a SACK to its peer (the sender of the FORWARD TSN) since such a
+	//   duplicate may indicate the previous SACK was lost in the network.
+
+	outbound := &packet{}
+	outbound.verificationTag = a.peerVerificationTag
+	outbound.sourcePort = a.sourcePort
+	outbound.destinationPort = a.destinationPort
+
+	sack := &chunkSelectiveAck{}
+
+	sack.cumulativeTSNAck = a.peerLastTSN
+	sack.advertisedReceiverWindowCredit = a.myReceiverWindowCredit
+	sack.duplicateTSN = a.payloadQueue.popDuplicates()
+	sack.gapAckBlocks = a.payloadQueue.getGapAckBlocks(a.peerLastTSN)
+	outbound.chunks = []chunk{sack}
+
+	return []*packet{outbound}
 }
 
 func (a *Association) sendResetRequest(streamIdentifier uint16) error {
@@ -680,22 +806,21 @@ func (a *Association) resetStreams() *packet {
 
 // sendPayloadData sends the data chunks.
 func (a *Association) sendPayloadData(chunks []*chunkPayloadData) error {
-	packets := []*packet{}
-
 	a.lock.Lock()
 	for _, c := range chunks {
 		c.tsn = a.generateNextTSN()
 
-		// TODO: FIX THIS HACK, inflightQueue uses PayloadQueue which is really meant for inbound SACK generation
-		a.inflightQueue.pushNoCheck(c)
+		// Primarily for PR-SCTP timed partial-reliability. Timestamp all anyway.
+		c.since = time.Now()
 
-		p := &packet{
-			sourcePort:      a.sourcePort,
-			destinationPort: a.destinationPort,
-			verificationTag: a.peerVerificationTag,
-			chunks:          []chunk{c}}
-		packets = append(packets, p)
+		// TODO: FIX THIS HACK, inflightQueue uses PayloadQueue which is
+		// really meant for inbound SACK generation
+		a.inflightQueue.pushNoCheck(c)
 	}
+
+	// TODO: Once T3-rtx becomes available, we should only call this if T3-rtx has not
+	// been started.
+	packets := a.getPayloadDataToSend(true)
 	a.lock.Unlock()
 
 	for _, p := range packets {
@@ -705,6 +830,52 @@ func (a *Association) sendPayloadData(chunks []*chunkPayloadData) error {
 	}
 
 	return nil
+}
+
+// getPayloadDataToSend updates chunk status and returns a list of packets we can send.
+// The caller should hold the lock.
+func (a *Association) getPayloadDataToSend(onlyUnsent bool) []*packet {
+	var packets []*packet
+	for i := 0; ; i++ {
+		d, ok := a.inflightQueue.get(a.cumulativeTSNAckPoint + uint32(i) + 1)
+		if !ok {
+			break // end of pending data
+		}
+
+		// Remove this when T3-rtx becomes available
+		if onlyUnsent && d.nSent > 0 {
+			continue
+		}
+
+		if d.acked || d.abandoned {
+			continue
+		}
+
+		// PR-SCTP
+		if s, ok := a.streams[d.streamIdentifier]; ok {
+			if s.reliabilityType == ReliabilityTypeRexmit {
+				if d.nSent > s.reliabilityValue {
+					d.abandoned = true
+					continue
+				}
+			} else if s.reliabilityType == ReliabilityTypeTimed {
+				if int64(time.Since(d.since).Seconds()*1000) > int64(s.reliabilityValue) {
+					d.abandoned = true
+					continue
+				}
+			}
+		}
+
+		// TODO: aggregate chunks into a packet as many as the MTU allows
+		// TODO: use congestion window to determine how much we should send
+
+		fmt.Printf("sending tsn=%d sent=%d\n", d.tsn, d.nSent)
+
+		d.nSent++
+		packets = append(packets, a.createPacket([]chunk{d}))
+	}
+
+	return packets
 }
 
 // generateNextTSN returns the myNextTSN and increases it. The caller should hold the lock.
@@ -856,6 +1027,9 @@ func (a *Association) handleChunk(p *packet, c chunk) ([]*packet, error) {
 			return nil, errors.Wrap(err, "failure handling reconfig")
 		}
 		return p, nil
+
+	case *chunkForwardTSN:
+		return a.handleForwardTSN(c), nil
 
 	default:
 		return nil, errors.New("unhandled chunk type")

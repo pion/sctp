@@ -123,6 +123,14 @@ func (s *Stream) handleData(pd *chunkPayloadData) {
 	}
 }
 
+func (s *Stream) handleForwardTSN(newCumulativeTSN uint32, ssn uint16) {
+	s.lock.Lock()
+	// Remove all chunks older than or equal to the new TSN from
+	// the reassemblyQueue.
+	s.reassemblyQueue.onForwardTSN(newCumulativeTSN, s.unordered, ssn)
+	defer s.lock.Unlock()
+}
+
 // Write writes len(p) bytes from p with the default Payload Protocol Identifier
 func (s *Stream) Write(p []byte) (n int, err error) {
 	return s.WriteSCTP(p, s.defaultPayloadType)
@@ -153,6 +161,9 @@ func (s *Stream) packetize(raw []byte, ppi PayloadProtocolIdentifier) []*chunkPa
 	i := uint16(0)
 	remaining := uint16(len(raw))
 
+	// From draft-ietf-rtcweb-data-protocol-09, section 6:
+	//   All Data Channel Establishment Protocol messages MUST be sent using
+	//   ordered delivery and reliable transmission.
 	unordered := ppi != PayloadTypeWebRTCDCEP && s.unordered
 
 	var chunks []*chunkPayloadData
