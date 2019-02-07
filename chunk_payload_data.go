@@ -3,6 +3,7 @@ package sctp
 import (
 	"encoding/binary"
 	"fmt"
+	"time"
 )
 
 /*
@@ -54,6 +55,14 @@ type chunkPayloadData struct {
 	streamSequenceNumber uint16
 	payloadType          PayloadProtocolIdentifier
 	userData             []byte
+
+	// Whether this data chunk was acknowledged (received by peer)
+	acked bool
+
+	// Partial-reliability parameters used only by sender
+	since     time.Time
+	nSent     uint32 // number of transmission made for this chunk
+	abandoned bool
 }
 
 const (

@@ -20,7 +20,7 @@ func sortChunksBySSN(a []*chunkSet) {
 
 // chunkSet is a set of chunks that share the same SSN
 type chunkSet struct {
-	ssn    uint16 // no significance with unordered chunks
+	ssn    uint16 // used only with the ordered chunks
 	ppi    PayloadProtocolIdentifier
 	chunks []*chunkPayloadData
 }
@@ -96,14 +96,16 @@ func (set *chunkSet) isComplete() bool {
 }
 
 type reassemblyQueue struct {
+	si              uint16
 	nextSSN         uint16 // expected SSN for next ordered chunk
 	ordered         []*chunkSet
 	unordered       []*chunkSet
 	unorderedChunks []*chunkPayloadData
 }
 
-func newReassemblyQueue() *reassemblyQueue {
+func newReassemblyQueue(si uint16) *reassemblyQueue {
 	return &reassemblyQueue{
+		si:        si,
 		ordered:   make([]*chunkSet, 0),
 		unordered: make([]*chunkSet, 0),
 	}
@@ -111,6 +113,11 @@ func newReassemblyQueue() *reassemblyQueue {
 
 func (r *reassemblyQueue) push(chunk *chunkPayloadData) bool {
 	var cset *chunkSet
+
+	if chunk.streamIdentifier != r.si {
+		fmt.Printf("SI[%d]: pushed chunk for wrong SI %d != %d\n", r.si, chunk.streamIdentifier, r.si)
+		return false
+	}
 
 	if chunk.unordered {
 		// First, insert into unorderedChunks array
@@ -126,6 +133,15 @@ func (r *reassemblyQueue) push(chunk *chunkPayloadData) bool {
 			return true
 		}
 
+		return false
+	}
+
+	// This is an ordered chunk
+
+	//fmt.Printf("SI[%d]: push SSN %d Next SSN=%d\n", r.si, chunk.streamSequenceNumber, r.nextSSN)
+
+	if chunk.streamSequenceNumber < r.nextSSN {
+		fmt.Printf("SI[%d]: ignore stale SSN %d < %d\n", r.si, chunk.streamSequenceNumber, r.nextSSN)
 		return false
 	}
 
@@ -216,11 +232,17 @@ func (r *reassemblyQueue) read(buf []byte) (int, PayloadProtocolIdentifier, erro
 	} else if len(r.ordered) > 0 {
 		// Now, check ordered
 		cset = r.ordered[0]
+		if !cset.isComplete() {
+			fmt.Printf("SI[%d]: SSN %d in not ready. Next SSN=%d\n", r.si, cset.ssn, r.nextSSN)
+			return 0, 0, fmt.Errorf("try again")
+		}
 		if cset.ssn != r.nextSSN {
+			fmt.Printf("SI[%d]: SSN %d blocked. Next SSN=%d\n", r.si, cset.ssn, r.nextSSN)
 			return 0, 0, fmt.Errorf("try again")
 		}
 		r.ordered = r.ordered[1:]
 		r.nextSSN++
+		//fmt.Printf("SI[%d]: read SSN=%d, nextSSN=%d\n", r.si, cset.ssn, r.nextSSN)
 	} else {
 		return 0, 0, fmt.Errorf("try again")
 	}
@@ -237,4 +259,39 @@ func (r *reassemblyQueue) read(buf []byte) (int, PayloadProtocolIdentifier, erro
 	}
 
 	return nWritten, ppi, nil
+}
+
+func (r *reassemblyQueue) onForwardTSN(newCumulativeTSN uint32, unordered bool, lastSSN uint16) {
+	if unordered {
+		// This stream is configured to use unordered data. (The given SSN
+		// has no significance)
+		// Remove all fragments in the unordered sets that contains chunks
+		// equal to or older than `newCumulativeTSN`.
+		// We know all sets in the r.unordered are complete ones.
+		// Just remove chunks from unorderedChunks
+		lastIdx := -1
+		for i, c := range r.unorderedChunks {
+			if c.tsn > newCumulativeTSN {
+				break
+			}
+			lastIdx = i
+		}
+		if lastIdx >= 0 {
+			r.unorderedChunks = r.unorderedChunks[lastIdx+1:]
+		}
+	} else {
+		// This stream is configured to use ordered data.
+		// Use lastSSN to locate a chunkSet then remove it if the set has
+		// not been complete
+		keep := []*chunkSet{}
+		for _, set := range r.ordered {
+			if set.ssn <= lastSSN {
+				if !set.isComplete() {
+					continue // drop
+				}
+			}
+			keep = append(keep, set)
+		}
+		r.ordered = keep
+	}
 }
