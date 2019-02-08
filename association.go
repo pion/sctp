@@ -453,7 +453,7 @@ func (a *Association) handleData(d *chunkPayloadData) []*packet {
 	_, popOk := a.payloadQueue.pop(a.peerLastTSN + 1)
 	for popOk {
 		if a.ongoingResetRequest != nil &&
-			a.ongoingResetRequest.senderLastTSN < a.peerLastTSN {
+			sna32LT(a.ongoingResetRequest.senderLastTSN, a.peerLastTSN) {
 			resp := a.resetStreams()
 			if resp != nil {
 				fmt.Printf("RESET RESPONSE: %+v\n", resp)
@@ -544,7 +544,7 @@ func (a *Association) handleSack(d *chunkSelectiveAck) ([]*packet, error) {
 	// order SACK.
 
 	// This is an old SACK, toss
-	if a.cumulativeTSNAckPoint > d.cumulativeTSNAck {
+	if sna32GT(a.cumulativeTSNAckPoint, d.cumulativeTSNAck) {
 		return nil, errors.Errorf("SACK Cumulative ACK %v is older than ACK point %v",
 			d.cumulativeTSNAck, a.cumulativeTSNAckPoint)
 	}
@@ -552,7 +552,7 @@ func (a *Association) handleSack(d *chunkSelectiveAck) ([]*packet, error) {
 	// New ack point, so pop all ACKed packets from inflightQueue
 	// We add 1 because the "currentAckPoint" has already been popped from the inflight queue
 	// For the first SACK we take care of this by setting the ackpoint to cumAck - 1
-	for i := a.cumulativeTSNAckPoint + 1; i <= d.cumulativeTSNAck; i++ {
+	for i := a.cumulativeTSNAckPoint + 1; sna32LTE(i, d.cumulativeTSNAck); i++ {
 		if _, ok := a.inflightQueue.pop(i); !ok {
 			return nil, errors.Errorf("TSN %v unable to be popped from inflight queue", i)
 		}
@@ -574,7 +574,7 @@ func (a *Association) handleSack(d *chunkSelectiveAck) ([]*packet, error) {
 	}
 
 	// RFC 3758 Sec 3.5 C1
-	if a.advancedPeerTSNAckPoint < a.cumulativeTSNAckPoint {
+	if sna32LT(a.advancedPeerTSNAckPoint, a.cumulativeTSNAckPoint) {
 		a.advancedPeerTSNAckPoint = a.cumulativeTSNAckPoint
 	}
 
@@ -592,7 +592,7 @@ func (a *Association) handleSack(d *chunkSelectiveAck) ([]*packet, error) {
 
 	// RFC 3758 Sec 3.5 C3
 	var fwdtsn *chunkForwardTSN
-	if a.advancedPeerTSNAckPoint > a.cumulativeTSNAckPoint {
+	if sna32GT(a.advancedPeerTSNAckPoint, a.cumulativeTSNAckPoint) {
 		fwdtsn = a.createForwardTSN()
 	}
 
@@ -609,7 +609,7 @@ func (a *Association) handleSack(d *chunkSelectiveAck) ([]*packet, error) {
 func (a *Association) createForwardTSN() *chunkForwardTSN {
 	// RFC 3758 Sec 3.5 C4
 	streamMap := map[uint16]uint16{} // to report only once per SI
-	for i := a.cumulativeTSNAckPoint + 1; i <= a.advancedPeerTSNAckPoint; i++ {
+	for i := a.cumulativeTSNAckPoint + 1; sna32LTE(i, a.advancedPeerTSNAckPoint); i++ {
 		c, ok := a.inflightQueue.get(i)
 		if !ok {
 			break
@@ -619,7 +619,7 @@ func (a *Association) createForwardTSN() *chunkForwardTSN {
 			streamMap[c.streamIdentifier] = c.streamSequenceNumber
 		} else {
 			// to report only once with greatest SSN
-			if ssn < c.streamSequenceNumber {
+			if sna16LT(ssn, c.streamSequenceNumber) {
 				streamMap[c.streamIdentifier] = c.streamSequenceNumber
 			}
 		}
@@ -686,7 +686,7 @@ func (a *Association) handleForwardTSN(c *chunkForwardTSN) []*packet {
 	//   chunk,
 
 	// Advance peerLastTSN
-	for a.peerLastTSN < c.newCumulativeTSN {
+	for sna32LT(a.peerLastTSN, c.newCumulativeTSN) {
 		a.payloadQueue.pop(a.peerLastTSN + 1) // may not exist
 		a.peerLastTSN++
 	}
@@ -703,7 +703,7 @@ func (a *Association) handleForwardTSN(c *chunkForwardTSN) []*packet {
 	}
 
 	// Report new peerLastTSN value and abandoned largest SSN value to
-	// corresponding streams so that the abandoned streams can be removed
+	// corresponding streams so that the abandoned chunks can be removed
 	// from the reassemblyQueue.
 	for _, forwarded := range c.streams {
 		if s, ok := a.streams[forwarded.identifier]; ok {
@@ -783,7 +783,7 @@ func (a *Association) handleReconfigParam(raw param) (*packet, error) {
 func (a *Association) resetStreams() *packet {
 	result := reconfigResultSuccessPerformed
 	p := a.ongoingResetRequest
-	if p.senderLastTSN <= a.peerLastTSN {
+	if sna32LTE(p.senderLastTSN, a.peerLastTSN) {
 		for _, id := range p.streamIdentifiers {
 			s, ok := a.streams[id]
 			if !ok {

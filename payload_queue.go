@@ -8,7 +8,7 @@ type payloadDataArray []*chunkPayloadData
 
 func (s payloadDataArray) search(tsn uint32) (*chunkPayloadData, bool) {
 	i := sort.Search(len(s), func(i int) bool {
-		return s[i].tsn >= tsn
+		return sna32GTE(s[i].tsn, tsn)
 	})
 
 	if i < len(s) && s[i].tsn == tsn {
@@ -19,7 +19,7 @@ func (s payloadDataArray) search(tsn uint32) (*chunkPayloadData, bool) {
 }
 
 func (s payloadDataArray) sort() {
-	sort.Slice(s, func(i, j int) bool { return s[i].tsn < s[j].tsn })
+	sort.Slice(s, func(i, j int) bool { return sna32LT(s[i].tsn, s[j].tsn) })
 }
 
 type payloadQueue struct {
@@ -36,7 +36,7 @@ func (r *payloadQueue) push(p *chunkPayloadData, cumulativeTSN uint32) bool {
 	_, ok := r.orderedPackets.search(p.tsn)
 
 	// If the Data payload is already in our queue or older than our cumulativeTSN marker
-	if ok || p.tsn <= cumulativeTSN {
+	if ok || sna32LTE(p.tsn, cumulativeTSN) {
 		// Found the packet, log in dups
 		r.dupTSN = append(r.dupTSN, p.tsn)
 		return false

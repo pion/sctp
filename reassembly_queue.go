@@ -8,13 +8,13 @@ import (
 
 func sortChunksByTSN(a []*chunkPayloadData) {
 	sort.Slice(a, func(i, j int) bool {
-		return a[i].tsn < a[j].tsn
+		return sna32LT(a[i].tsn, a[j].tsn)
 	})
 }
 
 func sortChunksBySSN(a []*chunkSet) {
 	sort.Slice(a, func(i, j int) bool {
-		return a[i].ssn < a[j].ssn
+		return sna16LT(a[i].ssn, a[j].ssn)
 	})
 }
 
@@ -140,7 +140,7 @@ func (r *reassemblyQueue) push(chunk *chunkPayloadData) bool {
 
 	//fmt.Printf("SI[%d]: push SSN %d Next SSN=%d\n", r.si, chunk.streamSequenceNumber, r.nextSSN)
 
-	if chunk.streamSequenceNumber < r.nextSSN {
+	if sna16LT(chunk.streamSequenceNumber, r.nextSSN) {
 		fmt.Printf("SI[%d]: ignore stale SSN %d < %d\n", r.si, chunk.streamSequenceNumber, r.nextSSN)
 		return false
 	}
@@ -271,7 +271,7 @@ func (r *reassemblyQueue) onForwardTSN(newCumulativeTSN uint32, unordered bool, 
 		// Just remove chunks from unorderedChunks
 		lastIdx := -1
 		for i, c := range r.unorderedChunks {
-			if c.tsn > newCumulativeTSN {
+			if sna32GT(c.tsn, newCumulativeTSN) {
 				break
 			}
 			lastIdx = i
@@ -285,7 +285,7 @@ func (r *reassemblyQueue) onForwardTSN(newCumulativeTSN uint32, unordered bool, 
 		// not been complete
 		keep := []*chunkSet{}
 		for _, set := range r.ordered {
-			if set.ssn <= lastSSN {
+			if sna16LTE(set.ssn, lastSSN) {
 				if !set.isComplete() {
 					continue // drop
 				}
