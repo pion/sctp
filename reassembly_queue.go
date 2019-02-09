@@ -104,8 +104,14 @@ type reassemblyQueue struct {
 }
 
 func newReassemblyQueue(si uint16) *reassemblyQueue {
+	// From RFC 4960 Sec 6.5:
+	//   The Stream Sequence Number in all the streams MUST start from 0 when
+	//   the association is established.  Also, when the Stream Sequence
+	//   Number reaches the value 65535 the next Stream Sequence Number MUST
+	//   be set to 0.
 	return &reassemblyQueue{
 		si:        si,
+		nextSSN:   0, // From RFC 4960 Sec 6.5:
 		ordered:   make([]*chunkSet, 0),
 		unordered: make([]*chunkSet, 0),
 	}
@@ -222,9 +228,27 @@ func (r *reassemblyQueue) findCompleteUnorderedChunkSet() *chunkSet {
 	return chunkSet
 }
 
+func (r *reassemblyQueue) isReadable() bool {
+	// Check unordered first
+	if len(r.unordered) > 0 {
+		// The chunk sets in r.unordered should all be complete.
+		return true
+	}
+
+	// Check ordered sets
+	if len(r.ordered) > 0 {
+		cset := r.ordered[0]
+		if cset.isComplete() {
+			if sna16LTE(cset.ssn, r.nextSSN) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (r *reassemblyQueue) read(buf []byte) (int, PayloadProtocolIdentifier, error) {
 	var cset *chunkSet
-
 	// Check unordered first
 	if len(r.unordered) > 0 {
 		cset = r.unordered[0]
@@ -236,12 +260,14 @@ func (r *reassemblyQueue) read(buf []byte) (int, PayloadProtocolIdentifier, erro
 			fmt.Printf("SI[%d]: SSN %d in not ready. Next SSN=%d\n", r.si, cset.ssn, r.nextSSN)
 			return 0, 0, fmt.Errorf("try again")
 		}
-		if cset.ssn != r.nextSSN {
+		if sna16GT(cset.ssn, r.nextSSN) {
 			fmt.Printf("SI[%d]: SSN %d blocked. Next SSN=%d\n", r.si, cset.ssn, r.nextSSN)
 			return 0, 0, fmt.Errorf("try again")
 		}
 		r.ordered = r.ordered[1:]
-		r.nextSSN++
+		if cset.ssn == r.nextSSN {
+			r.nextSSN++
+		}
 		//fmt.Printf("SI[%d]: read SSN=%d, nextSSN=%d\n", r.si, cset.ssn, r.nextSSN)
 	} else {
 		return 0, 0, fmt.Errorf("try again")
@@ -261,7 +287,7 @@ func (r *reassemblyQueue) read(buf []byte) (int, PayloadProtocolIdentifier, erro
 	return nWritten, ppi, nil
 }
 
-func (r *reassemblyQueue) onForwardTSN(newCumulativeTSN uint32, unordered bool, lastSSN uint16) {
+func (r *reassemblyQueue) forwardTSN(newCumulativeTSN uint32, unordered bool, lastSSN uint16) {
 	if unordered {
 		// This stream is configured to use unordered data. (The given SSN
 		// has no significance)
@@ -293,5 +319,10 @@ func (r *reassemblyQueue) onForwardTSN(newCumulativeTSN uint32, unordered bool, 
 			keep = append(keep, set)
 		}
 		r.ordered = keep
+
+		// Finally, forward nextSSN
+		if sna16LTE(r.nextSSN, lastSSN) {
+			r.nextSSN = lastSSN + 1
+		}
 	}
 }

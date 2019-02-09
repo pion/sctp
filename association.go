@@ -114,6 +114,7 @@ type Association struct {
 	myMaxMTU                uint16
 	cumulativeTSNAckPoint   uint32
 	advancedPeerTSNAckPoint uint32
+	useForwardTSN           bool
 
 	streams              map[uint16]*Stream
 	acceptCh             chan *Stream
@@ -415,6 +416,12 @@ func (a *Association) handleInitAck(p *packet, i *chunkInitAck) (*packet, error)
 		switch v := param.(type) {
 		case *paramStateCookie:
 			cookieParam = v
+		case *paramSupportedExtensions:
+			for _, t := range v.ChunkTypes {
+				if t == FORWARDTSN {
+					a.useForwardTSN = true
+				}
+			}
 		}
 	}
 	if cookieParam == nil {
@@ -432,14 +439,6 @@ func (a *Association) handleInitAck(p *packet, i *chunkInitAck) (*packet, error)
 
 // The caller should hold the lock.
 func (a *Association) handleData(d *chunkPayloadData) []*packet {
-	/*
-		fmt.Printf("handleData: tsn=%d ssn=%d si=%d data=%v\n",
-			d.tsn,
-			d.streamSequenceNumber,
-			d.streamIdentifier,
-			d.userData)
-	*/
-
 	added := a.payloadQueue.push(d, a.peerLastTSN)
 	if added {
 		// Pass the new chunk to session level as soon as it arrives
@@ -573,32 +572,35 @@ func (a *Association) handleSack(d *chunkSelectiveAck) ([]*packet, error) {
 		}
 	}
 
-	// RFC 3758 Sec 3.5 C1
-	if sna32LT(a.advancedPeerTSNAckPoint, a.cumulativeTSNAckPoint) {
-		a.advancedPeerTSNAckPoint = a.cumulativeTSNAckPoint
-	}
-
-	// RFC 3758 Sec 3.5 C2
-	for i := a.advancedPeerTSNAckPoint + 1; ; i++ {
-		c, ok := a.inflightQueue.get(i)
-		if !ok {
-			break
-		}
-		if !c.abandoned {
-			break
-		}
-		a.advancedPeerTSNAckPoint = i
-	}
-
-	// RFC 3758 Sec 3.5 C3
-	var fwdtsn *chunkForwardTSN
-	if sna32GT(a.advancedPeerTSNAckPoint, a.cumulativeTSNAckPoint) {
-		fwdtsn = a.createForwardTSN()
-	}
-
 	packets := []*packet{}
-	if fwdtsn != nil {
-		packets = append(packets, a.createPacket([]chunk{fwdtsn}))
+
+	if a.useForwardTSN {
+		// RFC 3758 Sec 3.5 C1
+		if sna32LT(a.advancedPeerTSNAckPoint, a.cumulativeTSNAckPoint) {
+			a.advancedPeerTSNAckPoint = a.cumulativeTSNAckPoint
+		}
+
+		// RFC 3758 Sec 3.5 C2
+		for i := a.advancedPeerTSNAckPoint + 1; ; i++ {
+			c, ok := a.inflightQueue.get(i)
+			if !ok {
+				break
+			}
+			if !c.abandoned {
+				break
+			}
+			a.advancedPeerTSNAckPoint = i
+		}
+
+		// RFC 3758 Sec 3.5 C3
+		var fwdtsn *chunkForwardTSN
+		if sna32GT(a.advancedPeerTSNAckPoint, a.cumulativeTSNAckPoint) {
+			fwdtsn = a.createForwardTSN()
+		}
+
+		if fwdtsn != nil {
+			packets = append(packets, a.createPacket([]chunk{fwdtsn}))
+		}
 	}
 
 	// TODO: this should be trigged by T3-rtx timer
@@ -606,6 +608,8 @@ func (a *Association) handleSack(d *chunkSelectiveAck) ([]*packet, error) {
 	return packets, nil
 }
 
+// createForwardTSN generates ForwardTSN chunk.
+// This method will be be called if useForwardTSN is set to false.
 func (a *Association) createForwardTSN() *chunkForwardTSN {
 	// RFC 3758 Sec 3.5 C4
 	streamMap := map[uint16]uint16{} // to report only once per SI
@@ -614,6 +618,11 @@ func (a *Association) createForwardTSN() *chunkForwardTSN {
 		if !ok {
 			break
 		}
+		if c.acked {
+			continue
+		}
+
+		fmt.Printf("building fwdtsn: si=%d ssn=%d tsn=%d acked=%v\n", c.streamIdentifier, c.streamSequenceNumber, c.tsn, c.acked)
 		ssn, ok := streamMap[c.streamIdentifier]
 		if !ok {
 			streamMap[c.streamIdentifier] = c.streamSequenceNumber
@@ -675,6 +684,19 @@ func (a *Association) handleReconfig(c *chunkReconfig) ([]*packet, error) {
 }
 
 func (a *Association) handleForwardTSN(c *chunkForwardTSN) []*packet {
+	fmt.Printf("handleForward: %s\n", c.String())
+
+	if !a.useForwardTSN {
+		// Return an error chunk
+		// TODO: marshaling error chunk isn't supported yet :(
+		/*
+			cerr := &chunkError{
+				errorCauses: []errorCause{errorCauseUnrecognizedChunkType{}},
+			}
+		*/
+		return []*packet{}
+	}
+
 	// From RFC 3758 Sec 3.6:
 	//   the receiver MUST perform the same TSN handling, including duplicate
 	//   detection, gap detection, SACK generation, cumulative TSN
@@ -851,17 +873,22 @@ func (a *Association) getPayloadDataToSend(onlyUnsent bool) []*packet {
 			continue
 		}
 
-		// PR-SCTP
-		if s, ok := a.streams[d.streamIdentifier]; ok {
-			if s.reliabilityType == ReliabilityTypeRexmit {
-				if d.nSent > s.reliabilityValue {
-					d.abandoned = true
-					continue
-				}
-			} else if s.reliabilityType == ReliabilityTypeTimed {
-				if int64(time.Since(d.since).Seconds()*1000) > int64(s.reliabilityValue) {
-					d.abandoned = true
-					continue
+		d.nSent++
+
+		if a.useForwardTSN {
+			// PR-SCTP
+			if s, ok := a.streams[d.streamIdentifier]; ok {
+				if s.reliabilityType == ReliabilityTypeRexmit {
+					if d.nSent >= s.reliabilityValue {
+						d.abandoned = true
+						fmt.Printf("final (abandoned) tsn=%d (remix: %d)\n", d.tsn, d.nSent)
+					}
+				} else if s.reliabilityType == ReliabilityTypeTimed {
+					elapsed := int64(time.Since(d.since).Seconds() * 1000)
+					if elapsed >= int64(s.reliabilityValue) {
+						d.abandoned = true
+						fmt.Printf("final (abandoned) tsn=%d (timed: %d)\n", d.tsn, elapsed)
+					}
 				}
 			}
 		}
@@ -869,9 +896,8 @@ func (a *Association) getPayloadDataToSend(onlyUnsent bool) []*packet {
 		// TODO: aggregate chunks into a packet as many as the MTU allows
 		// TODO: use congestion window to determine how much we should send
 
-		fmt.Printf("sending tsn=%d sent=%d\n", d.tsn, d.nSent)
+		fmt.Printf("sending tsn=%d ssn=%d sent=%d\n", d.tsn, d.streamSequenceNumber, d.nSent)
 
-		d.nSent++
 		packets = append(packets, a.createPacket([]chunk{d}))
 	}
 

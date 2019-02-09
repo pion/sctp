@@ -96,7 +96,10 @@ func (c *chunkForwardTSN) check() (abort bool, err error) {
 
 // String makes chunkForwardTSN printable
 func (c *chunkForwardTSN) String() string {
-	res := fmt.Sprintf("New Cumulative TSN: %d", c.newCumulativeTSN)
+	res := fmt.Sprintf("New Cumulative TSN: %d\n", c.newCumulativeTSN)
+	for _, s := range c.streams {
+		res += fmt.Sprintf(" - si=%d, ssn=%d\n", s.identifier, s.sequence)
+	}
 	return res
 }
 
