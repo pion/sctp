@@ -55,7 +55,7 @@ func (set *chunkSet) isComplete() bool {
 	//   0. Has at least one chunk.
 	//   1. Begins with beginingFragment set to true
 	//   2. Ends with endingFragment set to true
-	//   3. TSN monotinically increase by 1 from begining to end
+	//   3. TSN monotinically increase by 1 from beginning to end
 
 	// 0.
 	nChunks := len(set.chunks)
