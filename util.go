@@ -1,9 +1,5 @@
 package sctp
 
-import (
-//"fmt"
-)
-
 const (
 	paddingMultiple = 4
 )

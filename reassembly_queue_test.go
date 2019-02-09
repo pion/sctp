@@ -458,7 +458,7 @@ func TestChunkSet(t *testing.T) {
 		cset := &chunkSet{
 			ssn:    0,
 			ppi:    0,
-			chunks: []*chunkPayloadData{&chunkPayloadData{}},
+			chunks: []*chunkPayloadData{{}},
 		}
 		assert.False(t, cset.isComplete(),
 			"chunkSet not starting with B=1 cannot be complete")
@@ -469,14 +469,14 @@ func TestChunkSet(t *testing.T) {
 			ssn: 0,
 			ppi: 0,
 			chunks: []*chunkPayloadData{
-				&chunkPayloadData{
+				{
 					tsn:              100,
 					beginingFragment: true,
 				},
-				&chunkPayloadData{
+				{
 					tsn: 101,
 				},
-				&chunkPayloadData{
+				{
 					tsn:            103,
 					endingFragment: true,
 				},

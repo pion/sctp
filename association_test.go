@@ -236,14 +236,11 @@ type testConn struct {
 }
 
 func (conn *testConn) Read(b []byte) (int, error) {
-	select {
-	case data, ok := <-conn.readCh:
-		if !ok {
-			return 0, fmt.Errorf("testConn closed")
-		}
+	if data, ok := <-conn.readCh; ok {
 		n := copy(b, data)
 		return n, nil
 	}
+	return 0, fmt.Errorf("testConn closed")
 }
 
 func (conn *testConn) Write(b []byte) (int, error) {
@@ -338,6 +335,7 @@ func (br *connBridge) reorder(fromID int) error {
 	return err
 }
 
+//nolint:unparam
 func (br *connBridge) drop(fromID, offset, n int) {
 	br.mutex.Lock()
 	defer br.mutex.Unlock()
@@ -446,17 +444,19 @@ loop1:
 	return a0, a1, nil
 }
 
-func closeAssociationPair(br *connBridge, a0, a1 *Association) error {
+func closeAssociationPair(br *connBridge, a0, a1 *Association) {
 	close0Ch := make(chan bool)
 	close1Ch := make(chan bool)
 
 	go func() {
 		//fmt.Println("closing a0..")
+		//nolint:errcheck,gosec
 		a0.Close()
 		close0Ch <- true
 	}()
 	go func() {
 		//fmt.Println("closing a1..")
+		//nolint:errcheck,gosec
 		a1.Close()
 		close1Ch <- true
 	}()
@@ -482,8 +482,6 @@ loop1:
 		default:
 		}
 	}
-
-	return nil
 }
 
 func establishSessionPair(br *connBridge, a0, a1 *Association, si uint16) (*Stream, *Stream, error) {
@@ -522,7 +520,7 @@ func establishSessionPair(br *connBridge, a0, a1 *Association, si uint16) (*Stre
 	}
 
 	if ppi != PayloadTypeWebRTCDCEP {
-		fmt.Errorf("unexpected ppi")
+		return nil, nil, fmt.Errorf("unexpected ppi")
 	}
 
 	if string(buf[:n]) != helloMsg {
@@ -536,6 +534,7 @@ func TestAssocReliable(t *testing.T) {
 
 	t.Run("Simple", func(t *testing.T) {
 		const si uint16 = 1
+		const msg = "ABC"
 		br := newConnBridge()
 
 		a0, a1, err := createNewAssociationPair(br)
@@ -545,8 +544,6 @@ func TestAssocReliable(t *testing.T) {
 
 		s0, s1, err := establishSessionPair(br, a0, a1, si)
 		assert.Nil(t, err, "failed to establish session pair")
-
-		msg := "ABC"
 
 		n, err := s0.WriteSCTP([]byte(msg), PayloadTypeWebRTCBinary)
 		if err != nil {
@@ -565,11 +562,13 @@ func TestAssocReliable(t *testing.T) {
 		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
 
 		br.process()
-		err = closeAssociationPair(br, a0, a1)
+		closeAssociationPair(br, a0, a1)
 	})
 
 	t.Run("ordered reordered", func(t *testing.T) {
 		const si uint16 = 2
+		const msg1 = "ABC"
+		const msg2 = "DEFG"
 		var n int
 		var ppi PayloadProtocolIdentifier
 		br := newConnBridge()
@@ -582,11 +581,9 @@ func TestAssocReliable(t *testing.T) {
 		s0, s1, err := establishSessionPair(br, a0, a1, si)
 		assert.Nil(t, err, "failed to establish session pair")
 
-		msg1 := "ABC"
 		n, err = s0.WriteSCTP([]byte(msg1), PayloadTypeWebRTCBinary)
 		assert.Nil(t, err, "WriteSCTP failed")
 		assert.Equal(t, n, len(msg1), "unexpected length of received data")
-		msg2 := "DEFG"
 		n, err = s0.WriteSCTP([]byte(msg2), PayloadTypeWebRTCBinary)
 		assert.Nil(t, err, "WriteSCTP failed")
 		assert.Equal(t, n, len(msg2), "unexpected length of received data")
@@ -614,11 +611,12 @@ func TestAssocReliable(t *testing.T) {
 		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
 
 		br.process()
-		err = closeAssociationPair(br, a0, a1)
+		closeAssociationPair(br, a0, a1)
 	})
 
 	t.Run("ordered fragmentated then defragmented", func(t *testing.T) {
 		const si uint16 = 3
+		const msg = "ABCDEFG"
 		var n int
 		var ppi PayloadProtocolIdentifier
 		br := newConnBridge()
@@ -636,7 +634,6 @@ func TestAssocReliable(t *testing.T) {
 
 		a0.myMaxMTU = 4
 
-		msg := "ABCDEFG"
 		n, err = s0.WriteSCTP([]byte(msg), PayloadTypeWebRTCBinary)
 		assert.Nil(t, err, "WriteSCTP failed")
 		assert.Equal(t, n, len(msg), "unexpected length of received data")
@@ -657,11 +654,12 @@ func TestAssocReliable(t *testing.T) {
 		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
 
 		br.process()
-		err = closeAssociationPair(br, a0, a1)
+		closeAssociationPair(br, a0, a1)
 	})
 
 	t.Run("unordered fragmentated then defragmented", func(t *testing.T) {
 		const si uint16 = 4
+		const msg = "ABCDEFG"
 		var n int
 		var ppi PayloadProtocolIdentifier
 		br := newConnBridge()
@@ -679,7 +677,6 @@ func TestAssocReliable(t *testing.T) {
 
 		a0.myMaxMTU = 4
 
-		msg := "ABCDEFG"
 		n, err = s0.WriteSCTP([]byte(msg), PayloadTypeWebRTCBinary)
 		assert.Nil(t, err, "WriteSCTP failed")
 		assert.Equal(t, n, len(msg), "unexpected length of received data")
@@ -702,11 +699,13 @@ func TestAssocReliable(t *testing.T) {
 		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
 
 		br.process()
-		err = closeAssociationPair(br, a0, a1)
+		closeAssociationPair(br, a0, a1)
 	})
 
 	t.Run("unordered", func(t *testing.T) {
 		const si uint16 = 5
+		const msg1 = "ABC"
+		const msg2 = "DEFG"
 		var n int
 		var ppi PayloadProtocolIdentifier
 		br := newConnBridge()
@@ -722,11 +721,9 @@ func TestAssocReliable(t *testing.T) {
 		s0.SetReliabilityParams(true, ReliabilityTypeReliable, 0)
 		s1.SetReliabilityParams(true, ReliabilityTypeReliable, 0)
 
-		msg1 := "ABC"
 		n, err = s0.WriteSCTP([]byte(msg1), PayloadTypeWebRTCBinary)
 		assert.Nil(t, err, "WriteSCTP failed")
 		assert.Equal(t, n, len(msg1), "unexpected length of received data")
-		msg2 := "DEFG"
 		n, err = s0.WriteSCTP([]byte(msg2), PayloadTypeWebRTCBinary)
 		assert.Nil(t, err, "WriteSCTP failed")
 		assert.Equal(t, n, len(msg2), "unexpected length of received data")
@@ -758,11 +755,13 @@ func TestAssocReliable(t *testing.T) {
 		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
 
 		br.process()
-		err = closeAssociationPair(br, a0, a1)
+		closeAssociationPair(br, a0, a1)
 	})
 
 	t.Run("retransmission", func(t *testing.T) {
 		const si uint16 = 6
+		const msg1 = "ABC"
+		const msg2 = "DEFG"
 		var n int
 		var ppi PayloadProtocolIdentifier
 		br := newConnBridge()
@@ -775,11 +774,9 @@ func TestAssocReliable(t *testing.T) {
 		s0, s1, err := establishSessionPair(br, a0, a1, si)
 		assert.Nil(t, err, "failed to establish session pair")
 
-		msg1 := "ABC"
 		n, err = s0.WriteSCTP([]byte(msg1), PayloadTypeWebRTCBinary)
 		assert.Nil(t, err, "WriteSCTP failed")
 		assert.Equal(t, n, len(msg1), "unexpected length of received data")
-		msg2 := "DEFG"
 		n, err = s0.WriteSCTP([]byte(msg2), PayloadTypeWebRTCBinary)
 		assert.Nil(t, err, "WriteSCTP failed")
 		assert.Equal(t, n, len(msg2), "unexpected length of received data")
@@ -806,11 +803,13 @@ func TestAssocReliable(t *testing.T) {
 		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
 
 		br.process()
-		err = closeAssociationPair(br, a0, a1)
+		closeAssociationPair(br, a0, a1)
 	})
 }
 
 func TestAssocUnreliable(t *testing.T) {
+	const msg1 = "ABC"
+	const msg2 = "DEFG"
 
 	t.Run("Rexmit ordered", func(t *testing.T) {
 		const si uint16 = 1
@@ -830,13 +829,13 @@ func TestAssocUnreliable(t *testing.T) {
 		s1.SetReliabilityParams(false, ReliabilityTypeRexmit, 0) // doesn't matter
 
 		var n int
-		n, err = s0.WriteSCTP([]byte("ABC"), PayloadTypeWebRTCBinary)
+		n, err = s0.WriteSCTP([]byte(msg1), PayloadTypeWebRTCBinary)
 		if err != nil {
 			assert.FailNow(t, "failed due to earlier error")
 		}
 		assert.Equal(t, n, 3, "unexpected length of written data")
 
-		n, err = s0.WriteSCTP([]byte("DEFG"), PayloadTypeWebRTCBinary)
+		n, err = s0.WriteSCTP([]byte(msg2), PayloadTypeWebRTCBinary)
 		if err != nil {
 			assert.FailNow(t, "failed due to earlier error")
 		}
@@ -851,11 +850,11 @@ func TestAssocUnreliable(t *testing.T) {
 			assert.FailNow(t, "failed due to earlier error")
 		}
 		// should receive the second one only
-		assert.Equal(t, "DEFG", string(buf[:n]), "unexpected received data")
+		assert.Equal(t, msg2, string(buf[:n]), "unexpected received data")
 		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
 
 		br.process()
-		err = closeAssociationPair(br, a0, a1)
+		closeAssociationPair(br, a0, a1)
 	})
 
 	t.Run("Rexmit unordered", func(t *testing.T) {
@@ -876,13 +875,13 @@ func TestAssocUnreliable(t *testing.T) {
 		s1.SetReliabilityParams(true, ReliabilityTypeRexmit, 0) // doesn't matter
 
 		var n int
-		n, err = s0.WriteSCTP([]byte("ABC"), PayloadTypeWebRTCBinary)
+		n, err = s0.WriteSCTP([]byte(msg1), PayloadTypeWebRTCBinary)
 		if err != nil {
 			assert.FailNow(t, "failed due to earlier error")
 		}
 		assert.Equal(t, n, 3, "unexpected length of written data")
 
-		n, err = s0.WriteSCTP([]byte("DEFG"), PayloadTypeWebRTCBinary)
+		n, err = s0.WriteSCTP([]byte(msg2), PayloadTypeWebRTCBinary)
 		if err != nil {
 			assert.FailNow(t, "failed due to earlier error")
 		}
@@ -897,11 +896,11 @@ func TestAssocUnreliable(t *testing.T) {
 			assert.FailNow(t, "failed due to earlier error")
 		}
 		// should receive the second one only
-		assert.Equal(t, "DEFG", string(buf[:n]), "unexpected received data")
+		assert.Equal(t, msg2, string(buf[:n]), "unexpected received data")
 		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
 
 		br.process()
-		err = closeAssociationPair(br, a0, a1)
+		closeAssociationPair(br, a0, a1)
 	})
 
 	t.Run("Timed ordered", func(t *testing.T) {
@@ -922,13 +921,13 @@ func TestAssocUnreliable(t *testing.T) {
 		s1.SetReliabilityParams(false, ReliabilityTypeTimed, 0) // doesn't matter
 
 		var n int
-		n, err = s0.WriteSCTP([]byte("ABC"), PayloadTypeWebRTCBinary)
+		n, err = s0.WriteSCTP([]byte(msg1), PayloadTypeWebRTCBinary)
 		if err != nil {
 			assert.FailNow(t, "failed due to earlier error")
 		}
 		assert.Equal(t, n, 3, "unexpected length of written data")
 
-		n, err = s0.WriteSCTP([]byte("DEFG"), PayloadTypeWebRTCBinary)
+		n, err = s0.WriteSCTP([]byte(msg2), PayloadTypeWebRTCBinary)
 		if err != nil {
 			assert.FailNow(t, "failed due to earlier error")
 		}
@@ -943,11 +942,11 @@ func TestAssocUnreliable(t *testing.T) {
 			assert.FailNow(t, "failed due to earlier error")
 		}
 		// should receive the second one only
-		assert.Equal(t, "DEFG", string(buf[:n]), "unexpected received data")
+		assert.Equal(t, msg2, string(buf[:n]), "unexpected received data")
 		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
 
 		br.process()
-		err = closeAssociationPair(br, a0, a1)
+		closeAssociationPair(br, a0, a1)
 	})
 }
 
@@ -1057,9 +1056,7 @@ func TestHandleForwardTSN(t *testing.T) {
 
 		fwdtsn := &chunkForwardTSN{
 			newCumulativeTSN: a.peerLastTSN + 3,
-			streams: []chunkForwardTSNStream{
-				chunkForwardTSNStream{identifier: 0, sequence: 0},
-			},
+			streams:          []chunkForwardTSNStream{{identifier: 0, sequence: 0}},
 		}
 
 		a.handleForwardTSN(fwdtsn)
@@ -1086,7 +1083,7 @@ func TestHandleForwardTSN(t *testing.T) {
 		fwdtsn := &chunkForwardTSN{
 			newCumulativeTSN: a.peerLastTSN + 1,
 			streams: []chunkForwardTSNStream{
-				chunkForwardTSNStream{identifier: 0, sequence: 1},
+				{identifier: 0, sequence: 1},
 			},
 		}
 
