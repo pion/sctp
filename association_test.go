@@ -394,19 +394,20 @@ func (br *connBridge) process() {
 }
 
 func createNewAssociationPair(br *connBridge) (*Association, *Association, error) {
-	var a0 *Association
-	var a1 *Association
-	var err error
+	var a0, a1 *Association
+	var err0, err1 error
 
 	handshake0Ch := make(chan bool)
 	handshake1Ch := make(chan bool)
 
 	go func() {
-		a0, err = Client(br.conn0)
+		a0, err0 = Client(br.conn0)
+		fmt.Printf("org a0=%p\n", a0)
 		handshake0Ch <- true
 	}()
 	go func() {
-		a1, err = Client(br.conn1)
+		a1, err1 = Client(br.conn1)
+		fmt.Printf("org a1=%p\n", a1)
 		handshake1Ch <- true
 	}()
 
@@ -432,9 +433,16 @@ loop1:
 		}
 	}
 
-	if err != nil {
-		return nil, nil, err
+	if err0 != nil {
+		return nil, nil, err0
 	}
+	if err1 != nil {
+		return nil, nil, err1
+	}
+
+	fmt.Printf("a0=%p\n", a0)
+	fmt.Printf("a1=%p\n", a1)
+
 	return a0, a1, nil
 }
 
@@ -525,9 +533,9 @@ func establishSessionPair(br *connBridge, a0, a1 *Association, si uint16) (*Stre
 }
 
 func TestAssocReliable(t *testing.T) {
-	const si uint16 = 123
 
 	t.Run("Simple", func(t *testing.T) {
+		const si uint16 = 1
 		br := newConnBridge()
 
 		a0, a1, err := createNewAssociationPair(br)
@@ -561,6 +569,7 @@ func TestAssocReliable(t *testing.T) {
 	})
 
 	t.Run("ordered reordered", func(t *testing.T) {
+		const si uint16 = 2
 		var n int
 		var ppi PayloadProtocolIdentifier
 		br := newConnBridge()
@@ -609,6 +618,7 @@ func TestAssocReliable(t *testing.T) {
 	})
 
 	t.Run("ordered fragmentated then defragmented", func(t *testing.T) {
+		const si uint16 = 3
 		var n int
 		var ppi PayloadProtocolIdentifier
 		br := newConnBridge()
@@ -651,6 +661,7 @@ func TestAssocReliable(t *testing.T) {
 	})
 
 	t.Run("unordered fragmentated then defragmented", func(t *testing.T) {
+		const si uint16 = 4
 		var n int
 		var ppi PayloadProtocolIdentifier
 		br := newConnBridge()
@@ -695,6 +706,7 @@ func TestAssocReliable(t *testing.T) {
 	})
 
 	t.Run("unordered", func(t *testing.T) {
+		const si uint16 = 5
 		var n int
 		var ppi PayloadProtocolIdentifier
 		br := newConnBridge()
@@ -750,6 +762,7 @@ func TestAssocReliable(t *testing.T) {
 	})
 
 	t.Run("retransmission", func(t *testing.T) {
+		const si uint16 = 6
 		var n int
 		var ppi PayloadProtocolIdentifier
 		br := newConnBridge()
@@ -798,9 +811,9 @@ func TestAssocReliable(t *testing.T) {
 }
 
 func TestAssocUnreliable(t *testing.T) {
-	const si uint16 = 123
 
 	t.Run("Rexmit ordered", func(t *testing.T) {
+		const si uint16 = 1
 		br := newConnBridge()
 
 		a0, a1, err := createNewAssociationPair(br)
@@ -846,6 +859,7 @@ func TestAssocUnreliable(t *testing.T) {
 	})
 
 	t.Run("Rexmit unordered", func(t *testing.T) {
+		const si uint16 = 2
 		br := newConnBridge()
 
 		a0, a1, err := createNewAssociationPair(br)
@@ -891,6 +905,7 @@ func TestAssocUnreliable(t *testing.T) {
 	})
 
 	t.Run("Timed ordered", func(t *testing.T) {
+		const si uint16 = 3
 		br := newConnBridge()
 
 		a0, a1, err := createNewAssociationPair(br)
