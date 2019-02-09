@@ -286,10 +286,10 @@ func inverse(s [][]byte) error {
 
 // drop n packets from the slice starting from offset
 func drop(s [][]byte, offset, n int) [][]byte {
-	if offset+n < len(s) {
+	if offset+n > len(s) {
 		n = len(s) - offset
 	}
-	return append(s[:offset], s[offset+n-1:]...)
+	return append(s[:offset], s[offset+n:]...)
 }
 
 func newConnBridge() *connBridge {
@@ -772,7 +772,6 @@ func TestAssocReliable(t *testing.T) {
 		assert.Equal(t, n, len(msg2), "unexpected length of received data")
 
 		br.drop(0, 0, 1) // drop the first packet (second one should be sacked)
-		assert.Nil(t, err, "reorder failed")
 		br.process()
 
 		buf := make([]byte, 32)
@@ -791,6 +790,145 @@ func TestAssocReliable(t *testing.T) {
 		}
 		assert.Equal(t, n, len(msg2), "unexpected length of received data")
 		assert.Equal(t, msg2, string(buf[:n]), "unexpected received data")
+		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
+
+		br.process()
+		err = closeAssociationPair(br, a0, a1)
+	})
+}
+
+func TestAssocUnreliable(t *testing.T) {
+	const si uint16 = 123
+
+	t.Run("Rexmit ordered", func(t *testing.T) {
+		br := newConnBridge()
+
+		a0, a1, err := createNewAssociationPair(br)
+		if !assert.Nil(t, err, "failed to create associations") {
+			assert.FailNow(t, "failed due to earlier error")
+		}
+
+		s0, s1, err := establishSessionPair(br, a0, a1, si)
+		assert.Nil(t, err, "failed to establish session pair")
+
+		// When we set the reliability value to 0 [times], then it will cause
+		// the chunk to be abandoned immediately after the first transmission.
+		s0.SetReliabilityParams(false, ReliabilityTypeRexmit, 0)
+		s1.SetReliabilityParams(false, ReliabilityTypeRexmit, 0) // doesn't matter
+
+		var n int
+		n, err = s0.WriteSCTP([]byte("ABC"), PayloadTypeWebRTCBinary)
+		if err != nil {
+			assert.FailNow(t, "failed due to earlier error")
+		}
+		assert.Equal(t, n, 3, "unexpected length of written data")
+
+		n, err = s0.WriteSCTP([]byte("DEFG"), PayloadTypeWebRTCBinary)
+		if err != nil {
+			assert.FailNow(t, "failed due to earlier error")
+		}
+		assert.Equal(t, n, 4, "unexpected length of written data")
+
+		br.drop(0, 0, 1) // drop the first packet (second one should be sacked)
+		br.process()
+
+		buf := make([]byte, 32)
+		n, ppi, err := s1.ReadSCTP(buf)
+		if !assert.Nil(t, err, "ReadSCTP failed") {
+			assert.FailNow(t, "failed due to earlier error")
+		}
+		// should receive the second one only
+		assert.Equal(t, "DEFG", string(buf[:n]), "unexpected received data")
+		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
+
+		br.process()
+		err = closeAssociationPair(br, a0, a1)
+	})
+
+	t.Run("Rexmit unordered", func(t *testing.T) {
+		br := newConnBridge()
+
+		a0, a1, err := createNewAssociationPair(br)
+		if !assert.Nil(t, err, "failed to create associations") {
+			assert.FailNow(t, "failed due to earlier error")
+		}
+
+		s0, s1, err := establishSessionPair(br, a0, a1, si)
+		assert.Nil(t, err, "failed to establish session pair")
+
+		// When we set the reliability value to 0 [times], then it will cause
+		// the chunk to be abandoned immediately after the first transmission.
+		s0.SetReliabilityParams(true, ReliabilityTypeRexmit, 0)
+		s1.SetReliabilityParams(true, ReliabilityTypeRexmit, 0) // doesn't matter
+
+		var n int
+		n, err = s0.WriteSCTP([]byte("ABC"), PayloadTypeWebRTCBinary)
+		if err != nil {
+			assert.FailNow(t, "failed due to earlier error")
+		}
+		assert.Equal(t, n, 3, "unexpected length of written data")
+
+		n, err = s0.WriteSCTP([]byte("DEFG"), PayloadTypeWebRTCBinary)
+		if err != nil {
+			assert.FailNow(t, "failed due to earlier error")
+		}
+		assert.Equal(t, n, 4, "unexpected length of written data")
+
+		br.drop(0, 0, 1) // drop the first packet (second one should be sacked)
+		br.process()
+
+		buf := make([]byte, 32)
+		n, ppi, err := s1.ReadSCTP(buf)
+		if !assert.Nil(t, err, "ReadSCTP failed") {
+			assert.FailNow(t, "failed due to earlier error")
+		}
+		// should receive the second one only
+		assert.Equal(t, "DEFG", string(buf[:n]), "unexpected received data")
+		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
+
+		br.process()
+		err = closeAssociationPair(br, a0, a1)
+	})
+
+	t.Run("Timed ordered", func(t *testing.T) {
+		br := newConnBridge()
+
+		a0, a1, err := createNewAssociationPair(br)
+		if !assert.Nil(t, err, "failed to create associations") {
+			assert.FailNow(t, "failed due to earlier error")
+		}
+
+		s0, s1, err := establishSessionPair(br, a0, a1, si)
+		assert.Nil(t, err, "failed to establish session pair")
+
+		// When we set the reliability value to 0 [msec], then it will cause
+		// the chunk to be abandoned immediately after the first transmission.
+		s0.SetReliabilityParams(false, ReliabilityTypeTimed, 0)
+		s1.SetReliabilityParams(false, ReliabilityTypeTimed, 0) // doesn't matter
+
+		var n int
+		n, err = s0.WriteSCTP([]byte("ABC"), PayloadTypeWebRTCBinary)
+		if err != nil {
+			assert.FailNow(t, "failed due to earlier error")
+		}
+		assert.Equal(t, n, 3, "unexpected length of written data")
+
+		n, err = s0.WriteSCTP([]byte("DEFG"), PayloadTypeWebRTCBinary)
+		if err != nil {
+			assert.FailNow(t, "failed due to earlier error")
+		}
+		assert.Equal(t, n, 4, "unexpected length of written data")
+
+		br.drop(0, 0, 1) // drop the first packet (second one should be sacked)
+		br.process()
+
+		buf := make([]byte, 32)
+		n, ppi, err := s1.ReadSCTP(buf)
+		if !assert.Nil(t, err, "ReadSCTP failed") {
+			assert.FailNow(t, "failed due to earlier error")
+		}
+		// should receive the second one only
+		assert.Equal(t, "DEFG", string(buf[:n]), "unexpected received data")
 		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
 
 		br.process()
@@ -875,10 +1013,70 @@ func TestCreateForwardTSN(t *testing.T) {
 		fwdtsn := a.createForwardTSN()
 
 		assert.Equal(t, uint32(12), fwdtsn.newCumulativeTSN, "should be able to serialize")
-		assert.Equal(t, 2, len(fwdtsn.streams), "there should be one stream")
-		assert.Equal(t, uint16(1), fwdtsn.streams[0].identifier, "si should be 1")
-		assert.Equal(t, uint16(3), fwdtsn.streams[0].sequence, "ssn should be 3")
-		assert.Equal(t, uint16(2), fwdtsn.streams[1].identifier, "si should be 2")
-		assert.Equal(t, uint16(1), fwdtsn.streams[1].sequence, "ssn should be 1")
+		assert.Equal(t, 2, len(fwdtsn.streams), "there should be two stream")
+
+		si1OK := false
+		si2OK := false
+		for _, s := range fwdtsn.streams {
+			if s.identifier == 1 {
+				assert.Equal(t, uint16(3), s.sequence, "ssn should be 3")
+				si1OK = true
+			} else if s.identifier == 2 {
+				assert.Equal(t, uint16(1), s.sequence, "ssn should be 1")
+				si2OK = true
+			} else {
+				assert.Fail(t, "unexpected stream indentifier")
+			}
+		}
+		assert.True(t, si1OK, "si=1 should be present")
+		assert.True(t, si2OK, "si=2 should be present")
+	})
+}
+
+func TestHandleForwardTSN(t *testing.T) {
+	t.Run("forward 3 unreceived chunks", func(t *testing.T) {
+		conn := &testConn{br: nil, id: 0, readCh: nil}
+		a := createAssocation(conn)
+		a.useForwardTSN = true
+		prevTSN := a.peerLastTSN
+
+		fwdtsn := &chunkForwardTSN{
+			newCumulativeTSN: a.peerLastTSN + 3,
+			streams: []chunkForwardTSNStream{
+				chunkForwardTSNStream{identifier: 0, sequence: 0},
+			},
+		}
+
+		a.handleForwardTSN(fwdtsn)
+
+		assert.Equal(t, a.peerLastTSN, prevTSN+3, "peerLastTSN should advance by 3 ")
+	})
+
+	t.Run("forward 1 then one more for received chunk", func(t *testing.T) {
+		conn := &testConn{br: nil, id: 0, readCh: nil}
+		a := createAssocation(conn)
+		a.useForwardTSN = true
+		prevTSN := a.peerLastTSN
+
+		// this chunk is blocked by the missing chunk at tsn=1
+		a.payloadQueue.push(&chunkPayloadData{
+			beginingFragment:     true,
+			endingFragment:       true,
+			tsn:                  a.peerLastTSN + 2,
+			streamIdentifier:     0,
+			streamSequenceNumber: 1,
+			userData:             []byte("ABC"),
+		}, a.peerLastTSN)
+
+		fwdtsn := &chunkForwardTSN{
+			newCumulativeTSN: a.peerLastTSN + 1,
+			streams: []chunkForwardTSNStream{
+				chunkForwardTSNStream{identifier: 0, sequence: 1},
+			},
+		}
+
+		a.handleForwardTSN(fwdtsn)
+
+		assert.Equal(t, a.peerLastTSN, prevTSN+2, "peerLastTSN should advance by 3 ")
 	})
 }

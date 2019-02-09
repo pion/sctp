@@ -1,6 +1,7 @@
 package sctp
 
 import (
+	"fmt"
 	"math"
 	"sync"
 
@@ -113,22 +114,36 @@ func (s *Stream) ReadSCTP(p []byte) (int, PayloadProtocolIdentifier, error) {
 }
 
 func (s *Stream) handleData(pd *chunkPayloadData) {
+	var readable bool
 	s.lock.Lock()
-	complete := s.reassemblyQueue.push(pd)
+	fmt.Printf("stream[%d]: handleData ts=%d ssn=%d\n", s.streamIdentifier, pd.tsn, pd.streamSequenceNumber)
+	if s.reassemblyQueue.push(pd) {
+		readable = s.reassemblyQueue.isReadable()
+	}
+	fmt.Printf("stream[%d]: handleData readable? %v\n", s.streamIdentifier, readable)
 	s.lock.Unlock()
 
-	// Notify the reader asynchronously if have complete set of chunks
-	if complete {
+	// Notify the reader asynchronously if there's a data chunk to read.
+	if readable {
 		s.readNotifier.Signal()
 	}
 }
 
 func (s *Stream) handleForwardTSN(newCumulativeTSN uint32, ssn uint16) {
+	var readable bool
 	s.lock.Lock()
 	// Remove all chunks older than or equal to the new TSN from
 	// the reassemblyQueue.
-	s.reassemblyQueue.onForwardTSN(newCumulativeTSN, s.unordered, ssn)
-	defer s.lock.Unlock()
+	fmt.Printf("stream[%d]: handleForwardTSN newTSN=%d ssn=%d\n", s.streamIdentifier, newCumulativeTSN, ssn)
+	s.reassemblyQueue.forwardTSN(newCumulativeTSN, s.unordered, ssn)
+	readable = s.reassemblyQueue.isReadable()
+	fmt.Printf("stream[%d]: handleForwardTSN readable? %v\n", s.streamIdentifier, readable)
+	s.lock.Unlock()
+
+	// Notify the reader asynchronously if there's a data chunk to read.
+	if readable {
+		s.readNotifier.Signal()
+	}
 }
 
 // Write writes len(p) bytes from p with the default Payload Protocol Identifier

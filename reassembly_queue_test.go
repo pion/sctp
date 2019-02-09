@@ -331,7 +331,7 @@ func TestReassemblyQueue(t *testing.T) {
 		assert.Equal(t, io.ErrShortBuffer, err, "read() should not succeed")
 	})
 
-	t.Run("onForwardTSN for ordered fragments", func(t *testing.T) {
+	t.Run("forwardTSN for ordered fragments", func(t *testing.T) {
 		rq := newReassemblyQueue(0)
 
 		orgPpi := PayloadTypeWebRTCBinary
@@ -374,12 +374,12 @@ func TestReassemblyQueue(t *testing.T) {
 		complete = rq.push(chunk)
 		assert.False(t, complete, "chunk set should not be complete yet")
 
-		rq.onForwardTSN(13, false, ssnDropped)
+		rq.forwardTSN(13, false, ssnDropped)
 
 		assert.Equal(t, 1, len(rq.ordered), "there should be one chunk left")
 	})
 
-	t.Run("onForwardTSN for unordered fragments", func(t *testing.T) {
+	t.Run("forwardTSN for unordered fragments", func(t *testing.T) {
 		rq := newReassemblyQueue(0)
 
 		orgPpi := PayloadTypeWebRTCBinary
@@ -426,7 +426,7 @@ func TestReassemblyQueue(t *testing.T) {
 
 		// At this point, there are 3 chunks in the rq.unorderedChunks.
 		// This call should remove chunks with tsn equals to 13 or older.
-		rq.onForwardTSN(13, true, ssnDropped)
+		rq.forwardTSN(13, true, ssnDropped)
 
 		// As a result, there should be one chunk (tsn=14)
 		assert.Equal(t, 1, len(rq.unorderedChunks), "there should be one chunk kept")
