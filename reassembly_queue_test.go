@@ -19,7 +19,7 @@ func TestReassemblyQueue(t *testing.T) {
 
 		chunk = &chunkPayloadData{
 			payloadType:          orgPpi,
-			beginingFragment:     true,
+			beginningFragment:    true,
 			tsn:                  1,
 			streamSequenceNumber: 0,
 			userData:             []byte("ABC"),
@@ -59,7 +59,7 @@ func TestReassemblyQueue(t *testing.T) {
 		chunk = &chunkPayloadData{
 			payloadType:          orgPpi,
 			unordered:            true,
-			beginingFragment:     true,
+			beginningFragment:    true,
 			tsn:                  1,
 			streamSequenceNumber: 0,
 			userData:             []byte("ABC"),
@@ -110,7 +110,7 @@ func TestReassemblyQueue(t *testing.T) {
 
 		chunk = &chunkPayloadData{
 			payloadType:          orgPpi,
-			beginingFragment:     true,
+			beginningFragment:    true,
 			endingFragment:       true,
 			tsn:                  1,
 			streamSequenceNumber: 0,
@@ -123,7 +123,7 @@ func TestReassemblyQueue(t *testing.T) {
 		chunk = &chunkPayloadData{
 			payloadType:          orgPpi,
 			unordered:            true,
-			beginingFragment:     true,
+			beginningFragment:    true,
 			endingFragment:       true,
 			tsn:                  2,
 			streamSequenceNumber: 1,
@@ -165,7 +165,7 @@ func TestReassemblyQueue(t *testing.T) {
 		chunk = &chunkPayloadData{
 			payloadType:          orgPpi,
 			unordered:            true,
-			beginingFragment:     true,
+			beginningFragment:    true,
 			tsn:                  10,
 			streamSequenceNumber: 0,
 			userData:             []byte("IN"),
@@ -189,7 +189,7 @@ func TestReassemblyQueue(t *testing.T) {
 		chunk = &chunkPayloadData{
 			payloadType:          orgPpi,
 			unordered:            true,
-			beginingFragment:     true,
+			beginningFragment:    true,
 			endingFragment:       true,
 			tsn:                  13,
 			streamSequenceNumber: 1,
@@ -224,7 +224,7 @@ func TestReassemblyQueue(t *testing.T) {
 		chunk = &chunkPayloadData{
 			payloadType:          orgPpi,
 			streamIdentifier:     124,
-			beginingFragment:     true,
+			beginningFragment:    true,
 			endingFragment:       true,
 			tsn:                  10,
 			streamSequenceNumber: 0,
@@ -246,7 +246,7 @@ func TestReassemblyQueue(t *testing.T) {
 
 		chunk = &chunkPayloadData{
 			payloadType:          orgPpi,
-			beginingFragment:     true,
+			beginningFragment:    true,
 			endingFragment:       true,
 			tsn:                  10,
 			streamSequenceNumber: 6, // <-- stale
@@ -267,7 +267,7 @@ func TestReassemblyQueue(t *testing.T) {
 
 		chunk = &chunkPayloadData{
 			payloadType:          orgPpi,
-			beginingFragment:     true,
+			beginningFragment:    true,
 			tsn:                  123,
 			streamSequenceNumber: 0,
 			userData:             []byte("IN"),
@@ -291,7 +291,7 @@ func TestReassemblyQueue(t *testing.T) {
 
 		chunk = &chunkPayloadData{
 			payloadType:          orgPpi,
-			beginingFragment:     true,
+			beginningFragment:    true,
 			endingFragment:       true,
 			tsn:                  123,
 			streamSequenceNumber: 1,
@@ -316,7 +316,7 @@ func TestReassemblyQueue(t *testing.T) {
 
 		chunk = &chunkPayloadData{
 			payloadType:          orgPpi,
-			beginingFragment:     true,
+			beginningFragment:    true,
 			endingFragment:       true,
 			tsn:                  123,
 			streamSequenceNumber: 0,
@@ -343,7 +343,7 @@ func TestReassemblyQueue(t *testing.T) {
 
 		chunk = &chunkPayloadData{
 			payloadType:          orgPpi,
-			beginingFragment:     true,
+			beginningFragment:    true,
 			endingFragment:       true,
 			tsn:                  10,
 			streamSequenceNumber: ssnComplete,
@@ -355,7 +355,7 @@ func TestReassemblyQueue(t *testing.T) {
 
 		chunk = &chunkPayloadData{
 			payloadType:          orgPpi,
-			beginingFragment:     true,
+			beginningFragment:    true,
 			tsn:                  11,
 			streamSequenceNumber: ssnDropped,
 			userData:             []byte("ABC"),
@@ -392,7 +392,7 @@ func TestReassemblyQueue(t *testing.T) {
 		chunk = &chunkPayloadData{
 			payloadType:          orgPpi,
 			unordered:            true,
-			beginingFragment:     true,
+			beginningFragment:    true,
 			tsn:                  11,
 			streamSequenceNumber: ssnDropped,
 			userData:             []byte("ABC"),
@@ -416,7 +416,7 @@ func TestReassemblyQueue(t *testing.T) {
 			payloadType:          orgPpi,
 			unordered:            true,
 			tsn:                  14,
-			beginingFragment:     true,
+			beginningFragment:    true,
 			streamSequenceNumber: ssnKept,
 			userData:             []byte("SOS"),
 		}
@@ -442,8 +442,8 @@ func TestChunkSet(t *testing.T) {
 	t.Run("Push dup chunks to chunkSet", func(t *testing.T) {
 		cset := newChunkSet(0, 0)
 		cset.push(&chunkPayloadData{
-			tsn:              100,
-			beginingFragment: true,
+			tsn:               100,
+			beginningFragment: true,
 		})
 		complete := cset.push(&chunkPayloadData{
 			tsn:            100,
@@ -454,7 +454,7 @@ func TestChunkSet(t *testing.T) {
 		assert.Equal(t, 1, nChunks, "chunk with dup TSN should be ignored")
 	})
 
-	t.Run("Incomplete chunkSet: no begining", func(t *testing.T) {
+	t.Run("Incomplete chunkSet: no beginning", func(t *testing.T) {
 		cset := &chunkSet{
 			ssn:    0,
 			ppi:    0,
@@ -470,8 +470,8 @@ func TestChunkSet(t *testing.T) {
 			ppi: 0,
 			chunks: []*chunkPayloadData{
 				{
-					tsn:              100,
-					beginingFragment: true,
+					tsn:               100,
+					beginningFragment: true,
 				},
 				{
 					tsn: 101,

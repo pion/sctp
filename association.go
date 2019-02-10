@@ -688,13 +688,15 @@ func (a *Association) handleForwardTSN(c *chunkForwardTSN) []*packet {
 
 	if !a.useForwardTSN {
 		// Return an error chunk
-		// TODO: marshaling error chunk isn't supported yet :(
-		/*
-			cerr := &chunkError{
-				errorCauses: []errorCause{errorCauseUnrecognizedChunkType{}},
-			}
-		*/
-		return []*packet{}
+		cerr := &chunkError{
+			errorCauses: []errorCause{&errorCauseUnrecognizedChunkType{}},
+		}
+		outbound := &packet{}
+		outbound.verificationTag = a.peerVerificationTag
+		outbound.sourcePort = a.sourcePort
+		outbound.destinationPort = a.destinationPort
+		outbound.chunks = []chunk{cerr}
+		return []*packet{outbound}
 	}
 
 	// From RFC 3758 Sec 3.6:

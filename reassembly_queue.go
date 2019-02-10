@@ -53,7 +53,7 @@ func (set *chunkSet) push(chunk *chunkPayloadData) bool {
 func (set *chunkSet) isComplete() bool {
 	// Condition for complete set
 	//   0. Has at least one chunk.
-	//   1. Begins with beginingFragment set to true
+	//   1. Begins with beginningFragment set to true
 	//   2. Ends with endingFragment set to true
 	//   3. TSN monotinically increase by 1 from beginning to end
 
@@ -64,7 +64,7 @@ func (set *chunkSet) isComplete() bool {
 	}
 
 	// 1.
-	if !set.chunks[0].beginingFragment {
+	if !set.chunks[0].beginningFragment {
 		return false
 	}
 
@@ -179,7 +179,7 @@ func (r *reassemblyQueue) findCompleteUnorderedChunkSet() *chunkSet {
 
 	for i, c := range r.unorderedChunks {
 		// seek beigining
-		if c.beginingFragment {
+		if c.beginningFragment {
 			startIdx = i
 			nChunks = 1
 			lastTSN = c.tsn
@@ -294,7 +294,8 @@ func (r *reassemblyQueue) forwardTSN(newCumulativeTSN uint32, unordered bool, la
 		// Remove all fragments in the unordered sets that contains chunks
 		// equal to or older than `newCumulativeTSN`.
 		// We know all sets in the r.unordered are complete ones.
-		// Just remove chunks from unorderedChunks
+		// Just remove chunks that are equal to or older than newCumulativeTSN
+		// from the unorderedChunks
 		lastIdx := -1
 		for i, c := range r.unorderedChunks {
 			if sna32GT(c.tsn, newCumulativeTSN) {
