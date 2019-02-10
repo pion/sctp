@@ -188,7 +188,7 @@ func (s *Stream) packetize(raw []byte, ppi PayloadProtocolIdentifier) []*chunkPa
 			streamIdentifier:     s.streamIdentifier,
 			userData:             raw[i : i+l],
 			unordered:            unordered,
-			beginingFragment:     i == 0,
+			beginningFragment:    i == 0,
 			endingFragment:       remaining-l == 0,
 			immediateSack:        false,
 			payloadType:          ppi,

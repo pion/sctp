@@ -2,8 +2,6 @@ package sctp
 
 import (
 	"encoding/binary"
-
-	"github.com/pkg/errors"
 )
 
 // errorCauseHeader represents the shared header that is shared by all error causes
@@ -18,7 +16,13 @@ const (
 )
 
 func (e *errorCauseHeader) marshal() ([]byte, error) {
-	return nil, errors.Errorf("Unimplemented")
+	e.len = uint16(len(e.raw)) + uint16(errorCauseHeaderLength)
+	raw := make([]byte, e.len)
+	binary.BigEndian.PutUint16(raw[0:], uint16(e.code))
+	binary.BigEndian.PutUint16(raw[2:], e.len)
+	copy(raw[errorCauseHeaderLength:], e.raw)
+
+	return raw, nil
 }
 
 func (e *errorCauseHeader) unmarshal(raw []byte) error {

@@ -45,10 +45,10 @@ a multi-fragment user message, as summarized in the following table:
 type chunkPayloadData struct {
 	chunkHeader
 
-	unordered        bool
-	beginingFragment bool
-	endingFragment   bool
-	immediateSack    bool
+	unordered         bool
+	beginningFragment bool
+	endingFragment    bool
+	immediateSack     bool
 
 	tsn                  uint32
 	streamIdentifier     uint16
@@ -111,7 +111,7 @@ func (p *chunkPayloadData) unmarshal(raw []byte) error {
 
 	p.immediateSack = p.flags&payloadDataImmediateSACK != 0
 	p.unordered = p.flags&payloadDataUnorderedBitmask != 0
-	p.beginingFragment = p.flags&payloadDataBeginingFragmentBitmask != 0
+	p.beginningFragment = p.flags&payloadDataBeginingFragmentBitmask != 0
 	p.endingFragment = p.flags&payloadDataEndingFragmentBitmask != 0
 
 	p.tsn = binary.BigEndian.Uint32(p.raw[0:])
@@ -137,7 +137,7 @@ func (p *chunkPayloadData) marshal() ([]byte, error) {
 	if p.endingFragment {
 		flags = 1
 	}
-	if p.beginingFragment {
+	if p.beginningFragment {
 		flags |= 1 << 1
 	}
 	if p.unordered {
