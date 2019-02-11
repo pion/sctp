@@ -127,7 +127,12 @@ func Server(nextConn net.Conn) (*Association, error) {
 	go a.readLoop()
 	<-a.handshakeCompletedCh
 
-	return a, nil
+	select {
+	case <-a.handshakeCompletedCh:
+		return a, nil
+	case <-a.doneCh:
+		return nil, errors.Errorf("Assocation finished before connecting")
+	}
 }
 
 // Client opens a SCTP stream over a conn
@@ -135,9 +140,13 @@ func Client(nextConn net.Conn) (*Association, error) {
 	a := createAssocation(nextConn)
 	go a.readLoop()
 	a.init()
-	<-a.handshakeCompletedCh
 
-	return a, nil
+	select {
+	case <-a.handshakeCompletedCh:
+		return a, nil
+	case <-a.doneCh:
+		return nil, errors.Errorf("Assocation finished before connecting")
+	}
 }
 
 func createAssocation(nextConn net.Conn) *Association {
