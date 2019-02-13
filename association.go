@@ -4,10 +4,10 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"net"
-	"sync"
 	"math"
 	"math/rand"
+	"net"
+	"sync"
 	"time"
 
 	"github.com/pkg/errors"
@@ -1027,14 +1027,17 @@ func (a *Association) handleChunk(p *packet, c chunk) ([]*packet, error) {
 		}
 
 	case *chunkCookieAck:
-		switch a.state {
-		case cookieEchoed:
+		if a.state == cookieEchoed {
 			a.setState(established)
 			close(a.handshakeCompletedCh)
 			return nil, nil
-		default:
-			return nil, errors.Errorf("TODO Handle Init acks when in state %s", a.state.String())
 		}
+
+		// RFC 4960
+		// 5.2.5.  Handle Duplicate COOKIE-ACK.
+		//   At any state other than COOKIE-ECHOED, an endpoint should silently
+		//   discard a received COOKIE ACK chunk.
+		return nil, nil
 
 		// TODO Abort
 	case *chunkPayloadData:
