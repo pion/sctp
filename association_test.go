@@ -227,171 +227,8 @@ func (c *dumbConn) SetWriteDeadline(t time.Time) error {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-// testConn, connBridge for emulating dtls.Conn
 
-type testConn struct {
-	br     *connBridge
-	id     int
-	readCh chan []byte
-}
-
-func (conn *testConn) Read(b []byte) (int, error) {
-	if data, ok := <-conn.readCh; ok {
-		n := copy(b, data)
-		return n, nil
-	}
-	return 0, fmt.Errorf("testConn closed")
-}
-
-func (conn *testConn) Write(b []byte) (int, error) {
-	n := len(b)
-	conn.br.push(b, conn.id)
-	return n, nil
-}
-
-func (conn *testConn) Close() error {
-	close(conn.readCh)
-	return nil
-}
-
-// Unused
-func (conn *testConn) LocalAddr() net.Addr                { return nil }
-func (conn *testConn) RemoteAddr() net.Addr               { return nil }
-func (conn *testConn) SetDeadline(t time.Time) error      { return nil }
-func (conn *testConn) SetReadDeadline(t time.Time) error  { return nil }
-func (conn *testConn) SetWriteDeadline(t time.Time) error { return nil }
-
-type connBridge struct {
-	mutex sync.RWMutex
-	conn0 *testConn
-	conn1 *testConn
-
-	queue0to1 [][]byte
-	queue1to0 [][]byte
-}
-
-func inverse(s [][]byte) error {
-	if len(s) < 2 {
-		return fmt.Errorf("inverse requires more than one item in the array")
-	}
-
-	for i, j := 0, len(s)-1; i < j; i, j = i+1, j-1 {
-		s[i], s[j] = s[j], s[i]
-	}
-	return nil
-}
-
-// drop n packets from the slice starting from offset
-func drop(s [][]byte, offset, n int) [][]byte {
-	if offset+n > len(s) {
-		n = len(s) - offset
-	}
-	return append(s[:offset], s[offset+n:]...)
-}
-
-func newConnBridge() *connBridge {
-	br := &connBridge{
-		queue0to1: make([][]byte, 0),
-		queue1to0: make([][]byte, 0),
-	}
-
-	br.conn0 = &testConn{
-		br:     br,
-		id:     0,
-		readCh: make(chan []byte),
-	}
-	br.conn1 = &testConn{
-		br:     br,
-		id:     1,
-		readCh: make(chan []byte),
-	}
-
-	return br
-}
-
-func (br *connBridge) push(d []byte, fromID int) {
-	br.mutex.Lock()
-	defer br.mutex.Unlock()
-
-	if fromID == 0 {
-		br.queue0to1 = append(br.queue0to1, d)
-	} else {
-		br.queue1to0 = append(br.queue1to0, d)
-	}
-}
-
-func (br *connBridge) reorder(fromID int) error {
-	br.mutex.Lock()
-	defer br.mutex.Unlock()
-
-	var err error
-
-	if fromID == 0 {
-		err = inverse(br.queue0to1)
-	} else {
-		err = inverse(br.queue1to0)
-	}
-
-	return err
-}
-
-//nolint:unparam
-func (br *connBridge) drop(fromID, offset, n int) {
-	br.mutex.Lock()
-	defer br.mutex.Unlock()
-
-	if fromID == 0 {
-		br.queue0to1 = drop(br.queue0to1, offset, n)
-	} else {
-		br.queue1to0 = drop(br.queue1to0, offset, n)
-	}
-}
-
-func (br *connBridge) tick() int {
-	br.mutex.Lock()
-	defer br.mutex.Unlock()
-
-	var n int
-
-	if len(br.queue0to1) > 0 {
-		select {
-		case br.conn1.readCh <- br.queue0to1[0]:
-			n++
-			//fmt.Printf("conn1 received data (%d bytes)\n", len(br.queue0to1[0]))
-			br.queue0to1 = br.queue0to1[1:]
-		default:
-		}
-	}
-
-	if len(br.queue1to0) > 0 {
-		select {
-		case br.conn0.readCh <- br.queue1to0[0]:
-			n++
-			//fmt.Printf("conn0 received data (%d bytes)\n", len(br.queue1to0[0]))
-			br.queue1to0 = br.queue1to0[1:]
-		default:
-		}
-	}
-
-	//  if n > 0 {
-	//		fmt.Printf("tick: processed %d packet(s)\n", n)
-	//	}
-
-	return n
-}
-
-// Repeat tick() call until no more outstanding inflight packet
-func (br *connBridge) process() {
-	for {
-		time.Sleep(10 * time.Millisecond)
-		n := br.tick()
-		if n == 0 {
-			break
-		}
-	}
-}
-
-func createNewAssociationPair(br *connBridge) (*Association, *Association, error) {
+func createNewAssociationPair(br *test.Bridge) (*Association, *Association, error) {
 	var a0, a1 *Association
 	var err0, err1 error
 
@@ -399,11 +236,11 @@ func createNewAssociationPair(br *connBridge) (*Association, *Association, error
 	handshake1Ch := make(chan bool)
 
 	go func() {
-		a0, err0 = Client(br.conn0)
+		a0, err0 = Client(br.GetConn0())
 		handshake0Ch <- true
 	}()
 	go func() {
-		a1, err1 = Client(br.conn1)
+		a1, err1 = Client(br.GetConn1())
 		handshake1Ch <- true
 	}()
 
@@ -412,7 +249,7 @@ func createNewAssociationPair(br *connBridge) (*Association, *Association, error
 loop1:
 	for i := 0; i < 100; i++ {
 		time.Sleep(10 * time.Millisecond)
-		br.tick()
+		br.Tick()
 
 		select {
 		case a0handshakeDone = <-handshake0Ch:
@@ -439,7 +276,7 @@ loop1:
 	return a0, a1, nil
 }
 
-func closeAssociationPair(br *connBridge, a0, a1 *Association) {
+func closeAssociationPair(br *test.Bridge, a0, a1 *Association) {
 	close0Ch := make(chan bool)
 	close1Ch := make(chan bool)
 
@@ -461,7 +298,7 @@ func closeAssociationPair(br *connBridge, a0, a1 *Association) {
 loop1:
 	for i := 0; i < 100; i++ {
 		time.Sleep(10 * time.Millisecond)
-		br.tick()
+		br.Tick()
 
 		select {
 		case a0closed = <-close0Ch:
@@ -479,7 +316,7 @@ loop1:
 	}
 }
 
-func establishSessionPair(br *connBridge, a0, a1 *Association, si uint16) (*Stream, *Stream, error) {
+func establishSessionPair(br *test.Bridge, a0, a1 *Association, si uint16) (*Stream, *Stream, error) {
 	helloMsg := "Hello" // mimic datachannel.channelOpen
 	s0, err := a0.OpenStream(si, PayloadTypeWebRTCBinary)
 	if err != nil {
@@ -491,7 +328,7 @@ func establishSessionPair(br *connBridge, a0, a1 *Association, si uint16) (*Stre
 		return nil, nil, err
 	}
 
-	br.process()
+	br.Process()
 
 	s1, err := a1.AcceptStream()
 	if err != nil {
@@ -502,7 +339,7 @@ func establishSessionPair(br *connBridge, a0, a1 *Association, si uint16) (*Stre
 		return nil, nil, fmt.Errorf("SI should match")
 	}
 
-	br.process()
+	br.Process()
 
 	buf := make([]byte, 1024)
 	n, ppi, err := s1.ReadSCTP(buf)
@@ -530,7 +367,7 @@ func TestAssocReliable(t *testing.T) {
 	t.Run("Simple", func(t *testing.T) {
 		const si uint16 = 1
 		const msg = "ABC"
-		br := newConnBridge()
+		br := test.NewBridge()
 
 		a0, a1, err := createNewAssociationPair(br)
 		if !assert.Nil(t, err, "failed to create associations") {
@@ -546,7 +383,7 @@ func TestAssocReliable(t *testing.T) {
 		}
 		assert.Equal(t, n, len(msg), "unexpected length of received data")
 
-		br.process()
+		br.Process()
 
 		buf := make([]byte, 32)
 		n, ppi, err := s1.ReadSCTP(buf)
@@ -556,7 +393,7 @@ func TestAssocReliable(t *testing.T) {
 		assert.Equal(t, n, len(msg), "unexpected length of received data")
 		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
 
-		br.process()
+		br.Process()
 		assert.False(t, s0.reassemblyQueue.isReadable(), "should no longer be readable")
 		closeAssociationPair(br, a0, a1)
 	})
@@ -567,7 +404,7 @@ func TestAssocReliable(t *testing.T) {
 		const msg2 = "DEFG"
 		var n int
 		var ppi PayloadProtocolIdentifier
-		br := newConnBridge()
+		br := test.NewBridge()
 
 		a0, a1, err := createNewAssociationPair(br)
 		if !assert.Nil(t, err, "failed to create associations") {
@@ -584,9 +421,9 @@ func TestAssocReliable(t *testing.T) {
 		assert.Nil(t, err, "WriteSCTP failed")
 		assert.Equal(t, n, len(msg2), "unexpected length of received data")
 
-		err = br.reorder(0)
+		err = br.Reorder(0)
 		assert.Nil(t, err, "reorder failed")
-		br.process()
+		br.Process()
 
 		buf := make([]byte, 32)
 
@@ -606,7 +443,7 @@ func TestAssocReliable(t *testing.T) {
 		assert.Equal(t, msg2, string(buf[:n]), "unexpected received data")
 		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
 
-		br.process()
+		br.Process()
 		assert.False(t, s0.reassemblyQueue.isReadable(), "should no longer be readable")
 		closeAssociationPair(br, a0, a1)
 	})
@@ -616,7 +453,7 @@ func TestAssocReliable(t *testing.T) {
 		const msg = "ABCDEFG"
 		var n int
 		var ppi PayloadProtocolIdentifier
-		br := newConnBridge()
+		br := test.NewBridge()
 
 		a0, a1, err := createNewAssociationPair(br)
 		if !assert.Nil(t, err, "failed to create associations") {
@@ -635,11 +472,11 @@ func TestAssocReliable(t *testing.T) {
 		assert.Nil(t, err, "WriteSCTP failed")
 		assert.Equal(t, n, len(msg), "unexpected length of received data")
 
-		br.process()
+		br.Process()
 
 		buf := make([]byte, 32)
 
-		br.process()
+		br.Process()
 
 		n, ppi, err = s1.ReadSCTP(buf)
 		if !assert.Nil(t, err, "ReadSCTP failed") {
@@ -650,7 +487,7 @@ func TestAssocReliable(t *testing.T) {
 		assert.Equal(t, msg, string(buf[:n]), "unexpected received data")
 		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
 
-		br.process()
+		br.Process()
 		assert.False(t, s0.reassemblyQueue.isReadable(), "should no longer be readable")
 		closeAssociationPair(br, a0, a1)
 	})
@@ -660,7 +497,7 @@ func TestAssocReliable(t *testing.T) {
 		const msg = "ABCDEFG"
 		var n int
 		var ppi PayloadProtocolIdentifier
-		br := newConnBridge()
+		br := test.NewBridge()
 
 		a0, a1, err := createNewAssociationPair(br)
 		if !assert.Nil(t, err, "failed to create associations") {
@@ -679,13 +516,13 @@ func TestAssocReliable(t *testing.T) {
 		assert.Nil(t, err, "WriteSCTP failed")
 		assert.Equal(t, n, len(msg), "unexpected length of received data")
 
-		err = br.reorder(0)
+		err = br.Reorder(0)
 		assert.Nil(t, err, "reorder failed")
-		br.process()
+		br.Process()
 
 		buf := make([]byte, 32)
 
-		br.process()
+		br.Process()
 
 		n, ppi, err = s1.ReadSCTP(buf)
 		if !assert.Nil(t, err, "ReadSCTP failed") {
@@ -696,7 +533,7 @@ func TestAssocReliable(t *testing.T) {
 		assert.Equal(t, msg, string(buf[:n]), "unexpected received data")
 		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
 
-		br.process()
+		br.Process()
 		assert.False(t, s0.reassemblyQueue.isReadable(), "should no longer be readable")
 		closeAssociationPair(br, a0, a1)
 	})
@@ -707,7 +544,7 @@ func TestAssocReliable(t *testing.T) {
 		const msg2 = "DEFG"
 		var n int
 		var ppi PayloadProtocolIdentifier
-		br := newConnBridge()
+		br := test.NewBridge()
 
 		a0, a1, err := createNewAssociationPair(br)
 		if !assert.Nil(t, err, "failed to create associations") {
@@ -727,9 +564,9 @@ func TestAssocReliable(t *testing.T) {
 		assert.Nil(t, err, "WriteSCTP failed")
 		assert.Equal(t, n, len(msg2), "unexpected length of received data")
 
-		err = br.reorder(0)
+		err = br.Reorder(0)
 		assert.Nil(t, err, "reorder failed")
-		br.process()
+		br.Process()
 
 		buf := make([]byte, 32)
 
@@ -741,7 +578,7 @@ func TestAssocReliable(t *testing.T) {
 		assert.Equal(t, msg2, string(buf[:n]), "unexpected received data")
 		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
 
-		br.process()
+		br.Process()
 
 		n, ppi, err = s1.ReadSCTP(buf)
 		if !assert.Nil(t, err, "ReadSCTP failed") {
@@ -752,7 +589,7 @@ func TestAssocReliable(t *testing.T) {
 		assert.Equal(t, msg1, string(buf[:n]), "unexpected received data")
 		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
 
-		br.process()
+		br.Process()
 		assert.False(t, s0.reassemblyQueue.isReadable(), "should no longer be readable")
 		closeAssociationPair(br, a0, a1)
 	})
@@ -763,7 +600,7 @@ func TestAssocReliable(t *testing.T) {
 		const msg2 = "DEFG"
 		var n int
 		var ppi PayloadProtocolIdentifier
-		br := newConnBridge()
+		br := test.NewBridge()
 
 		a0, a1, err := createNewAssociationPair(br)
 		if !assert.Nil(t, err, "failed to create associations") {
@@ -780,8 +617,8 @@ func TestAssocReliable(t *testing.T) {
 		assert.Nil(t, err, "WriteSCTP failed")
 		assert.Equal(t, n, len(msg2), "unexpected length of received data")
 
-		br.drop(0, 0, 1) // drop the first packet (second one should be sacked)
-		br.process()
+		br.Drop(0, 0, 1) // drop the first packet (second one should be sacked)
+		br.Process()
 
 		buf := make([]byte, 32)
 
@@ -801,7 +638,7 @@ func TestAssocReliable(t *testing.T) {
 		assert.Equal(t, msg2, string(buf[:n]), "unexpected received data")
 		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
 
-		br.process()
+		br.Process()
 		assert.False(t, s0.reassemblyQueue.isReadable(), "should no longer be readable")
 		closeAssociationPair(br, a0, a1)
 	})
@@ -813,7 +650,7 @@ func TestAssocUnreliable(t *testing.T) {
 
 	t.Run("Rexmit ordered", func(t *testing.T) {
 		const si uint16 = 1
-		br := newConnBridge()
+		br := test.NewBridge()
 
 		a0, a1, err := createNewAssociationPair(br)
 		if !assert.Nil(t, err, "failed to create associations") {
@@ -841,8 +678,8 @@ func TestAssocUnreliable(t *testing.T) {
 		}
 		assert.Equal(t, len(msg2), n, "unexpected length of written data")
 
-		br.drop(0, 0, 1) // drop the first packet (second one should be sacked)
-		br.process()
+		br.Drop(0, 0, 1) // drop the first packet (second one should be sacked)
+		br.Process()
 
 		buf := make([]byte, 32)
 		n, ppi, err := s1.ReadSCTP(buf)
@@ -853,14 +690,14 @@ func TestAssocUnreliable(t *testing.T) {
 		assert.Equal(t, msg2, string(buf[:n]), "unexpected received data")
 		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
 
-		br.process()
+		br.Process()
 		assert.False(t, s0.reassemblyQueue.isReadable(), "should no longer be readable")
 		closeAssociationPair(br, a0, a1)
 	})
 
 	t.Run("Rexmit ordered fragments", func(t *testing.T) {
 		const si uint16 = 1
-		br := newConnBridge()
+		br := test.NewBridge()
 
 		a0, a1, err := createNewAssociationPair(br)
 		if !assert.Nil(t, err, "failed to create associations") {
@@ -890,8 +727,8 @@ func TestAssocUnreliable(t *testing.T) {
 		}
 		assert.Equal(t, len(msg2), n, "unexpected length of written data")
 
-		br.drop(0, 0, 2) // drop the second fragment of the first chunk (second chunk should be sacked)
-		br.process()
+		br.Drop(0, 0, 2) // drop the second fragment of the first chunk (second chunk should be sacked)
+		br.Process()
 
 		buf := make([]byte, 32)
 		n, ppi, err := s1.ReadSCTP(buf)
@@ -902,7 +739,7 @@ func TestAssocUnreliable(t *testing.T) {
 		assert.Equal(t, msg2, string(buf[:n]), "unexpected received data")
 		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
 
-		br.process()
+		br.Process()
 
 		assert.False(t, s0.reassemblyQueue.isReadable(), "should no longer be readable")
 		assert.Equal(t, 0, len(s0.reassemblyQueue.ordered), "should be nothing in the ordered queue")
@@ -911,7 +748,7 @@ func TestAssocUnreliable(t *testing.T) {
 
 	t.Run("Rexmit unordered", func(t *testing.T) {
 		const si uint16 = 2
-		br := newConnBridge()
+		br := test.NewBridge()
 
 		a0, a1, err := createNewAssociationPair(br)
 		if !assert.Nil(t, err, "failed to create associations") {
@@ -939,8 +776,8 @@ func TestAssocUnreliable(t *testing.T) {
 		}
 		assert.Equal(t, len(msg2), n, "unexpected length of written data")
 
-		br.drop(0, 0, 1) // drop the first packet (second one should be sacked)
-		br.process()
+		br.Drop(0, 0, 1) // drop the first packet (second one should be sacked)
+		br.Process()
 
 		buf := make([]byte, 32)
 		n, ppi, err := s1.ReadSCTP(buf)
@@ -951,14 +788,14 @@ func TestAssocUnreliable(t *testing.T) {
 		assert.Equal(t, msg2, string(buf[:n]), "unexpected received data")
 		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
 
-		br.process()
+		br.Process()
 		assert.False(t, s0.reassemblyQueue.isReadable(), "should no longer be readable")
 		closeAssociationPair(br, a0, a1)
 	})
 
 	t.Run("Rexmit unordered fragments", func(t *testing.T) {
 		const si uint16 = 1
-		br := newConnBridge()
+		br := test.NewBridge()
 
 		a0, a1, err := createNewAssociationPair(br)
 		if !assert.Nil(t, err, "failed to create associations") {
@@ -988,8 +825,8 @@ func TestAssocUnreliable(t *testing.T) {
 		}
 		assert.Equal(t, len(msg2), n, "unexpected length of written data")
 
-		br.drop(0, 0, 2) // drop the second fragment of the first chunk (second chunk should be sacked)
-		br.process()
+		br.Drop(0, 0, 2) // drop the second fragment of the first chunk (second chunk should be sacked)
+		br.Process()
 
 		buf := make([]byte, 32)
 		n, ppi, err := s1.ReadSCTP(buf)
@@ -1000,7 +837,7 @@ func TestAssocUnreliable(t *testing.T) {
 		assert.Equal(t, msg2, string(buf[:n]), "unexpected received data")
 		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
 
-		br.process()
+		br.Process()
 
 		assert.False(t, s0.reassemblyQueue.isReadable(), "should no longer be readable")
 		assert.Equal(t, 0, len(s0.reassemblyQueue.unordered), "should be nothing in the unordered queue")
@@ -1010,7 +847,7 @@ func TestAssocUnreliable(t *testing.T) {
 
 	t.Run("Timed ordered", func(t *testing.T) {
 		const si uint16 = 3
-		br := newConnBridge()
+		br := test.NewBridge()
 
 		a0, a1, err := createNewAssociationPair(br)
 		if !assert.Nil(t, err, "failed to create associations") {
@@ -1038,8 +875,8 @@ func TestAssocUnreliable(t *testing.T) {
 		}
 		assert.Equal(t, len(msg2), n, "unexpected length of written data")
 
-		br.drop(0, 0, 1) // drop the first packet (second one should be sacked)
-		br.process()
+		br.Drop(0, 0, 1) // drop the first packet (second one should be sacked)
+		br.Process()
 
 		buf := make([]byte, 32)
 		n, ppi, err := s1.ReadSCTP(buf)
@@ -1050,14 +887,14 @@ func TestAssocUnreliable(t *testing.T) {
 		assert.Equal(t, msg2, string(buf[:n]), "unexpected received data")
 		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
 
-		br.process()
+		br.Process()
 		assert.False(t, s0.reassemblyQueue.isReadable(), "should no longer be readable")
 		closeAssociationPair(br, a0, a1)
 	})
 
 	t.Run("Timed unordered", func(t *testing.T) {
 		const si uint16 = 3
-		br := newConnBridge()
+		br := test.NewBridge()
 
 		a0, a1, err := createNewAssociationPair(br)
 		if !assert.Nil(t, err, "failed to create associations") {
@@ -1085,8 +922,8 @@ func TestAssocUnreliable(t *testing.T) {
 		}
 		assert.Equal(t, len(msg2), n, "unexpected length of written data")
 
-		br.drop(0, 0, 1) // drop the first packet (second one should be sacked)
-		br.process()
+		br.Drop(0, 0, 1) // drop the first packet (second one should be sacked)
+		br.Process()
 
 		buf := make([]byte, 32)
 		n, ppi, err := s1.ReadSCTP(buf)
@@ -1097,7 +934,7 @@ func TestAssocUnreliable(t *testing.T) {
 		assert.Equal(t, msg2, string(buf[:n]), "unexpected received data")
 		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
 
-		br.process()
+		br.Process()
 		assert.False(t, s0.reassemblyQueue.isReadable(), "should no longer be readable")
 		assert.Equal(t, 0, len(s0.reassemblyQueue.unordered), "should be nothing in the unordered queue")
 		assert.Equal(t, 0, len(s0.reassemblyQueue.unorderedChunks), "should be nothing in the unorderedChunks list")
@@ -1108,11 +945,7 @@ func TestAssocUnreliable(t *testing.T) {
 func TestCreateForwardTSN(t *testing.T) {
 
 	t.Run("forward one abndoned", func(t *testing.T) {
-		conn := &testConn{
-			br:     nil,
-			id:     0,
-			readCh: nil,
-		}
+		conn := &dumbConn{}
 
 		a := createAssocation(conn)
 
@@ -1138,11 +971,7 @@ func TestCreateForwardTSN(t *testing.T) {
 	})
 
 	t.Run("forward two abndoned with the same SI", func(t *testing.T) {
-		conn := &testConn{
-			br:     nil,
-			id:     0,
-			readCh: nil,
-		}
+		conn := &dumbConn{}
 
 		a := createAssocation(conn)
 
@@ -1204,7 +1033,7 @@ func TestCreateForwardTSN(t *testing.T) {
 
 func TestHandleForwardTSN(t *testing.T) {
 	t.Run("forward 3 unreceived chunks", func(t *testing.T) {
-		conn := &testConn{br: nil, id: 0, readCh: nil}
+		conn := &dumbConn{}
 		a := createAssocation(conn)
 		a.useForwardTSN = true
 		prevTSN := a.peerLastTSN
@@ -1220,7 +1049,7 @@ func TestHandleForwardTSN(t *testing.T) {
 	})
 
 	t.Run("forward 1 then one more for received chunk", func(t *testing.T) {
-		conn := &testConn{br: nil, id: 0, readCh: nil}
+		conn := &dumbConn{}
 		a := createAssocation(conn)
 		a.useForwardTSN = true
 		prevTSN := a.peerLastTSN
