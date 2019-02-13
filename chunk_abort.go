@@ -37,7 +37,7 @@ func (a *chunkAbort) unmarshal(raw []byte) error {
 		return err
 	}
 
-	if a.typ != ABORT {
+	if a.typ != ctAbort {
 		return errors.Errorf("ChunkType is not of type ABORT, actually is %s", a.typ.String())
 	}
 

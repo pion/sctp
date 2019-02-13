@@ -44,8 +44,8 @@ func (a *chunkError) unmarshal(raw []byte) error {
 		return err
 	}
 
-	if a.typ != ERROR {
-		return errors.Errorf("ChunkType is not of type ERROR, actually is %s", a.typ.String())
+	if a.typ != ctError {
+		return errors.Errorf("ChunkType is not of type ctError, actually is %s", a.typ.String())
 	}
 
 	offset := chunkHeaderSize
@@ -65,7 +65,7 @@ func (a *chunkError) unmarshal(raw []byte) error {
 	return nil
 }
 func (a *chunkError) marshal() ([]byte, error) {
-	a.chunkHeader.typ = ERROR
+	a.chunkHeader.typ = ctError
 	a.flags = 0x00
 	a.raw = []byte{}
 	for _, ec := range a.errorCauses {

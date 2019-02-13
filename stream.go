@@ -182,13 +182,13 @@ func (s *Stream) packetize(raw []byte, ppi PayloadProtocolIdentifier) []*chunkPa
 
 	var chunks []*chunkPayloadData
 	for remaining != 0 {
-		l := min(s.association.myMaxMTU, remaining)
+		fragmentSize := min(s.association.myMaxMTU, remaining)
 		chunk := &chunkPayloadData{
 			streamIdentifier:     s.streamIdentifier,
-			userData:             raw[i : i+l],
+			userData:             raw[i : i+fragmentSize],
 			unordered:            unordered,
 			beginningFragment:    i == 0,
-			endingFragment:       remaining-l == 0,
+			endingFragment:       remaining-fragmentSize == 0,
 			immediateSack:        false,
 			payloadType:          ppi,
 			streamSequenceNumber: s.sequenceNumber,
@@ -196,8 +196,8 @@ func (s *Stream) packetize(raw []byte, ppi PayloadProtocolIdentifier) []*chunkPa
 
 		chunks = append(chunks, chunk)
 
-		remaining -= l
-		i += l
+		remaining -= fragmentSize
+		i += fragmentSize
 	}
 
 	// RFC 4960 Sec 6.6

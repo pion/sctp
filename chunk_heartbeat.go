@@ -41,7 +41,7 @@ type chunkHeartbeat struct {
 func (h *chunkHeartbeat) unmarshal(raw []byte) error {
 	if err := h.chunkHeader.unmarshal(raw); err != nil {
 		return err
-	} else if h.typ != HEARTBEAT {
+	} else if h.typ != ctHeartbeat {
 		return errors.Errorf("ChunkType is not of type HEARTBEAT, actually is %s", h.typ.String())
 	}
 

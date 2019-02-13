@@ -77,7 +77,7 @@ func (c *chunkReconfig) marshal() ([]byte, error) {
 		out = append(out, outB...)
 	}
 
-	c.typ = RECONFIG
+	c.typ = ctReconfig
 	c.raw = out
 	return c.chunkHeader.marshal()
 }

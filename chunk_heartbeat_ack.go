@@ -76,7 +76,7 @@ func (h *chunkHeartbeatAck) marshal() ([]byte, error) {
 		}
 	}
 
-	h.chunkHeader.typ = HEARTBEATACK
+	h.chunkHeader.typ = ctHeartbeatAck
 	h.chunkHeader.raw = out
 
 	return h.chunkHeader.marshal()
