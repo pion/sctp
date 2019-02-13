@@ -718,10 +718,11 @@ func (a *Association) handleForwardTSN(c *chunkForwardTSN) []*packet {
 	//   if possible
 	// Meaning, if peerLastTSN+1 points to a chunk that is received,
 	// advance peerLastTSN until peerLastTSN+1 points to unreceived chunk.
-	_, popOk := a.payloadQueue.pop(a.peerLastTSN + 1) // may not exist
-	for popOk {
+	for {
+		if _, popOk := a.payloadQueue.pop(a.peerLastTSN + 1); !popOk {
+			break
+		}
 		a.peerLastTSN++
-		_, popOk = a.payloadQueue.pop(a.peerLastTSN + 1)
 	}
 
 	// Report new peerLastTSN value and abandoned largest SSN value to
