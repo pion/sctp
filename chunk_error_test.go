@@ -10,13 +10,13 @@ import (
 func TestChunkErrorUnrecognizedChunkType(t *testing.T) {
 	const chunkFlags byte = 0x00
 	orgUnrecognizedChunk := []byte{0xc0, 0x0, 0x0, 0x8, 0x0, 0x0, 0x0, 0x3}
-	rawIn := append([]byte{byte(ERROR), chunkFlags, 0x00, 0x10, 0x00, 0x06, 0x00, 0x0c}, orgUnrecognizedChunk...)
+	rawIn := append([]byte{byte(ctError), chunkFlags, 0x00, 0x10, 0x00, 0x06, 0x00, 0x0c}, orgUnrecognizedChunk...)
 
 	t.Run("unmarshal", func(t *testing.T) {
 		c := &chunkError{}
 		err := c.unmarshal(rawIn)
 		assert.Nil(t, err, "unmarshal should suceed")
-		assert.Equal(t, ERROR, c.typ, "chunk type should be ERROR")
+		assert.Equal(t, ctError, c.typ, "chunk type should be ERROR")
 		assert.Equal(t, 1, len(c.errorCauses), "there should be on errorCause")
 
 		ec := c.errorCauses[0]
@@ -43,7 +43,7 @@ func TestChunkErrorUnrecognizedChunkType(t *testing.T) {
 	})
 
 	t.Run("marshal with cause value being nil", func(t *testing.T) {
-		expected := []byte{byte(ERROR), chunkFlags, 0x00, 0x08, 0x00, 0x06, 0x00, 0x04}
+		expected := []byte{byte(ctError), chunkFlags, 0x00, 0x08, 0x00, 0x06, 0x00, 0x04}
 		ecUnrecognizedChunkType := &errorCauseUnrecognizedChunkType{}
 
 		ec := &chunkError{

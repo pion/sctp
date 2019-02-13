@@ -148,7 +148,7 @@ func (p *chunkPayloadData) marshal() ([]byte, error) {
 	}
 
 	p.chunkHeader.flags = flags
-	p.chunkHeader.typ = PAYLOADDATA
+	p.chunkHeader.typ = ctPayloadData
 	p.chunkHeader.raw = payRaw
 	return p.chunkHeader.marshal()
 }

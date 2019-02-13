@@ -22,7 +22,7 @@ func (c *chunkCookieAck) unmarshal(raw []byte) error {
 		return err
 	}
 
-	if c.typ != COOKIEACK {
+	if c.typ != ctCookieAck {
 		return errors.Errorf("ChunkType is not of type COOKIEACK, actually is %s", c.typ.String())
 	}
 
@@ -30,7 +30,7 @@ func (c *chunkCookieAck) unmarshal(raw []byte) error {
 }
 
 func (c *chunkCookieAck) marshal() ([]byte, error) {
-	c.chunkHeader.typ = COOKIEACK
+	c.chunkHeader.typ = ctCookieAck
 	return c.chunkHeader.marshal()
 }
 

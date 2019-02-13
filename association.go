@@ -349,7 +349,7 @@ func setSupportedExtensions(init *chunkInitCommon) {
 	// extension MUST list the ASCONF, the ASCONF-ACK, and the AUTH chunks
 	// in its INIT and INIT-ACK parameters.
 	init.params = append(init.params, &paramSupportedExtensions{
-		ChunkTypes: []chunkType{RECONFIG, FORWARDTSN},
+		ChunkTypes: []chunkType{ctReconfig, ctForwardTSN},
 	})
 }
 
@@ -417,7 +417,7 @@ func (a *Association) handleInitAck(p *packet, i *chunkInitAck) (*packet, error)
 			cookieParam = v
 		case *paramSupportedExtensions:
 			for _, t := range v.ChunkTypes {
-				if t == FORWARDTSN {
+				if t == ctForwardTSN {
 					a.useForwardTSN = true
 				}
 			}

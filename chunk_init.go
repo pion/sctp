@@ -30,7 +30,7 @@ func (i *chunkInit) unmarshal(raw []byte) error {
 		return err
 	}
 
-	if i.typ != INIT {
+	if i.typ != ctInit {
 		return errors.Errorf("ChunkType is not of type INIT, actually is %s", i.typ.String())
 	} else if len(i.raw) < initChunkMinLength {
 		return errors.Errorf("Chunk Value isn't long enough for mandatory parameters exp: %d actual: %d", initChunkMinLength, len(i.raw))
@@ -56,7 +56,7 @@ func (i *chunkInit) marshal() ([]byte, error) {
 		return nil, errors.Wrap(err, "Failed marshalling INIT common data")
 	}
 
-	i.chunkHeader.typ = INIT
+	i.chunkHeader.typ = ctInit
 	i.chunkHeader.raw = initShared
 	return i.chunkHeader.marshal()
 }

@@ -69,7 +69,7 @@ func (s *chunkSelectiveAck) unmarshal(raw []byte) error {
 		return err
 	}
 
-	if s.typ != SACK {
+	if s.typ != ctSack {
 		return errors.Errorf("ChunkType is not of type SACK, actually is %s", s.typ.String())
 	}
 
@@ -118,7 +118,7 @@ func (s *chunkSelectiveAck) marshal() ([]byte, error) {
 		offset += 4
 	}
 
-	s.chunkHeader.typ = SACK
+	s.chunkHeader.typ = ctSack
 	s.chunkHeader.raw = sackRaw
 	return s.chunkHeader.marshal()
 }

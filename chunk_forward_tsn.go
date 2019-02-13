@@ -85,7 +85,7 @@ func (c *chunkForwardTSN) marshal() ([]byte, error) {
 		out = append(out, b...)
 	}
 
-	c.typ = FORWARDTSN
+	c.typ = ctForwardTSN
 	c.raw = out
 	return c.chunkHeader.marshal()
 }

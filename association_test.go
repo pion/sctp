@@ -944,7 +944,7 @@ func TestAssocUnreliable(t *testing.T) {
 
 func TestCreateForwardTSN(t *testing.T) {
 
-	t.Run("forward one abndoned", func(t *testing.T) {
+	t.Run("forward one abandoned", func(t *testing.T) {
 		conn := &dumbConn{}
 
 		a := createAssocation(conn)
@@ -970,7 +970,7 @@ func TestCreateForwardTSN(t *testing.T) {
 		assert.Equal(t, uint16(2), fwdtsn.streams[0].sequence, "ssn should be 2")
 	})
 
-	t.Run("forward two abndoned with the same SI", func(t *testing.T) {
+	t.Run("forward two abandoned with the same SI", func(t *testing.T) {
 		conn := &dumbConn{}
 
 		a := createAssocation(conn)

@@ -73,27 +73,27 @@ func (p *packet) unmarshal(raw []byte) error {
 
 		var c chunk
 		switch chunkType(raw[offset]) {
-		case INIT:
+		case ctInit:
 			c = &chunkInit{}
-		case INITACK:
+		case ctInitAck:
 			c = &chunkInitAck{}
-		case ABORT:
+		case ctAbort:
 			c = &chunkAbort{}
-		case COOKIEECHO:
+		case ctCookieEcho:
 			c = &chunkCookieEcho{}
-		case COOKIEACK:
+		case ctCookieAck:
 			c = &chunkCookieAck{}
-		case HEARTBEAT:
+		case ctHeartbeat:
 			c = &chunkHeartbeat{}
-		case PAYLOADDATA:
+		case ctPayloadData:
 			c = &chunkPayloadData{}
-		case SACK:
+		case ctSack:
 			c = &chunkSelectiveAck{}
-		case RECONFIG:
+		case ctReconfig:
 			c = &chunkReconfig{}
-		case FORWARDTSN:
+		case ctForwardTSN:
 			c = &chunkForwardTSN{}
-		case ERROR:
+		case ctError:
 			c = &chunkError{}
 		default:
 			return errors.Errorf("Failed to unmarshal, contains unknown chunk type %s", chunkType(raw[offset]).String())

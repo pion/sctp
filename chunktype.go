@@ -9,57 +9,57 @@ type chunkType uint8
 
 // List of known chunkType enums
 const (
-	PAYLOADDATA      chunkType = 0
-	INIT             chunkType = 1
-	INITACK          chunkType = 2
-	SACK             chunkType = 3
-	HEARTBEAT        chunkType = 4
-	HEARTBEATACK     chunkType = 5
-	ABORT            chunkType = 6
-	SHUTDOWN         chunkType = 7
-	SHUTDOWNACK      chunkType = 8
-	ERROR            chunkType = 9
-	COOKIEECHO       chunkType = 10
-	COOKIEACK        chunkType = 11
-	CWR              chunkType = 13
-	SHUTDOWNCOMPLETE chunkType = 14
-	RECONFIG         chunkType = 130
-	FORWARDTSN       chunkType = 192
+	ctPayloadData      chunkType = 0
+	ctInit             chunkType = 1
+	ctInitAck          chunkType = 2
+	ctSack             chunkType = 3
+	ctHeartbeat        chunkType = 4
+	ctHeartbeatAck     chunkType = 5
+	ctAbort            chunkType = 6
+	ctShutdown         chunkType = 7
+	ctShutdownAck      chunkType = 8
+	ctError            chunkType = 9
+	ctCookieEcho       chunkType = 10
+	ctCookieAck        chunkType = 11
+	ctCWR              chunkType = 13
+	ctShutdownComplete chunkType = 14
+	ctReconfig         chunkType = 130
+	ctForwardTSN       chunkType = 192
 )
 
 func (c chunkType) String() string {
 	switch c {
-	case PAYLOADDATA:
+	case ctPayloadData:
 		return "Payload data"
-	case INIT:
+	case ctInit:
 		return "Initiation"
-	case INITACK:
+	case ctInitAck:
 		return "Initiation Acknowledgement"
-	case SACK:
+	case ctSack:
 		return "Selective Acknowledgement"
-	case HEARTBEAT:
+	case ctHeartbeat:
 		return "Heartbeat"
-	case HEARTBEATACK:
+	case ctHeartbeatAck:
 		return "Heartbeat Acknowledgement"
-	case ABORT:
+	case ctAbort:
 		return "Abort"
-	case SHUTDOWN:
+	case ctShutdown:
 		return "Shutdown"
-	case SHUTDOWNACK:
+	case ctShutdownAck:
 		return "Shutdown Acknowledgement"
-	case ERROR:
+	case ctError:
 		return "Error"
-	case COOKIEECHO:
+	case ctCookieEcho:
 		return "Cookie Echo"
-	case COOKIEACK:
+	case ctCookieAck:
 		return "Cookie Acknowledgement"
-	case CWR:
+	case ctCWR:
 		return "Congestion Window Reduced"
-	case SHUTDOWNCOMPLETE:
+	case ctShutdownComplete:
 		return "Shutdown Complete"
-	case RECONFIG:
+	case ctReconfig:
 		return "Re-configuration Chunk (RE-CONFIG)"
-	case FORWARDTSN:
+	case ctForwardTSN:
 		return "FORWARD TSN"
 	default:
 		return fmt.Sprintf("Unknown ChunkType: %d", c)
