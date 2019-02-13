@@ -6,7 +6,6 @@ import (
 	"io"
 	"net"
 	"sync"
-
 	"math"
 	"math/rand"
 	"time"
@@ -462,7 +461,6 @@ func (a *Association) handleData(d *chunkPayloadData) []*packet {
 		}
 
 		a.peerLastTSN++
-		fmt.Printf("discard tsn=%d\n", a.peerLastTSN)
 		_, popOk = a.payloadQueue.pop(a.peerLastTSN + 1)
 	}
 
@@ -567,7 +565,7 @@ func (a *Association) handleSack(d *chunkSelectiveAck) ([]*packet, error) {
 				return nil, errors.Errorf("Requested non-existent TSN %v", d.cumulativeTSNAck+uint32(i))
 			}
 
-			fmt.Printf("tsn=%d has been sacked\n", c.tsn)
+			//fmt.Printf("tsn=%d has been sacked\n", c.tsn)
 			c.acked = true
 		}
 	}
@@ -622,7 +620,7 @@ func (a *Association) createForwardTSN() *chunkForwardTSN {
 			continue
 		}
 
-		fmt.Printf("building fwdtsn: si=%d ssn=%d tsn=%d acked=%v\n", c.streamIdentifier, c.streamSequenceNumber, c.tsn, c.acked)
+		//fmt.Printf("building fwdtsn: si=%d ssn=%d tsn=%d acked=%v\n", c.streamIdentifier, c.streamSequenceNumber, c.tsn, c.acked)
 		ssn, ok := streamMap[c.streamIdentifier]
 		if !ok {
 			streamMap[c.streamIdentifier] = c.streamSequenceNumber
@@ -684,7 +682,7 @@ func (a *Association) handleReconfig(c *chunkReconfig) ([]*packet, error) {
 }
 
 func (a *Association) handleForwardTSN(c *chunkForwardTSN) []*packet {
-	fmt.Printf("handleForward: %s\n", c.String())
+	//fmt.Printf("handleForward: %s\n", c.String())
 
 	if !a.useForwardTSN {
 		// Return an error chunk
@@ -883,13 +881,13 @@ func (a *Association) getPayloadDataToSend(onlyUnsent bool) []*packet {
 				if s.reliabilityType == ReliabilityTypeRexmit {
 					if d.nSent >= s.reliabilityValue {
 						d.abandoned = true
-						fmt.Printf("final (abandoned) tsn=%d (remix: %d)\n", d.tsn, d.nSent)
+						//fmt.Printf("final (abandoned) tsn=%d (remix: %d)\n", d.tsn, d.nSent)
 					}
 				} else if s.reliabilityType == ReliabilityTypeTimed {
 					elapsed := int64(time.Since(d.since).Seconds() * 1000)
 					if elapsed >= int64(s.reliabilityValue) {
 						d.abandoned = true
-						fmt.Printf("final (abandoned) tsn=%d (timed: %d)\n", d.tsn, elapsed)
+						//fmt.Printf("final (abandoned) tsn=%d (timed: %d)\n", d.tsn, elapsed)
 					}
 				}
 			}
@@ -898,7 +896,7 @@ func (a *Association) getPayloadDataToSend(onlyUnsent bool) []*packet {
 		// TODO: aggregate chunks into a packet as many as the MTU allows
 		// TODO: use congestion window to determine how much we should send
 
-		fmt.Printf("sending tsn=%d ssn=%d sent=%d\n", d.tsn, d.streamSequenceNumber, d.nSent)
+		//fmt.Printf("sending tsn=%d ssn=%d sent=%d\n", d.tsn, d.streamSequenceNumber, d.nSent)
 
 		packets = append(packets, a.createPacket([]chunk{d}))
 	}
