@@ -400,12 +400,10 @@ func createNewAssociationPair(br *connBridge) (*Association, *Association, error
 
 	go func() {
 		a0, err0 = Client(br.conn0)
-		fmt.Printf("org a0=%p\n", a0)
 		handshake0Ch <- true
 	}()
 	go func() {
 		a1, err1 = Client(br.conn1)
-		fmt.Printf("org a1=%p\n", a1)
 		handshake1Ch <- true
 	}()
 
@@ -437,9 +435,6 @@ loop1:
 	if err1 != nil {
 		return nil, nil, err1
 	}
-
-	fmt.Printf("a0=%p\n", a0)
-	fmt.Printf("a1=%p\n", a1)
 
 	return a0, a1, nil
 }
@@ -742,7 +737,6 @@ func TestAssocReliable(t *testing.T) {
 		if !assert.Nil(t, err, "ReadSCTP failed") {
 			assert.FailNow(t, "failed due to earlier error")
 		}
-		fmt.Printf("First data received: %s\n", string(buf[:n]))
 		assert.Equal(t, n, len(msg2), "unexpected length of received data")
 		assert.Equal(t, msg2, string(buf[:n]), "unexpected received data")
 		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")

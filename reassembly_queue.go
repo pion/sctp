@@ -147,7 +147,7 @@ func (r *reassemblyQueue) push(chunk *chunkPayloadData) bool {
 	//fmt.Printf("SI[%d]: push SSN %d Next SSN=%d\n", r.si, chunk.streamSequenceNumber, r.nextSSN)
 
 	if sna16LT(chunk.streamSequenceNumber, r.nextSSN) {
-		fmt.Printf("SI[%d]: ignore stale SSN %d < %d\n", r.si, chunk.streamSequenceNumber, r.nextSSN)
+		//fmt.Printf("SI[%d]: ignore stale SSN %d < %d\n", r.si, chunk.streamSequenceNumber, r.nextSSN)
 		return false
 	}
 
@@ -257,11 +257,11 @@ func (r *reassemblyQueue) read(buf []byte) (int, PayloadProtocolIdentifier, erro
 		// Now, check ordered
 		cset = r.ordered[0]
 		if !cset.isComplete() {
-			fmt.Printf("SI[%d]: SSN %d in not ready. Next SSN=%d\n", r.si, cset.ssn, r.nextSSN)
+			//fmt.Printf("SI[%d]: SSN %d in not ready. Next SSN=%d\n", r.si, cset.ssn, r.nextSSN)
 			return 0, 0, fmt.Errorf("try again")
 		}
 		if sna16GT(cset.ssn, r.nextSSN) {
-			fmt.Printf("SI[%d]: SSN %d blocked. Next SSN=%d\n", r.si, cset.ssn, r.nextSSN)
+			//fmt.Printf("SI[%d]: SSN %d blocked. Next SSN=%d\n", r.si, cset.ssn, r.nextSSN)
 			return 0, 0, fmt.Errorf("try again")
 		}
 		r.ordered = r.ordered[1:]
