@@ -179,7 +179,12 @@ func (a *Association) init() {
 	a.lock.Lock()
 	defer a.lock.Unlock()
 
-	err := a.send(a.createInit())
+	p := a.createInit()
+
+	a.lock.Unlock()
+	err := a.send(p)
+	a.lock.Lock()
+
 	if err != nil {
 		fmt.Printf("Failed to send init: %v", err)
 	}
@@ -440,7 +445,7 @@ func (a *Association) handleInitAck(p *packet, i *chunkInitAck) (*packet, error)
 func (a *Association) handleData(d *chunkPayloadData) []*packet {
 	added := a.payloadQueue.push(d, a.peerLastTSN)
 	if added {
-		// Pass the new chunk to session level as soon as it arrives
+		// Pass the new chunk to stream level as soon as it arrives
 		s := a.getOrCreateStream(d.streamIdentifier)
 		s.handleData(d)
 	}
@@ -921,7 +926,9 @@ func (a *Association) generateNextRSN() uint32 {
 
 // send sends a packet over nextConn. The caller should hold the lock.
 func (a *Association) send(p *packet) error {
+	a.lock.Lock()
 	raw, err := p.marshal()
+	a.lock.Unlock()
 	if err != nil {
 		return errors.Wrap(err, "Failed to send packet to outbound handler")
 	}
