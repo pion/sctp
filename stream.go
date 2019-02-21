@@ -183,9 +183,15 @@ func (s *Stream) packetize(raw []byte, ppi PayloadProtocolIdentifier) []*chunkPa
 	var chunks []*chunkPayloadData
 	for remaining != 0 {
 		fragmentSize := min(s.association.myMaxMTU, remaining)
+
+		// Copy the userdata since we'll have to store it until acked
+		// and the caller may re-use the buffer in the mean time
+		userData := make([]byte, fragmentSize)
+		copy(userData, raw[i:i+fragmentSize])
+
 		chunk := &chunkPayloadData{
 			streamIdentifier:     s.streamIdentifier,
-			userData:             raw[i : i+fragmentSize],
+			userData:             userData,
 			unordered:            unordered,
 			beginningFragment:    i == 0,
 			endingFragment:       remaining-fragmentSize == 0,
