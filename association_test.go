@@ -266,6 +266,10 @@ loop1:
 		}
 	}
 
+	if !a0handshakeDone || !a1handshakeDone {
+		return nil, nil, fmt.Errorf("handshake failed")
+	}
+
 	if err0 != nil {
 		return nil, nil, err0
 	}
@@ -1074,5 +1078,227 @@ func TestHandleForwardTSN(t *testing.T) {
 		a.handleForwardTSN(fwdtsn)
 
 		assert.Equal(t, a.peerLastTSN, prevTSN+2, "peerLastTSN should advance by 3 ")
+	})
+}
+
+func TestAssocT1InitTimer(t *testing.T) {
+	t.Run("Retransmission success", func(t *testing.T) {
+		br := test.NewBridge()
+		a0 := createAssocation(br.GetConn0())
+		go a0.readLoop()
+		a1 := createAssocation(br.GetConn1())
+		go a1.readLoop()
+
+		var err0, err1 error
+		a0ReadyCh := make(chan bool)
+		a1ReadyCh := make(chan bool)
+
+		assert.Equal(t, rtoInitial, a0.rtoMgr.getRTO())
+		assert.Equal(t, rtoInitial, a1.rtoMgr.getRTO())
+
+		// modified rto for fast test
+		a0.rtoMgr.rto = 20
+
+		go func() {
+			err0 = <-a0.handshakeCompletedCh
+			fmt.Println("a0 ready")
+			a0ReadyCh <- true
+		}()
+
+		go func() {
+			err1 = <-a1.handshakeCompletedCh
+			fmt.Println("a1 ready")
+			a1ReadyCh <- true
+		}()
+
+		// Drop the first write
+		br.DropNextNWrites(0, 1)
+
+		// Start the handlshake
+		a0.init()
+
+		a0Ready := false
+		a1Ready := false
+		for !a0Ready || !a1Ready {
+			br.Process()
+
+			select {
+			case a0Ready = <-a0ReadyCh:
+			case a1Ready = <-a1ReadyCh:
+			default:
+			}
+		}
+
+		fmt.Println("connected!")
+
+		assert.Nil(t, err0, "should be nil")
+		assert.Nil(t, err1, "should be nil")
+
+		a0.Close()
+		a1.Close()
+	})
+
+	t.Run("Retransmission failure", func(t *testing.T) {
+		br := test.NewBridge()
+		a0 := createAssocation(br.GetConn0())
+		go a0.readLoop()
+		a1 := createAssocation(br.GetConn1())
+		go a1.readLoop()
+
+		var err0, err1 error
+		a0ReadyCh := make(chan bool)
+		a1ReadyCh := make(chan bool)
+
+		assert.Equal(t, rtoInitial, a0.rtoMgr.getRTO())
+		assert.Equal(t, rtoInitial, a1.rtoMgr.getRTO())
+
+		// modified rto for fast test
+		a0.rtoMgr.rto = 20
+		a1.rtoMgr.rto = 20
+
+		// fail after 4 retransmission
+		a0.t1Init.maxRetrans = 4
+		a1.t1Init.maxRetrans = 4
+
+		go func() {
+			err0 = <-a0.handshakeCompletedCh
+			a0ReadyCh <- true
+		}()
+
+		go func() {
+			err1 = <-a1.handshakeCompletedCh
+			a1ReadyCh <- true
+		}()
+
+		// Drop all INIT
+		br.DropNextNWrites(0, 99)
+		br.DropNextNWrites(1, 99)
+
+		// Start the handlshake
+		a0.init()
+		a1.init()
+
+		a0Ready := false
+		a1Ready := false
+		for !a0Ready || !a1Ready {
+			br.Process()
+
+			select {
+			case a0Ready = <-a0ReadyCh:
+			case a1Ready = <-a1ReadyCh:
+			default:
+			}
+		}
+
+		assert.NotNil(t, err0, "should NOT be nil")
+		assert.NotNil(t, err1, "should NOT be nil")
+
+		a0.Close()
+		a1.Close()
+	})
+}
+
+func TestAssocT1CookieTimer(t *testing.T) {
+	t.Run("Retransmission success", func(t *testing.T) {
+		br := test.NewBridge()
+		a0 := createAssocation(br.GetConn0())
+		go a0.readLoop()
+		a1 := createAssocation(br.GetConn1())
+		go a1.readLoop()
+
+		var err0, err1 error
+		a0ReadyCh := make(chan bool)
+		a1ReadyCh := make(chan bool)
+
+		assert.Equal(t, rtoInitial, a0.rtoMgr.getRTO())
+		assert.Equal(t, rtoInitial, a1.rtoMgr.getRTO())
+
+		// modified rto for fast test
+		a0.rtoMgr.rto = 20
+
+		go func() {
+			err0 = <-a0.handshakeCompletedCh
+			a0ReadyCh <- true
+		}()
+
+		go func() {
+			err1 = <-a1.handshakeCompletedCh
+			a1ReadyCh <- true
+		}()
+
+		// Start the handlshake
+		a0.init()
+
+		// Let the INIT go.
+		br.Tick()
+
+		// Drop COOKIE-ECHO
+		br.DropNextNWrites(0, 1)
+
+		a0Ready := false
+		a1Ready := false
+		for !a0Ready || !a1Ready {
+			br.Process()
+
+			select {
+			case a0Ready = <-a0ReadyCh:
+			case a1Ready = <-a1ReadyCh:
+			default:
+			}
+		}
+
+		assert.Nil(t, err0, "should be nil")
+		assert.Nil(t, err1, "should be nil")
+
+		a0.Close()
+		a1.Close()
+	})
+
+	t.Run("Retransmission failure", func(t *testing.T) {
+		br := test.NewBridge()
+		a0 := createAssocation(br.GetConn0())
+		go a0.readLoop()
+		a1 := createAssocation(br.GetConn1())
+		go a1.readLoop()
+
+		var err0 error
+		a0ReadyCh := make(chan bool)
+
+		assert.Equal(t, rtoInitial, a0.rtoMgr.getRTO())
+		assert.Equal(t, rtoInitial, a1.rtoMgr.getRTO())
+
+		// modified rto for fast test
+		a0.rtoMgr.rto = 20
+		// fail after 4 retransmission
+		a0.t1Cookie.maxRetrans = 4
+
+		go func() {
+			err0 = <-a0.handshakeCompletedCh
+			a0ReadyCh <- true
+		}()
+
+		// Start the handlshake
+		a0.init()
+
+		// Let the INIT go.
+		br.Tick()
+
+		// Drop COOKIE-ECHO
+		br.DropNextNWrites(0, 99)
+
+		a0Ready := false
+		for !a0Ready {
+			br.Process()
+
+			select {
+			case a0Ready = <-a0ReadyCh:
+			default:
+			}
+		}
+
+		assert.NotNil(t, err0, "should an error")
+
+		a0.Close()
+		a1.Close()
 	})
 }

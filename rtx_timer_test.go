@@ -1,7 +1,7 @@
 package sctp
 
 import (
-	"fmt"
+	//"fmt"
 	"math"
 	"testing"
 	"time"
@@ -77,11 +77,11 @@ type testTimerObserver struct {
 	onRtxFailure onRtxFailure
 }
 
-func (o *testTimerObserver) OnRetransmissionTimeout(id int, n uint) {
+func (o *testTimerObserver) onRetransmissionTimeout(id int, n uint) {
 	o.onRTO(id, n)
 }
 
-func (o *testTimerObserver) OnRetransmissionFailure(id int) {
+func (o *testTimerObserver) onRetransmissionFailure(id int) {
 	o.onRtxFailure(id)
 }
 
@@ -101,13 +101,13 @@ func TestRtxTimer(t *testing.T) {
 				assert.Equal(t, timerID, id, "unexpted timer ID: %d", id)
 			},
 			onRtxFailure: func(id int) {},
-		})
+		}, pathMaxRetrans)
 
 		assert.False(t, rt.isRunning(), "should not be running")
 
 		//since := time.Now()
-		rt.start(30)
-
+		ok := rt.start(30)
+		assert.True(t, ok, "should be true")
 		assert.True(t, rt.isRunning(), "should be running")
 
 		time.Sleep(650 * time.Millisecond)
@@ -117,39 +117,81 @@ func TestRtxTimer(t *testing.T) {
 		assert.Equal(t, 4, nCbs, "should be called 4 times (actual: %d)", nCbs)
 	})
 
-	t.Run("start, stop then start", func(t *testing.T) {
-		timerID := 1
-		var nGoodCbs int
-		var nBadCbs int
-		var afterStop bool
+	t.Run("last start wins", func(t *testing.T) {
+		timerID := 3
+		var nCbs int
+
 		rt := newRTXTimer(timerID, &testTimerObserver{
 			onRTO: func(id int, nRtos uint) {
-				if !afterStop {
-					nBadCbs++
-				} else {
-					nGoodCbs++
-				}
+				nCbs++
 				assert.Equal(t, timerID, id, "unexpted timer ID: %d", id)
 			},
 			onRtxFailure: func(id int) {},
-		})
+		}, pathMaxRetrans)
 
 		interval := float64(30.0)
+		ok := rt.start(interval)
+		assert.True(t, ok, "should be accepted")
+		ok = rt.start(interval * 99) // should ignored
+		assert.False(t, ok, "should be ignored")
+		ok = rt.start(interval * 99) // should ignored
+		assert.False(t, ok, "should be ignored")
 
-		rt.start(interval)
-		rt.stop()
-		assert.False(t, rt.isRunning(), "should not be running")
-
-		afterStop = true
-
-		rt.start(interval)
-		assert.True(t, rt.isRunning(), "should be running")
 		time.Sleep(time.Duration(interval*1.5) * time.Millisecond)
 		rt.stop()
 
-		assert.Equal(t, 1, nGoodCbs, "must be called once")
-		assert.Equal(t, 0, nBadCbs, "must not be called at all")
 		assert.False(t, rt.isRunning(), "should not be running")
+		assert.Equal(t, 1, nCbs, "must be called once")
+	})
+
+	t.Run("stop right afeter start", func(t *testing.T) {
+		timerID := 3
+		var nCbs int
+
+		rt := newRTXTimer(timerID, &testTimerObserver{
+			onRTO: func(id int, nRtos uint) {
+				nCbs++
+				assert.Equal(t, timerID, id, "unexpted timer ID: %d", id)
+			},
+			onRtxFailure: func(id int) {},
+		}, pathMaxRetrans)
+
+		interval := float64(30.0)
+		ok := rt.start(interval)
+		assert.True(t, ok, "should be accepted")
+		rt.stop()
+
+		time.Sleep(time.Duration(interval*1.5) * time.Millisecond)
+		rt.stop()
+
+		assert.False(t, rt.isRunning(), "should not be running")
+		assert.Equal(t, 0, nCbs, "must be called once")
+	})
+
+	t.Run("start, stop then start", func(t *testing.T) {
+		timerID := 1
+		var nCbs int
+		rt := newRTXTimer(timerID, &testTimerObserver{
+			onRTO: func(id int, nRtos uint) {
+				nCbs++
+				assert.Equal(t, timerID, id, "unexpted timer ID: %d", id)
+			},
+			onRtxFailure: func(id int) {},
+		}, pathMaxRetrans)
+
+		interval := float64(30.0)
+		ok := rt.start(interval)
+		assert.True(t, ok, "should be accepted")
+		rt.stop()
+		assert.False(t, rt.isRunning(), "should NOT be running")
+		ok = rt.start(interval)
+		assert.True(t, ok, "should be accepted")
+		assert.True(t, rt.isRunning(), "should be running")
+
+		time.Sleep(time.Duration(interval*1.5) * time.Millisecond)
+		rt.stop()
+		assert.False(t, rt.isRunning(), "should NOT be running")
+		assert.Equal(t, 1, nCbs, "must be called once")
 	})
 
 	t.Run("start and stop in a tight loop", func(t *testing.T) {
@@ -162,54 +204,17 @@ func TestRtxTimer(t *testing.T) {
 				assert.Equal(t, timerID, id, "unexpted timer ID: %d", id)
 			},
 			onRtxFailure: func(id int) {},
-		})
+		}, pathMaxRetrans)
 
 		for i := 0; i < 1000; i++ {
 			ok := rt.start(30)
-			assert.True(t, ok, "should be true")
+			assert.True(t, ok, "should be accepted")
 			assert.True(t, rt.isRunning(), "should be running")
-			//since := time.Now()
 			rt.stop()
-			//t.Logf("stop() took %.03f\n", time.Since(since).Seconds())
-			assert.False(t, rt.isRunning(), "should not be running")
+			assert.False(t, rt.isRunning(), "should NOT be running")
 		}
 
 		assert.Equal(t, 0, nCbs, "no callback should be made")
-	})
-
-	t.Run("many start calls", func(t *testing.T) {
-		timerID := 3
-		var nCbs int
-
-		rt := newRTXTimer(timerID, &testTimerObserver{
-			onRTO: func(id int, nRtos uint) {
-				nCbs++
-				assert.Equal(t, timerID, id, "unexpted timer ID: %d", id)
-			},
-			onRtxFailure: func(id int) {},
-		})
-
-		var ok bool
-		interval := float64(30.0)
-		ok = rt.start(interval)
-		assert.True(t, ok, "must be true")
-
-		for i := 0; i < 3; i++ {
-			// The timer has already stareted. This should be noop
-			// and return false.
-			ok = rt.start(interval)
-			assert.False(t, ok, "must be false")
-		}
-
-		time.Sleep(time.Duration(interval*1.5) * time.Millisecond)
-		rt.stop()
-		assert.False(t, rt.isRunning(), "should not be running")
-
-		assert.Equal(t, 1, nCbs, "must be called once")
-
-		// wait extra 25 msec to make sure the timer has stopped
-		time.Sleep(time.Duration(interval*1.5) * time.Millisecond)
-		assert.Equal(t, 1, nCbs, "must be called once")
 	})
 
 	t.Run("time should stop after rtx failure", func(t *testing.T) {
@@ -231,7 +236,7 @@ func TestRtxTimer(t *testing.T) {
 				t.Logf("onRtxFailure: elapsed=%.03f\n", elapsed)
 				doneCh <- true
 			},
-		})
+		}, pathMaxRetrans)
 
 		// RTO(msec) Total(msec)
 		//  10          10    1st RTO
@@ -243,7 +248,8 @@ func TestRtxTimer(t *testing.T) {
 
 		interval := float64(10.0)
 		ok := rt.start(interval)
-		assert.True(t, ok, "must be true")
+		assert.True(t, ok, "should be accepted")
+		assert.True(t, rt.isRunning(), "should be running")
 
 		<-doneCh
 
@@ -253,7 +259,7 @@ func TestRtxTimer(t *testing.T) {
 		assert.True(t, elapsed < 0.700, "must fail in less than 700 msec")
 	})
 
-	t.Run("stop on timer not running is noop", func(t *testing.T) {
+	t.Run("stop timer that is not running is noop", func(t *testing.T) {
 		timerID := 5
 		doneCh := make(chan bool)
 
@@ -263,23 +269,18 @@ func TestRtxTimer(t *testing.T) {
 				doneCh <- true
 			},
 			onRtxFailure: func(id int) {},
-		})
+		}, pathMaxRetrans)
 
-		fmt.Println("calling stop() 10 times")
 		for i := 0; i < 10; i++ {
 			rt.stop()
 		}
 
-		fmt.Println("start()")
-		ok := rt.start(20.0)
-		assert.True(t, ok, "must be true")
+		ok := rt.start(20)
+		assert.True(t, ok, "should be accepted")
 		assert.True(t, rt.isRunning(), "must be running")
 
-		fmt.Println("waiting done")
 		<-doneCh
 		rt.stop()
-		fmt.Println("done")
-
 		assert.False(t, rt.isRunning(), "must be false")
 	})
 }

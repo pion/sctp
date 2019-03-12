@@ -24,7 +24,7 @@ type associationState uint8
 
 // associationState enums
 const (
-	open associationState = iota + 1
+	closed associationState = iota + 1
 	cookieEchoed
 	cookieWait
 	established
@@ -34,10 +34,17 @@ const (
 	shutdownSent
 )
 
+// retransmission timer IDs
+const (
+	timerT1Init int = iota
+	timerT1Cookie
+	timerT3RTX
+)
+
 func (a associationState) String() string {
 	switch a {
-	case open:
-		return "Open"
+	case closed:
+		return "Closed"
 	case cookieEchoed:
 		return "CookieEchoed"
 	case cookieWait:
@@ -115,23 +122,35 @@ type Association struct {
 	advancedPeerTSNAckPoint uint32
 	useForwardTSN           bool
 
+	// RTX timer
+	rtoMgr   *rtoManager
+	t1Init   *rtxTimer
+	t1Cookie *rtxTimer
+	t3RTX    *rtxTimer
+
+	// Chunks stored for retransmission
+	storedInit       *chunkInit
+	storedCookieEcho *chunkCookieEcho
+
 	streams              map[uint16]*Stream
 	acceptCh             chan *Stream
-	doneCh               chan struct{}
-	handshakeCompletedCh chan struct{}
+	closeCh              chan struct{}
+	handshakeCompletedCh chan error
 }
 
 // Server accepts a SCTP stream over a conn
 func Server(nextConn net.Conn) (*Association, error) {
 	a := createAssocation(nextConn)
 	go a.readLoop()
-	<-a.handshakeCompletedCh
 
 	select {
-	case <-a.handshakeCompletedCh:
+	case err := <-a.handshakeCompletedCh:
+		if err != nil {
+			return nil, err
+		}
 		return a, nil
-	case <-a.doneCh:
-		return nil, errors.Errorf("Assocation finished before connecting")
+	case <-a.closeCh:
+		return nil, errors.Errorf("Assocation closed before connecting")
 	}
 }
 
@@ -142,10 +161,13 @@ func Client(nextConn net.Conn) (*Association, error) {
 	a.init()
 
 	select {
-	case <-a.handshakeCompletedCh:
+	case err := <-a.handshakeCompletedCh:
+		if err != nil {
+			return nil, err
+		}
 		return a, nil
-	case <-a.doneCh:
-		return nil, errors.Errorf("Assocation finished before connecting")
+	case <-a.closeCh:
+		return nil, errors.Errorf("Assocation closed before connecting")
 	}
 }
 
@@ -154,7 +176,7 @@ func createAssocation(nextConn net.Conn) *Association {
 	r := rand.New(rs)
 
 	tsn := r.Uint32()
-	return &Association{
+	a := &Association{
 		nextConn:                nextConn,
 		myMaxNumOutboundStreams: math.MaxUint16,
 		myMaxNumInboundStreams:  math.MaxUint16,
@@ -165,30 +187,92 @@ func createAssocation(nextConn net.Conn) *Association {
 		myVerificationTag:       r.Uint32(),
 		myNextTSN:               tsn,
 		myNextRSN:               tsn,
-		state:                   open,
+		state:                   closed,
+		rtoMgr:                  newRTOManager(),
 		streams:                 make(map[uint16]*Stream),
 		acceptCh:                make(chan *Stream),
-		doneCh:                  make(chan struct{}),
-		handshakeCompletedCh:    make(chan struct{}),
+		closeCh:                 make(chan struct{}),
+		handshakeCompletedCh:    make(chan error),
 		cumulativeTSNAckPoint:   tsn - 1,
 		advancedPeerTSNAckPoint: tsn - 1,
 	}
+
+	a.t1Init = newRTXTimer(timerT1Init, a, maxInitRetrans)
+	a.t1Cookie = newRTXTimer(timerT1Cookie, a, maxInitRetrans)
+	a.t3RTX = newRTXTimer(timerT3RTX, a, pathMaxRetrans)
+
+	return a
 }
 
 func (a *Association) init() {
 	a.lock.Lock()
 	defer a.lock.Unlock()
 
-	p := a.createInit()
+	init := &chunkInit{}
+	init.initialTSN = a.myNextTSN
+	init.numOutboundStreams = a.myMaxNumOutboundStreams
+	init.numInboundStreams = a.myMaxNumInboundStreams
+	init.initiateTag = a.myVerificationTag
+	init.advertisedReceiverWindowCredit = a.myReceiverWindowCredit
+	setSupportedExtensions(&init.chunkInitCommon)
+	a.storedInit = init
+
+	err := a.sendInit()
+	if err != nil {
+		// TODO: use logging
+		fmt.Printf("Failed to send init: %v\n", err)
+	}
+
+	fmt.Println("starting T1-init timer")
+	a.t1Init.start(a.rtoMgr.getRTO())
+
+	a.setState(cookieWait)
+
+}
+
+// caller must hold a.lock
+func (a *Association) sendInit() error {
+	fmt.Println("sending Init")
+
+	if a.storedInit == nil {
+		return fmt.Errorf("Init not stored to send")
+	}
+
+	outbound := &packet{}
+	outbound.verificationTag = a.peerVerificationTag
+	a.sourcePort = 5000      // TODO: Spec??
+	a.destinationPort = 5000 // TODO: Spec??
+	outbound.sourcePort = a.sourcePort
+	outbound.destinationPort = a.destinationPort
+
+	outbound.chunks = []chunk{a.storedInit}
 
 	a.lock.Unlock()
-	err := a.send(p)
+	err := a.send(outbound)
 	a.lock.Lock()
 
-	if err != nil {
-		fmt.Printf("Failed to send init: %v", err)
+	return err
+}
+
+// caller must hold a.lock
+func (a *Association) sendCookieEcho() error {
+	if a.storedCookieEcho == nil {
+		return fmt.Errorf("cookieEcho not stored to send")
 	}
-	a.setState(cookieWait)
+
+	fmt.Println("sending CookieEcho")
+
+	outbound := &packet{}
+	outbound.verificationTag = a.peerVerificationTag
+	outbound.sourcePort = a.sourcePort
+	outbound.destinationPort = a.destinationPort
+	outbound.chunks = []chunk{a.storedCookieEcho}
+
+	a.lock.Unlock()
+	err := a.send(outbound)
+	a.lock.Lock()
+
+	return err
 }
 
 // Close ends the SCTP Association and cleans up any state
@@ -198,8 +282,13 @@ func (a *Association) Close() error {
 		return err
 	}
 
+	// Stop all retransmission timers
+	a.t1Init.stop()
+	a.t1Cookie.stop()
+	a.t3RTX.stop()
+
 	// Wait for readLoop to end
-	<-a.doneCh
+	<-a.closeCh
 
 	return nil
 }
@@ -213,16 +302,18 @@ func (a *Association) readLoop() {
 		}
 		a.lock.Unlock()
 		close(a.acceptCh)
-		close(a.doneCh)
+		a.closeCh <- struct{}{}
 	}()
 	for {
 		// buffer is recreated because the user data is
 		// passed to the reassembly queue without copying
 		buffer := make([]byte, receiveMTU)
+
 		n, err := a.nextConn.Read(buffer)
 		if err != nil {
 			return
 		}
+
 		if err = a.handleInbound(buffer[:n]); err != nil {
 			fmt.Println(errors.Wrap(err, "Failed to push SCTP packet"))
 		}
@@ -320,32 +411,9 @@ func min(a, b uint16) uint16 {
 // setState sets the state of the Association.
 func (a *Association) setState(state associationState) {
 	if a.state != state {
+		fmt.Printf("[%s] state change: '%s' => '%s'\n", a.nextConn.LocalAddr().String(), a.state.String(), state.String())
 		a.state = state
 	}
-}
-
-// The caller should hold the lock.
-func (a *Association) createInit() *packet {
-	outbound := &packet{}
-	outbound.verificationTag = a.peerVerificationTag
-	a.sourcePort = 5000      // TODO: Spec??
-	a.destinationPort = 5000 // TODO: Spec??
-	outbound.sourcePort = a.sourcePort
-	outbound.destinationPort = a.destinationPort
-
-	init := &chunkInit{}
-
-	init.initialTSN = a.myNextTSN
-	init.numOutboundStreams = a.myMaxNumOutboundStreams
-	init.numInboundStreams = a.myMaxNumInboundStreams
-	init.initiateTag = a.myVerificationTag
-	init.advertisedReceiverWindowCredit = a.myReceiverWindowCredit
-
-	setSupportedExtensions(&init.chunkInitCommon)
-
-	outbound.chunks = []chunk{init}
-
-	return outbound
 }
 
 func setSupportedExtensions(init *chunkInitCommon) {
@@ -400,7 +468,7 @@ func (a *Association) handleInit(p *packet, i *chunkInit) *packet {
 }
 
 // The caller should hold the lock.
-func (a *Association) handleInitAck(p *packet, i *chunkInitAck) (*packet, error) {
+func (a *Association) handleInitAck(p *packet, i *chunkInitAck) error {
 	a.myMaxNumInboundStreams = min(i.numInboundStreams, a.myMaxNumInboundStreams)
 	a.myMaxNumOutboundStreams = min(i.numOutboundStreams, a.myMaxNumOutboundStreams)
 	a.peerVerificationTag = i.initiateTag
@@ -410,10 +478,9 @@ func (a *Association) handleInitAck(p *packet, i *chunkInitAck) (*packet, error)
 		fmt.Println("handleInitAck: port mismatch")
 	}
 
-	outbound := &packet{}
-	outbound.verificationTag = a.peerVerificationTag
-	outbound.sourcePort = a.sourcePort
-	outbound.destinationPort = a.destinationPort
+	// stop T1-init timer
+	a.t1Init.stop()
+	a.storedInit = nil
 
 	var cookieParam *paramStateCookie
 	for _, param := range i.params {
@@ -429,16 +496,22 @@ func (a *Association) handleInitAck(p *packet, i *chunkInitAck) (*packet, error)
 		}
 	}
 	if cookieParam == nil {
-		return nil, errors.New("no cookie in InitAck")
+		return errors.New("no cookie in InitAck")
 	}
 
-	cookieEcho := &chunkCookieEcho{}
+	a.storedCookieEcho = &chunkCookieEcho{}
+	a.storedCookieEcho.cookie = cookieParam.cookie
 
-	cookieEcho.cookie = cookieParam.cookie
+	err := a.sendCookieEcho()
+	if err != nil {
+		// TODO: use logging
+		fmt.Printf("Failed to send init: %v\n", err)
+	}
 
-	outbound.chunks = []chunk{cookieEcho}
+	// start t1-cookie timer
+	a.t1Cookie.start(a.rtoMgr.getRTO())
 
-	return outbound, nil
+	return nil
 }
 
 // The caller should hold the lock.
@@ -952,8 +1025,9 @@ func (a *Association) handleChunk(p *packet, c chunk) ([]*packet, error) {
 
 	switch c := c.(type) {
 	case *chunkInit:
+		fmt.Printf("[%s] chunkInit received in state '%s'\n", a.nextConn.LocalAddr().String(), a.state.String())
 		switch a.state {
-		case open:
+		case closed:
 			return pack(a.handleInit(p, c)), nil
 		case cookieWait:
 			// https://tools.ietf.org/html/rfc4960#section-5.2.1
@@ -977,14 +1051,15 @@ func (a *Association) handleChunk(p *packet, c chunk) ([]*packet, error) {
 		}
 
 	case *chunkInitAck:
+		fmt.Printf("[%s] chunkInitAck received in state '%s'\n", a.nextConn.LocalAddr().String(), a.state.String())
 		switch a.state {
 		case cookieWait:
-			r, err := a.handleInitAck(p, c)
+			err := a.handleInitAck(p, c)
 			if err != nil {
 				return nil, err
 			}
 			a.setState(cookieEchoed)
-			return pack(r), nil
+			return nil, nil
 		default:
 			return nil, errors.Errorf("TODO Handle Init acks when in state %s", a.state.String())
 		}
@@ -1021,23 +1096,42 @@ func (a *Association) handleChunk(p *packet, c chunk) ([]*packet, error) {
 		}), nil
 
 	case *chunkCookieEcho:
-		if bytes.Equal(a.myCookie.cookie, c.cookie) {
-			p := &packet{
-				verificationTag: a.peerVerificationTag,
-				sourcePort:      a.sourcePort,
-				destinationPort: a.destinationPort,
-				chunks:          []chunk{&chunkCookieAck{}},
-			}
-			a.setState(established)
-			close(a.handshakeCompletedCh)
+		fmt.Printf("[%s] chunkCookieEcho received in state '%s'\n", a.nextConn.LocalAddr().String(), a.state.String())
+		if a.state == closed || a.state == cookieWait || a.state == cookieEchoed {
+			if bytes.Equal(a.myCookie.cookie, c.cookie) {
+				// stop T1-init timer
+				a.t1Init.stop()
+				a.storedInit = nil
+				// stop T1-cookie timer
+				a.t1Cookie.stop()
+				a.storedCookieEcho = nil
 
-			return pack(p), nil
+				p := &packet{
+					verificationTag: a.peerVerificationTag,
+					sourcePort:      a.sourcePort,
+					destinationPort: a.destinationPort,
+					chunks:          []chunk{&chunkCookieAck{}},
+				}
+				fmt.Println("COOKIE-ECHO: to established")
+				a.setState(established)
+				a.handshakeCompletedCh <- nil
+				fmt.Println("COOKIE-ECHO: to established OK")
+
+				return pack(p), nil
+			}
 		}
 
 	case *chunkCookieAck:
+		fmt.Printf("[%s] chunkCookieAck received in state '%s'\n", a.nextConn.LocalAddr().String(), a.state.String())
 		if a.state == cookieEchoed {
+			// stop T1-cookie timer
+			a.t1Cookie.stop()
+			a.storedCookieEcho = nil
+
+			fmt.Println("COOKIE-ACK: to established")
 			a.setState(established)
-			close(a.handshakeCompletedCh)
+			a.handshakeCompletedCh <- nil
+			fmt.Println("COOKIE-ACK: to established OK")
 			return nil, nil
 		}
 
@@ -1073,4 +1167,44 @@ func (a *Association) handleChunk(p *packet, c chunk) ([]*packet, error) {
 	}
 
 	return nil, nil
+}
+
+func (a *Association) onRetransmissionTimeout(id int, nRtos uint) {
+	a.lock.Lock()
+	defer a.lock.Unlock()
+
+	if id == timerT1Init {
+		err := a.sendInit()
+		if err != nil {
+			// TODO: use logging
+			fmt.Printf("Failed to retransmit init (nRtos=%d): %v\n", nRtos, err)
+		}
+		return
+	}
+
+	if id == timerT1Cookie {
+		err := a.sendCookieEcho()
+		if err != nil {
+			// TODO: use logging
+			fmt.Printf("Failed to retransmit cookie-echo (nRtos=%d): %v\n", nRtos, err)
+		}
+		return
+	}
+}
+
+func (a *Association) onRetransmissionFailure(id int) {
+	a.lock.Lock()
+	defer a.lock.Unlock()
+
+	if id == timerT1Init {
+		fmt.Println("RTX Failure: T1-init")
+		a.handshakeCompletedCh <- fmt.Errorf("Handshake failed (INIT ACK)")
+		return
+	}
+
+	if id == timerT1Cookie {
+		fmt.Println("RTX Failure: T1-cookie")
+		a.handshakeCompletedCh <- fmt.Errorf("Handshake failed (COOKIE ECHO)")
+		return
+	}
 }
