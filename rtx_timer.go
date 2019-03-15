@@ -26,7 +26,7 @@ type rtoManager struct {
 	mutex  sync.RWMutex
 }
 
-// newRTOManager creats a new rtoManager.
+// newRTOManager creates a new rtoManager.
 func newRTOManager() *rtoManager {
 	return &rtoManager{
 		rto: rtoInitial,

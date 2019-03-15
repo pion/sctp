@@ -84,7 +84,7 @@ func (a associationState) String() string {
 type Association struct {
 	lock sync.RWMutex
 
-	nextConn net.Conn
+	netConn net.Conn
 
 	peerVerificationTag uint32
 	myVerificationTag   uint32
@@ -139,8 +139,8 @@ type Association struct {
 }
 
 // Server accepts a SCTP stream over a conn
-func Server(nextConn net.Conn) (*Association, error) {
-	a := createAssocation(nextConn)
+func Server(netConn net.Conn) (*Association, error) {
+	a := createAssocation(netConn)
 	go a.readLoop()
 
 	select {
@@ -155,8 +155,8 @@ func Server(nextConn net.Conn) (*Association, error) {
 }
 
 // Client opens a SCTP stream over a conn
-func Client(nextConn net.Conn) (*Association, error) {
-	a := createAssocation(nextConn)
+func Client(netConn net.Conn) (*Association, error) {
+	a := createAssocation(netConn)
 	go a.readLoop()
 	a.init()
 
@@ -171,13 +171,13 @@ func Client(nextConn net.Conn) (*Association, error) {
 	}
 }
 
-func createAssocation(nextConn net.Conn) *Association {
+func createAssocation(netConn net.Conn) *Association {
 	rs := rand.NewSource(time.Now().UnixNano())
 	r := rand.New(rs)
 
 	tsn := r.Uint32()
 	a := &Association{
-		nextConn:                nextConn,
+		netConn:                 netConn,
 		myMaxNumOutboundStreams: math.MaxUint16,
 		myMaxNumInboundStreams:  math.MaxUint16,
 		myReceiverWindowCredit:  10 * 1500, // 10 Max MTU packets buffer
@@ -223,7 +223,7 @@ func (a *Association) init() {
 		fmt.Printf("Failed to send init: %v\n", err)
 	}
 
-	fmt.Println("starting T1-init timer")
+	//fmt.Println("starting T1-init timer")
 	a.t1Init.start(a.rtoMgr.getRTO())
 
 	a.setState(cookieWait)
@@ -232,10 +232,10 @@ func (a *Association) init() {
 
 // caller must hold a.lock
 func (a *Association) sendInit() error {
-	fmt.Println("sending Init")
+	//fmt.Println("sending Init")
 
 	if a.storedInit == nil {
-		return fmt.Errorf("Init not stored to send")
+		return fmt.Errorf("INIT not stored to send")
 	}
 
 	outbound := &packet{}
@@ -260,7 +260,7 @@ func (a *Association) sendCookieEcho() error {
 		return fmt.Errorf("cookieEcho not stored to send")
 	}
 
-	fmt.Println("sending CookieEcho")
+	//fmt.Println("sending CookieEcho")
 
 	outbound := &packet{}
 	outbound.verificationTag = a.peerVerificationTag
@@ -277,7 +277,7 @@ func (a *Association) sendCookieEcho() error {
 
 // Close ends the SCTP Association and cleans up any state
 func (a *Association) Close() error {
-	err := a.nextConn.Close()
+	err := a.netConn.Close()
 	if err != nil {
 		return err
 	}
@@ -309,7 +309,7 @@ func (a *Association) readLoop() {
 		// passed to the reassembly queue without copying
 		buffer := make([]byte, receiveMTU)
 
-		n, err := a.nextConn.Read(buffer)
+		n, err := a.netConn.Read(buffer)
 		if err != nil {
 			return
 		}
@@ -411,7 +411,7 @@ func min(a, b uint16) uint16 {
 // setState sets the state of the Association.
 func (a *Association) setState(state associationState) {
 	if a.state != state {
-		fmt.Printf("[%s] state change: '%s' => '%s'\n", a.nextConn.LocalAddr().String(), a.state.String(), state.String())
+		//fmt.Printf("[%s] state change: '%s' => '%s'\n", a.name(), a.state.String(), state.String())
 		a.state = state
 	}
 }
@@ -997,7 +997,7 @@ func (a *Association) generateNextRSN() uint32 {
 	return rsn
 }
 
-// send sends a packet over nextConn. The caller should hold the lock.
+// send sends a packet over netConn. The caller should hold the lock.
 func (a *Association) send(p *packet) error {
 	a.lock.Lock()
 	raw, err := p.marshal()
@@ -1006,7 +1006,7 @@ func (a *Association) send(p *packet) error {
 		return errors.Wrap(err, "Failed to send packet to outbound handler")
 	}
 
-	_, err = a.nextConn.Write(raw)
+	_, err = a.netConn.Write(raw)
 	return err
 }
 
@@ -1025,7 +1025,7 @@ func (a *Association) handleChunk(p *packet, c chunk) ([]*packet, error) {
 
 	switch c := c.(type) {
 	case *chunkInit:
-		fmt.Printf("[%s] chunkInit received in state '%s'\n", a.nextConn.LocalAddr().String(), a.state.String())
+		//fmt.Printf("[%s] chunkInit received in state '%s'\n", a.name(), a.state.String())
 		switch a.state {
 		case closed:
 			return pack(a.handleInit(p, c)), nil
@@ -1051,18 +1051,23 @@ func (a *Association) handleChunk(p *packet, c chunk) ([]*packet, error) {
 		}
 
 	case *chunkInitAck:
-		fmt.Printf("[%s] chunkInitAck received in state '%s'\n", a.nextConn.LocalAddr().String(), a.state.String())
-		switch a.state {
-		case cookieWait:
+		//fmt.Printf("[%s] chunkInitAck received in state '%s'\n", a.name(), a.state.String())
+		if a.state == cookieWait {
 			err := a.handleInitAck(p, c)
 			if err != nil {
 				return nil, err
 			}
 			a.setState(cookieEchoed)
 			return nil, nil
-		default:
-			return nil, errors.Errorf("TODO Handle Init acks when in state %s", a.state.String())
 		}
+
+		// RFC 4960
+		// 5.2.3.  Unexpected INIT ACK
+		//   If an INIT ACK is received by an endpoint in any state other than the
+		//   COOKIE-WAIT state, the endpoint should discard the INIT ACK chunk.
+		//   An unexpected INIT ACK usually indicates the processing of an old or
+		//   duplicated INIT chunk.
+		return nil, nil
 
 	case *chunkAbort:
 		fmt.Println("Abort chunk, with errors:")
@@ -1096,7 +1101,7 @@ func (a *Association) handleChunk(p *packet, c chunk) ([]*packet, error) {
 		}), nil
 
 	case *chunkCookieEcho:
-		fmt.Printf("[%s] chunkCookieEcho received in state '%s'\n", a.nextConn.LocalAddr().String(), a.state.String())
+		//fmt.Printf("[%s] chunkCookieEcho received in state '%s'\n", a.name(), a.state.String())
 		if a.state == closed || a.state == cookieWait || a.state == cookieEchoed {
 			if bytes.Equal(a.myCookie.cookie, c.cookie) {
 				// stop T1-init timer
@@ -1112,26 +1117,22 @@ func (a *Association) handleChunk(p *packet, c chunk) ([]*packet, error) {
 					destinationPort: a.destinationPort,
 					chunks:          []chunk{&chunkCookieAck{}},
 				}
-				fmt.Println("COOKIE-ECHO: to established")
 				a.setState(established)
 				a.handshakeCompletedCh <- nil
-				fmt.Println("COOKIE-ECHO: to established OK")
 
 				return pack(p), nil
 			}
 		}
 
 	case *chunkCookieAck:
-		fmt.Printf("[%s] chunkCookieAck received in state '%s'\n", a.nextConn.LocalAddr().String(), a.state.String())
+		//fmt.Printf("[%s] chunkCookieAck received in state '%s'\n", a.name(), a.state.String())
 		if a.state == cookieEchoed {
 			// stop T1-cookie timer
 			a.t1Cookie.stop()
 			a.storedCookieEcho = nil
 
-			fmt.Println("COOKIE-ACK: to established")
 			a.setState(established)
 			a.handshakeCompletedCh <- nil
-			fmt.Println("COOKIE-ACK: to established OK")
 			return nil, nil
 		}
 
@@ -1198,13 +1199,22 @@ func (a *Association) onRetransmissionFailure(id int) {
 
 	if id == timerT1Init {
 		fmt.Println("RTX Failure: T1-init")
-		a.handshakeCompletedCh <- fmt.Errorf("Handshake failed (INIT ACK)")
+		a.handshakeCompletedCh <- fmt.Errorf("handshake failed (INIT ACK)")
 		return
 	}
 
 	if id == timerT1Cookie {
 		fmt.Println("RTX Failure: T1-cookie")
-		a.handshakeCompletedCh <- fmt.Errorf("Handshake failed (COOKIE ECHO)")
+		a.handshakeCompletedCh <- fmt.Errorf("handshake failed (COOKIE ECHO)")
 		return
 	}
 }
+
+/*
+func (a *Association) name() string {
+	if a.netConn != nil && a.netConn.LocalAddr() != nil {
+		return a.netConn.LocalAddr().String()
+	}
+	return fmt.Sprintf("%p", a)
+}
+*/
