@@ -1101,13 +1101,11 @@ func TestAssocT1InitTimer(t *testing.T) {
 
 		go func() {
 			err0 = <-a0.handshakeCompletedCh
-			fmt.Println("a0 ready")
 			a0ReadyCh <- true
 		}()
 
 		go func() {
 			err1 = <-a1.handshakeCompletedCh
-			fmt.Println("a1 ready")
 			a1ReadyCh <- true
 		}()
 
@@ -1129,13 +1127,11 @@ func TestAssocT1InitTimer(t *testing.T) {
 			}
 		}
 
-		fmt.Println("connected!")
-
 		assert.Nil(t, err0, "should be nil")
 		assert.Nil(t, err1, "should be nil")
 
-		a0.Close()
-		a1.Close()
+		_ = a0.Close() // #nosec
+		_ = a1.Close() // #nosec
 	})
 
 	t.Run("Retransmission failure", func(t *testing.T) {
@@ -1193,8 +1189,8 @@ func TestAssocT1InitTimer(t *testing.T) {
 		assert.NotNil(t, err0, "should NOT be nil")
 		assert.NotNil(t, err1, "should NOT be nil")
 
-		a0.Close()
-		a1.Close()
+		_ = a0.Close() // #nosec
+		_ = a1.Close() // #nosec
 	})
 }
 
@@ -1250,8 +1246,8 @@ func TestAssocT1CookieTimer(t *testing.T) {
 		assert.Nil(t, err0, "should be nil")
 		assert.Nil(t, err1, "should be nil")
 
-		a0.Close()
-		a1.Close()
+		_ = a0.Close() // #nosec
+		_ = a1.Close() // #nosec
 	})
 
 	t.Run("Retransmission failure", func(t *testing.T) {
@@ -1298,7 +1294,7 @@ func TestAssocT1CookieTimer(t *testing.T) {
 
 		assert.NotNil(t, err0, "should an error")
 
-		a0.Close()
-		a1.Close()
+		_ = a0.Close() // #nosec
+		_ = a1.Close() // #nosec
 	})
 }
