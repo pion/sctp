@@ -172,8 +172,8 @@ func (s *Stream) packetize(raw []byte, ppi PayloadProtocolIdentifier) []*chunkPa
 	s.lock.Lock()
 	defer s.lock.Unlock()
 
-	i := uint16(0)
-	remaining := uint16(len(raw))
+	i := uint32(0)
+	remaining := uint32(len(raw))
 
 	// From draft-ietf-rtcweb-data-protocol-09, section 6:
 	//   All Data Channel Establishment Protocol messages MUST be sent using
@@ -182,7 +182,7 @@ func (s *Stream) packetize(raw []byte, ppi PayloadProtocolIdentifier) []*chunkPa
 
 	var chunks []*chunkPayloadData
 	for remaining != 0 {
-		fragmentSize := min(s.association.myMaxMTU, remaining)
+		fragmentSize := min32(s.association.maxPayloadSize, remaining)
 
 		// Copy the userdata since we'll have to store it until acked
 		// and the caller may re-use the buffer in the mean time
