@@ -20,10 +20,11 @@ const (
 // rtoManager manages Rtx timeout values.
 // This is an implementation of RFC 4960 sec 6.3.1.
 type rtoManager struct {
-	srtt   float64
-	rttvar float64
-	rto    float64
-	mutex  sync.RWMutex
+	srtt     float64
+	rttvar   float64
+	rto      float64
+	noUpdate bool
+	mutex    sync.RWMutex
 }
 
 // newRTOManager creates a new rtoManager.
@@ -37,6 +38,10 @@ func newRTOManager() *rtoManager {
 func (m *rtoManager) setNewRTT(rtt float64) {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
+
+	if m.noUpdate {
+		return
+	}
 
 	if m.srtt == 0 {
 		// First measurement
@@ -62,6 +67,10 @@ func (m *rtoManager) getRTO() float64 {
 func (m *rtoManager) reset() {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
+
+	if m.noUpdate {
+		return
+	}
 
 	m.srtt = 0
 	m.rttvar = 0
@@ -165,6 +174,11 @@ func (t *rtxTimer) isRunning() bool {
 }
 
 func calculateNextTimeout(rto float64, nRtos uint) float64 {
+	// RFC 4096 sec 6.3.3.  Handle T3-rtx Expiration
+	//   E2)  For the destination address for which the timer expires, set RTO
+	//        <- RTO * 2 ("back off the timer").  The maximum value discussed
+	//        in rule C7 above (RTO.max) may be used to provide an upper bound
+	//        to this doubling operation.
 	m := 1 << nRtos
 	return math.Min(rto*float64(m), rtoMax)
 }

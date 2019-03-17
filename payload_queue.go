@@ -1,99 +1,161 @@
 package sctp
 
 import (
+	"fmt"
 	"sort"
 )
 
-type payloadDataArray []*chunkPayloadData
+////////////////////////////////////////////////////////////////////////////////
+// Pending Queue
 
-func (s payloadDataArray) search(tsn uint32) (*chunkPayloadData, bool) {
-	i := sort.Search(len(s), func(i int) bool {
-		return sna32GTE(s[i].tsn, tsn)
-	})
+type pendingQueue struct {
+	queue  []*chunkPayloadData
+	nBytes int
+}
 
-	if i < len(s) && s[i].tsn == tsn {
-		return s[i], true
+func newPendingQueue() *pendingQueue {
+	return &pendingQueue{queue: []*chunkPayloadData{}}
+}
+
+func (q *pendingQueue) push(c *chunkPayloadData) {
+	q.queue = append(q.queue, c)
+	q.nBytes += len(c.userData)
+}
+
+func (q *pendingQueue) pop() *chunkPayloadData {
+	if len(q.queue) == 0 {
+		return nil
 	}
-
-	return nil, false
+	c := q.queue[0]
+	q.queue = q.queue[1:]
+	q.nBytes -= len(c.userData)
+	return c
 }
 
-func (s payloadDataArray) sort() {
-	sort.Slice(s, func(i, j int) bool { return sna32LT(s[i].tsn, s[j].tsn) })
+func (q *pendingQueue) get(i int) *chunkPayloadData {
+	if len(q.queue) == 0 || i < 0 || i >= len(q.queue) {
+		return nil
+	}
+	return q.queue[i]
 }
+
+func (q *pendingQueue) getNumBytes() int {
+	return q.nBytes
+}
+
+func (q *pendingQueue) size() int {
+	return len(q.queue)
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Payload Queue
 
 type payloadQueue struct {
-	orderedPackets payloadDataArray
-	dupTSN         []uint32
+	chunkMap map[uint32]*chunkPayloadData
+	sorted   []uint32
+	dupTSN   []uint32
+	nBytes   int
 }
 
-func (r *payloadQueue) pushNoCheck(p *chunkPayloadData) {
-	r.orderedPackets = append(r.orderedPackets, p)
-	r.orderedPackets.sort()
+func newPayloadQueue() *payloadQueue {
+	return &payloadQueue{chunkMap: map[uint32]*chunkPayloadData{}}
 }
 
-func (r *payloadQueue) canPush(p *chunkPayloadData, cumulativeTSN uint32) bool {
-	_, ok := r.orderedPackets.search(p.tsn)
-
-	// If the Data payload is already in our queue or older than our cumulativeTSN marker
-	if ok || sna32LTE(p.tsn, cumulativeTSN) {
-		// Found the packet, log in dups
-		r.dupTSN = append(r.dupTSN, p.tsn)
-		return false
+func (q *payloadQueue) updateSortedKeys() {
+	if q.sorted != nil {
+		return
 	}
 
+	q.sorted = make([]uint32, len(q.chunkMap))
+	i := 0
+	for k := range q.chunkMap {
+		q.sorted[i] = k
+		i++
+	}
+
+	sort.Slice(q.sorted, func(i, j int) bool {
+		return sna32LT(q.sorted[i], q.sorted[j])
+	})
+	//fmt.Printf("After sorted: %v\n", q.sorted)
+}
+
+func (q *payloadQueue) canPush(p *chunkPayloadData, cumulativeTSN uint32) bool {
+	_, ok := q.chunkMap[p.tsn]
+	if ok || sna32LTE(p.tsn, cumulativeTSN) {
+		return false
+	}
 	return true
 }
 
-func (r *payloadQueue) push(p *chunkPayloadData, cumulativeTSN uint32) bool {
-	_, ok := r.orderedPackets.search(p.tsn)
+func (q *payloadQueue) pushNoCheck(p *chunkPayloadData) {
+	q.chunkMap[p.tsn] = p
+	q.nBytes += len(p.userData)
+	q.sorted = nil
+}
 
-	// If the Data payload is already in our queue or older than our cumulativeTSN marker
+// push pushes a payload data. If the payload data is already in our queue or
+// older than our cumulativeTSN marker, it will be recored as duplications,
+// which can later be retrieved using popDuplicates.
+func (q *payloadQueue) push(p *chunkPayloadData, cumulativeTSN uint32) bool {
+	_, ok := q.chunkMap[p.tsn]
 	if ok || sna32LTE(p.tsn, cumulativeTSN) {
 		// Found the packet, log in dups
-		r.dupTSN = append(r.dupTSN, p.tsn)
+		q.dupTSN = append(q.dupTSN, p.tsn)
 		return false
 	}
 
-	r.orderedPackets = append(r.orderedPackets, p)
-	r.orderedPackets.sort()
+	q.chunkMap[p.tsn] = p
+	q.nBytes += len(p.userData)
+	q.sorted = nil
 	return true
 }
 
-func (r *payloadQueue) pop(tsn uint32) (*chunkPayloadData, bool) {
-	if len(r.orderedPackets) > 0 && tsn == r.orderedPackets[0].tsn {
-		pd := r.orderedPackets[0]
-		r.orderedPackets = r.orderedPackets[1:]
-		return pd, true
+// pop pops only if the oldest chunk's TSN matches the given TSN.
+func (q *payloadQueue) pop(tsn uint32) (*chunkPayloadData, bool) {
+	q.updateSortedKeys()
+
+	if len(q.chunkMap) > 0 && tsn == q.sorted[0] {
+		q.sorted = q.sorted[1:]
+		if c, ok := q.chunkMap[tsn]; ok {
+			delete(q.chunkMap, tsn)
+			q.nBytes -= len(c.userData)
+			return c, true
+		}
+		fmt.Println("sorted-key array may be corrupted")
 	}
 
 	return nil, false
 }
 
-func (r *payloadQueue) get(tsn uint32) (*chunkPayloadData, bool) {
-	return r.orderedPackets.search(tsn)
+// get returns reference to chunkPayloadData with the given TSN value.
+func (q *payloadQueue) get(tsn uint32) (*chunkPayloadData, bool) {
+	c, ok := q.chunkMap[tsn]
+	return c, ok
 }
 
-func (r *payloadQueue) popDuplicates() []uint32 {
-	dups := r.dupTSN
-	r.dupTSN = []uint32{}
+// popDuplicates returns an array of TSN values that were found duplicate.
+func (q *payloadQueue) popDuplicates() []uint32 {
+	dups := q.dupTSN
+	q.dupTSN = []uint32{}
 	return dups
 }
 
-func (r *payloadQueue) getGapAckBlocks(cumulativeTSN uint32) (gapAckBlocks []gapAckBlock) {
+func (q *payloadQueue) getGapAckBlocks(cumulativeTSN uint32) (gapAckBlocks []gapAckBlock) {
 	var b gapAckBlock
 
-	if len(r.orderedPackets) == 0 {
+	if len(q.chunkMap) == 0 {
 		return []gapAckBlock{}
 	}
 
-	for i, p := range r.orderedPackets {
+	q.updateSortedKeys()
+
+	for i, tsn := range q.sorted {
 		if i == 0 {
-			b.start = uint16(r.orderedPackets[0].tsn - cumulativeTSN)
+			b.start = uint16(tsn - cumulativeTSN)
 			b.end = b.start
 			continue
 		}
-		diff := uint16(p.tsn - cumulativeTSN)
+		diff := uint16(tsn - cumulativeTSN)
 		if b.end+1 == diff {
 			b.end++
 		} else {
@@ -112,4 +174,20 @@ func (r *payloadQueue) getGapAckBlocks(cumulativeTSN uint32) (gapAckBlocks []gap
 	})
 
 	return gapAckBlocks
+}
+
+func (q *payloadQueue) markAsAcked(tsn uint32) {
+	if c, ok := q.chunkMap[tsn]; ok {
+		c.acked = true
+		q.nBytes -= len(c.userData)
+		c.userData = []byte{}
+	}
+}
+
+func (q *payloadQueue) getNumBytes() int {
+	return q.nBytes
+}
+
+func (q *payloadQueue) size() int {
+	return len(q.chunkMap)
 }
