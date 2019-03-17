@@ -2,8 +2,8 @@ github.com/davecgh/go-spew v1.1.0 h1:ZDRjVQ15GmhC3fiQ8ni8+OwkZQO4DARzQgrnXU1Liz8
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
-github.com/pions/transport v0.4.1-0.20190312213805-fbd35b1f48ea h1:8Kfih7EDLd3CVg4iQKQeLbWmTEr6w9S+ByzAJNPGujY=
-github.com/pions/transport v0.4.1-0.20190312213805-fbd35b1f48ea/go.mod h1:9gvUd8ZeyU4ZX7dhNuUq97mPoekopkd7eCJEyhKwVO0=
+github.com/pions/transport v0.5.0 h1:/KGBCzjc8bvVh8P5NP8GiSGL/PbupzhqvEOEBSlZux0=
+github.com/pions/transport v0.5.0/go.mod h1:9gvUd8ZeyU4ZX7dhNuUq97mPoekopkd7eCJEyhKwVO0=
 github.com/pkg/errors v0.8.0 h1:WdK/asTD0HN+q6hsWO3/vpuAkAr+tw6aNJNDFFf0+qw=
 github.com/pkg/errors v0.8.0/go.mod h1:bwawxfHBFNV+L2hUp1rHADufV3IMtnDRdf1r5NINEl0=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
