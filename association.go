@@ -235,6 +235,7 @@ func createAssociation(netConn net.Conn) *Association {
 	//     long idle period MUST be set to min(4*MTU, max (2*MTU, 4380
 	//     bytes)).
 	a.cwnd = min32(4*a.mtu, max32(2*a.mtu, 4380))
+	a.log.Debugf("initial cwnd=%d", a.cwnd)
 
 	a.t1Init = newRTXTimer(timerT1Init, a, maxInitRetrans)
 	a.t1Cookie = newRTXTimer(timerT1Cookie, a, maxInitRetrans)
@@ -898,12 +899,13 @@ func (a *Association) handleSack(d *chunkSelectiveAck) ([]*packet, error) {
 	}
 
 	if len(toFastRetrans) > 0 && !a.inFastRecovery {
-		a.log.Debug("enter fast-recovery")
 		a.inFastRecovery = true
 		a.fastRecoverExitPoint = htna
 		a.ssthresh = max32(a.cwnd/2, 4*a.mtu)
 		a.cwnd = a.ssthresh
 		a.partialBytesAcked = 0
+
+		a.log.Debugf("enter fast-recovery: cwnd=%d ssthresh=%d", a.cwnd, a.ssthresh)
 	}
 
 	packets := []*packet{}
@@ -1625,7 +1627,8 @@ func (a *Association) onRetransmissionTimeout(id int, nRtos uint) {
 		a.ssthresh = max32(a.cwnd/2, 4*a.mtu)
 		a.cwnd = a.mtu
 
-		a.log.Debugf("T3-rtx timed out (nRtos=%d)", nRtos)
+		a.log.Debugf("T3-rtx timed out: nRtos=%d cwnd=%d ssthresh=%d",
+			nRtos, a.cwnd, a.ssthresh)
 		err := a.retransmitPayloadData()
 		if err != nil {
 			a.log.Debugf("failed to retransmit DATA chunks (nRtos=%d): %v", nRtos, err)
