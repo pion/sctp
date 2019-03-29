@@ -121,7 +121,7 @@ func (r *reassemblyQueue) push(chunk *chunkPayloadData) bool {
 	var cset *chunkSet
 
 	if chunk.streamIdentifier != r.si {
-		fmt.Printf("SI[%d]: pushed chunk for wrong SI %d != %d\n", r.si, chunk.streamIdentifier, r.si)
+		//fmt.Printf("SI[%d]: pushed chunk for wrong SI %d != %d\n", r.si, chunk.streamIdentifier, r.si)
 		return false
 	}
 

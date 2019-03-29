@@ -374,7 +374,8 @@ func establishSessionPair(br *test.Bridge, a0, a1 *Association, si uint16) (*Str
 }
 
 func TestAssocReliable(t *testing.T) {
-	// sbuf - large enoght to be fragmented into two chunks
+	// sbuf - large enogh to be fragmented into two chunks and each chunks are
+	//        large enobh not to be bundled
 	sbuf := make([]byte, 2000)
 	for i := 0; i < len(sbuf); i++ {
 		sbuf[i] = byte(i & 0xff)
@@ -678,7 +679,9 @@ func TestAssocUnreliable(t *testing.T) {
 	const msg1 = "ABCDEFGHIJ"
 	const msg2 = "KLMNOPQRST"
 
-	// sbuf1, sbuf2 - large enoght to be fragmented into two chunks
+	// sbuf1, sbuf2:
+	//    large enogh to be fragmented into two chunks and each chunks are
+	//    large enobh not to be bundled
 	sbuf1 := make([]byte, 2000)
 	sbuf2 := make([]byte, 2000)
 	for i := 0; i < len(sbuf1); i++ {
@@ -1366,5 +1369,133 @@ func TestAssocCreateNewStream(t *testing.T) {
 
 		p := a.handleData(toBeIgnored)
 		assert.Nil(t, p, "should be nil")
+	})
+}
+
+func TestAssocT3RtxTimer(t *testing.T) {
+	// Send one packet, drop it, then retransmitted successfully.
+	t.Run("Retransmission success", func(t *testing.T) {
+		const si uint16 = 6
+		const msg1 = "ABC"
+		var n int
+		var ppi PayloadProtocolIdentifier
+		br := test.NewBridge()
+
+		a0, a1, err := createNewAssociationPair(br)
+		if !assert.Nil(t, err, "failed to create associations") {
+			assert.FailNow(t, "failed due to earlier error")
+		}
+
+		// lock RTO value at 20 [msec]
+		a0.rtoMgr.rto = 20.0
+		a0.rtoMgr.noUpdate = true
+
+		s0, s1, err := establishSessionPair(br, a0, a1, si)
+		assert.Nil(t, err, "failed to establish session pair")
+
+		n, err = s0.WriteSCTP([]byte(msg1), PayloadTypeWebRTCBinary)
+		assert.Nil(t, err, "WriteSCTP failed")
+		assert.Equal(t, n, len(msg1), "unexpected length of received data")
+
+		br.Drop(0, 0, 1) // drop the first packet (second one should be sacked)
+
+		// process packets for 100 msec
+		for i := 0; i < 10; i++ {
+			br.Tick()
+			time.Sleep(10 * time.Millisecond)
+		}
+
+		buf := make([]byte, 32)
+
+		n, ppi, err = s1.ReadSCTP(buf)
+		if !assert.Nil(t, err, "ReadSCTP failed") {
+			assert.FailNow(t, "failed due to earlier error")
+		}
+		assert.Equal(t, n, len(msg1), "unexpected length of received data")
+		assert.Equal(t, msg1, string(buf[:n]), "unexpected received data")
+		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
+
+		br.Process()
+		assert.False(t, s0.reassemblyQueue.isReadable(), "should no longer be readable")
+		assert.Equal(t, 0, a0.pendingUnorderedQueue.size(), "should be no packet pending")
+		assert.Equal(t, 0, a0.pendingOrderedQueue.size(), "should be no packet pending")
+		assert.Equal(t, 0, a0.inflightQueue.size(), "should be no packet inflight")
+
+		closeAssociationPair(br, a0, a1)
+	})
+}
+
+/*
+func newTestTimer(t *testing.T, inMsec time.Duration) *time.Timer {
+	return time.AfterFunc(inMsec*time.Millisecond, func() {
+		fmt.Println("TIMED OUT!!!")
+		assert.FailNow(t, "test timed out")
+	})
+}
+*/
+
+func TestAssocCongestionControl(t *testing.T) {
+	// sbuf - large enobh not to be bundled
+	sbuf := make([]byte, 1000)
+	for i := 0; i < len(sbuf); i++ {
+		sbuf[i] = byte(i & 0xcc)
+	}
+
+	// 1) Send 4 packets. drop the first one.
+	// 2) Last 3 packet will be received that triggers fast-retransmission
+	// 3) The first one is retransmitted, which makes s1 readable
+	// Above should be done before RTO occurs (fast recovery)
+	t.Run("Fast retransmission", func(t *testing.T) {
+		const si uint16 = 6
+		var n int
+		var ppi PayloadProtocolIdentifier
+		br := test.NewBridge()
+
+		a0, a1, err := createNewAssociationPair(br)
+		if !assert.Nil(t, err, "failed to create associations") {
+			assert.FailNow(t, "failed due to earlier error")
+		}
+
+		s0, s1, err := establishSessionPair(br, a0, a1, si)
+		assert.Nil(t, err, "failed to establish session pair")
+
+		br.DropNextNWrites(0, 1) // drop the next write
+
+		for i := 0; i < 4; i++ {
+			n, err = s0.WriteSCTP(sbuf, PayloadTypeWebRTCBinary)
+			assert.Nil(t, err, "WriteSCTP failed")
+			assert.Equal(t, n, len(sbuf), "unexpected length of received data")
+		}
+
+		// process packets for 500 msec, assuming that the fast retrans/recover
+		// should complete within 500 msec.
+		for i := 0; i < 50; i++ {
+			br.Tick()
+			time.Sleep(10 * time.Millisecond)
+		}
+
+		buf := make([]byte, 3000)
+
+		// Try to read all 4 packets
+		for i := 0; i < 4; i++ {
+			// The receiver (s1) should be readable
+			if !assert.True(t, s1.reassemblyQueue.isReadable(), "should be readable") {
+				return
+			}
+
+			n, ppi, err = s1.ReadSCTP(buf)
+			if !assert.Nil(t, err, "ReadSCTP failed") {
+				return
+			}
+			assert.Equal(t, n, len(sbuf), "unexpected length of received data")
+			assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
+		}
+
+		a0.lock.RLock()
+		inFastRecovery := a0.inFastRecovery
+		a0.lock.RUnlock()
+		assert.False(t, inFastRecovery, "should not be in fast-recovery")
+
+		closeAssociationPair(br, a0, a1)
 	})
 }
