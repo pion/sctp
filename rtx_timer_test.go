@@ -217,7 +217,7 @@ func TestRtxTimer(t *testing.T) {
 		assert.Equal(t, 0, nCbs, "no callback should be made")
 	})
 
-	t.Run("time should stop after rtx failure", func(t *testing.T) {
+	t.Run("timer should stop after rtx failure", func(t *testing.T) {
 		timerID := 4
 		var nCbs int
 		doneCh := make(chan bool)
@@ -254,9 +254,55 @@ func TestRtxTimer(t *testing.T) {
 		<-doneCh
 
 		assert.False(t, rt.isRunning(), "should not be running")
-		assert.Equal(t, 5, nCbs, "must have been called once")
+		assert.Equal(t, 5, nCbs, "must have been called 5 times")
 		assert.True(t, elapsed > 0.600, "must have taken more than 600 msec")
 		assert.True(t, elapsed < 0.700, "must fail in less than 700 msec")
+	})
+
+	t.Run("timer should not stop if maxRetrans is 0", func(t *testing.T) {
+		timerID := 4
+		maxRtos := uint(6)
+		var nCbs int
+		doneCh := make(chan bool)
+
+		since := time.Now()
+		var elapsed float64 // in seconds
+		rt := newRTXTimer(timerID, &testTimerObserver{
+			onRTO: func(id int, nRtos uint) {
+				assert.Equal(t, timerID, id, "unexpted timer ID: %d", id)
+				elapsed = time.Since(since).Seconds()
+				t.Logf("onRTO: n=%d elapsed=%.03f\n", nRtos, elapsed)
+				nCbs++
+				if nRtos == maxRtos {
+					doneCh <- true
+				}
+			},
+			onRtxFailure: func(id int) {
+				assert.Fail(t, "timer should not fail")
+			},
+		}, 0)
+
+		// RTO(msec) Total(msec)
+		//  10          10    1st RTO
+		//  20          30    2nd RTO
+		//  40          70    3rd RTO
+		//  80         150    4th RTO
+		// 160         310    5th RTO
+		// 320         630    6th RTO => exit test (timer should still be running)
+
+		interval := float64(10.0)
+		ok := rt.start(interval)
+		assert.True(t, ok, "should be accepted")
+		assert.True(t, rt.isRunning(), "should be running")
+
+		<-doneCh
+
+		assert.True(t, rt.isRunning(), "should still be running")
+		assert.Equal(t, 6, nCbs, "must have been called 6 times")
+		assert.True(t, elapsed > 0.600, "must have taken more than 600 msec")
+		assert.True(t, elapsed < 0.700, "must fail in less than 700 msec")
+
+		rt.stop()
 	})
 
 	t.Run("stop timer that is not running is noop", func(t *testing.T) {

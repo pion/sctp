@@ -101,20 +101,9 @@ type Association struct {
 	peerVerificationTag uint32
 	myVerificationTag   uint32
 	state               associationState
-	//peerTransportList
-	//primaryPath
-	//overallErrorCount
-	//overallErrorThreshold
-	//peerReceiverWindow (peerRwnd)
-	myNextTSN         uint32 // nextTSN
-	peerLastTSN       uint32 // lastRcvdTSN
-	minTSN2MeasureRTT uint32
-	//peerMissingTSN (MappingArray)
-	//ackState
-	//inboundStreams
-	//outboundStreams
-	//localTransportAddressList
-	//associationPTMU
+	myNextTSN           uint32 // nextTSN
+	peerLastTSN         uint32 // lastRcvdTSN
+	minTSN2MeasureRTT   uint32 // for RTT measurement
 
 	// Reconfig
 	ongoingReconfigOutgoing *chunkReconfig // TODO: Re-transmission
@@ -239,7 +228,7 @@ func createAssociation(netConn net.Conn) *Association {
 
 	a.t1Init = newRTXTimer(timerT1Init, a, maxInitRetrans)
 	a.t1Cookie = newRTXTimer(timerT1Cookie, a, maxInitRetrans)
-	a.t3RTX = newRTXTimer(timerT3RTX, a, pathMaxRetrans)
+	a.t3RTX = newRTXTimer(timerT3RTX, a, 0 /* rtx forever */)
 
 	return a
 }
@@ -845,6 +834,9 @@ func (a *Association) handleSack(d *chunkSelectiveAck) ([]*packet, error) {
 			//      path MTU.
 			if !a.inFastRecovery &&
 				a.pendingUnorderedQueue.size()+a.pendingOrderedQueue.size() > 0 {
+
+				a.cwnd += min32(uint32(totalBytesAcked), a.mtu)
+				a.log.Debugf("updated cwnd=%d", a.cwnd)
 			}
 		} else {
 			// RFC 4096, sec 7.2.2.  Congestion Avoidance
@@ -865,6 +857,7 @@ func (a *Association) handleSack(d *chunkSelectiveAck) ([]*packet, error) {
 
 				a.cwnd += a.mtu
 				a.partialBytesAcked -= a.cwnd
+				a.log.Debugf("updated cwnd=%d", a.cwnd)
 			}
 		}
 	}
@@ -1492,7 +1485,7 @@ func (a *Association) handleChunk(p *packet, c chunk) ([]*packet, error) {
 		return nil, nil
 
 	case *chunkAbort:
-		a.log.Debugf("Abort chunk, with follwing errors:")
+		a.log.Debugf("Abort chunk, with following errors:")
 		for _, e := range c.errorCauses {
 			a.log.Debugf(" - error cause: %s", e)
 		}
@@ -1655,8 +1648,12 @@ func (a *Association) onRetransmissionFailure(id int) {
 	}
 
 	if id == timerT3RTX {
+		// T3-rtx timer will not fail by design
+		// Justifications:
+		//  * ICE would fail if the connectivity is lost
+		//  * WebRTC spec is not clear how this incident should be reported to ULP
 		a.log.Error("retransmission failure: T3-rtx (DATA)")
-		// TODO: report to ULP
+		return
 	}
 }
 

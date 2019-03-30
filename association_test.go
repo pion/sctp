@@ -1,6 +1,7 @@
 package sctp
 
 import (
+	"encoding/binary"
 	"fmt"
 	"math/rand"
 	"net"
@@ -1442,7 +1443,7 @@ func TestAssocCongestionControl(t *testing.T) {
 	}
 
 	// 1) Send 4 packets. drop the first one.
-	// 2) Last 3 packet will be received that triggers fast-retransmission
+	// 2) Last 3 packet will be received, which triggers fast-retransmission
 	// 3) The first one is retransmitted, which makes s1 readable
 	// Above should be done before RTO occurs (fast recovery)
 	t.Run("Fast retransmission", func(t *testing.T) {
@@ -1462,6 +1463,7 @@ func TestAssocCongestionControl(t *testing.T) {
 		br.DropNextNWrites(0, 1) // drop the next write
 
 		for i := 0; i < 4; i++ {
+			binary.BigEndian.PutUint32(sbuf, uint32(i)) // uint32 sequence number
 			n, err = s0.WriteSCTP(sbuf, PayloadTypeWebRTCBinary)
 			assert.Nil(t, err, "WriteSCTP failed")
 			assert.Equal(t, n, len(sbuf), "unexpected length of received data")
@@ -1474,7 +1476,7 @@ func TestAssocCongestionControl(t *testing.T) {
 			time.Sleep(10 * time.Millisecond)
 		}
 
-		buf := make([]byte, 3000)
+		rbuf := make([]byte, 3000)
 
 		// Try to read all 4 packets
 		for i := 0; i < 4; i++ {
@@ -1483,11 +1485,12 @@ func TestAssocCongestionControl(t *testing.T) {
 				return
 			}
 
-			n, ppi, err = s1.ReadSCTP(buf)
+			n, ppi, err = s1.ReadSCTP(rbuf)
 			if !assert.Nil(t, err, "ReadSCTP failed") {
 				return
 			}
-			assert.Equal(t, n, len(sbuf), "unexpected length of received data")
+			assert.Equal(t, len(sbuf), n, "unexpected length of received data")
+			assert.Equal(t, i, int(binary.BigEndian.Uint32(rbuf)), "unexpected length of received data")
 			assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
 		}
 
