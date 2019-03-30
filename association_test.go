@@ -476,7 +476,6 @@ func TestAssocReliable(t *testing.T) {
 
 	t.Run("ordered fragmentated then defragmented", func(t *testing.T) {
 		const si uint16 = 3
-		const msg = "ABCDEFG"
 		var n int
 		var ppi PayloadProtocolIdentifier
 		br := test.NewBridge()

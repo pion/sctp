@@ -57,9 +57,8 @@ type chunkPayloadData struct {
 	userData             []byte
 
 	// Whether this data chunk was acknowledged (received by peer)
-	acked             bool
-	missIndicator     uint32
-	fastRetransmitted bool
+	acked         bool
+	missIndicator uint32
 
 	// Partial-reliability parameters used only by sender
 	since     time.Time
