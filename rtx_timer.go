@@ -97,6 +97,8 @@ type rtxTimer struct {
 type stopTimerLoop func()
 
 // newRTXTimer creates a new retransmission timer.
+// if maxRetrans is set to 0, it will keep retransmitting until stop() is called.
+// (it will never make onRetransmissionFailure() callback.
 func newRTXTimer(id int, observer rtxTimerObserver, maxRetrans uint) *rtxTimer {
 	return &rtxTimer{
 		id:         id,
@@ -133,7 +135,7 @@ func (t *rtxTimer) start(rto float64) bool {
 			select {
 			case <-timer.C:
 				nRtos++
-				if nRtos <= t.maxRetrans {
+				if t.maxRetrans == 0 || nRtos <= t.maxRetrans {
 					t.observer.onRetransmissionTimeout(t.id, nRtos)
 				} else {
 					t.stop()
