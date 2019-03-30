@@ -320,7 +320,7 @@ func (a *Association) Close() error {
 
 func (a *Association) readLoop() {
 	var closeErr error
-	defer func(closeErr error) {
+	defer func() {
 		a.lock.Lock()
 		//closeErr := errors.New("association closed")
 		for _, s := range a.streams {
@@ -329,7 +329,7 @@ func (a *Association) readLoop() {
 		a.lock.Unlock()
 		close(a.acceptCh)
 		a.closeCh <- struct{}{}
-	}(closeErr)
+	}()
 
 	for {
 		// buffer is recreated because the user data is
@@ -740,7 +740,7 @@ func (a *Association) handleSack(d *chunkSelectiveAck) ([]*packet, error) {
 			//        chunk or for a later instance)
 			if c.nSent == 1 && sna32GTE(c.tsn, a.minTSN2MeasureRTT) {
 				a.minTSN2MeasureRTT = a.myNextTSN
-				rtt := time.Now().Sub(c.since).Seconds() * 1000.0
+				rtt := time.Since(c.since).Seconds() * 1000.0
 				a.rtoMgr.setNewRTT(rtt)
 				a.log.Tracef("SACK: measured-rtt=%f new-rto=%f", rtt, a.rtoMgr.getRTO())
 			}
@@ -769,7 +769,7 @@ func (a *Association) handleSack(d *chunkSelectiveAck) ([]*packet, error) {
 				a.log.Tracef("tsn=%d has been sacked", c.tsn)
 
 				if c.nSent == 1 {
-					rtt := time.Now().Sub(c.since).Seconds() * 1000.0
+					rtt := time.Since(c.since).Seconds() * 1000.0
 					a.rtoMgr.setNewRTT(rtt)
 					a.log.Tracef("SACK: measured-rtt=%f new-rto=%f", rtt, a.rtoMgr.getRTO())
 				}
@@ -1189,7 +1189,7 @@ func (a *Association) movePendingDataChunkToInflightQueue(c *chunkPayloadData) {
 	// Assign TSN
 	c.tsn = a.generateNextTSN()
 
-	c.since = time.Now() // use to calulate RTT and also for maxPacketLifeTime
+	c.since = time.Now() // use to calculate RTT and also for maxPacketLifeTime
 	c.nSent = 1          // being sent for the first time
 
 	a.checkPartialReliabilityStatus(c)
