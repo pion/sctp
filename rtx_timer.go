@@ -100,6 +100,7 @@ type rtxTimer struct {
 	observer   rtxTimerObserver
 	maxRetrans uint
 	stopFunc   stopTimerLoop
+	closed     bool
 	mutex      sync.RWMutex
 }
 
@@ -121,7 +122,12 @@ func (t *rtxTimer) start(rto float64) bool {
 	t.mutex.Lock()
 	defer t.mutex.Unlock()
 
-	// If there's a previous timer running, stop it.
+	// this timer is already closed
+	if t.closed {
+		return false
+	}
+
+	// this is a noop if the timer is always running
 	if t.stopFunc != nil {
 		return false
 	}
@@ -173,6 +179,20 @@ func (t *rtxTimer) stop() {
 		t.stopFunc()
 		t.stopFunc = nil
 	}
+}
+
+// closes the timer. this is similar to stop() but subsequent start() call
+// will fail (the timer is no longer usable)
+func (t *rtxTimer) close() {
+	t.mutex.Lock()
+	defer t.mutex.Unlock()
+
+	if t.stopFunc != nil {
+		t.stopFunc()
+		t.stopFunc = nil
+	}
+
+	t.closed = true
 }
 
 // isRunning tests if the timer is running.

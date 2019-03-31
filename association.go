@@ -300,19 +300,27 @@ func (a *Association) sendCookieEcho() error {
 
 // Close ends the SCTP Association and cleans up any state
 func (a *Association) Close() error {
+	a.log.Debugf("[%s] closing association..", a.name())
+
+	// TODO: shutdown sequence
+	a.lock.Lock()
+	a.setState(closed)
+	a.lock.Unlock()
+
 	err := a.netConn.Close()
 	if err != nil {
 		return err
 	}
 
-	// Stop all retransmission timers
-	a.t1Init.stop()
-	a.t1Cookie.stop()
-	a.t3RTX.stop()
+	// Close all retransmission timers
+	a.t1Init.close()
+	a.t1Cookie.close()
+	a.t3RTX.close()
 
 	// Wait for readLoop to end
 	<-a.closeCh
 
+	a.log.Debugf("[%s] association closed", a.name())
 	return nil
 }
 
@@ -846,6 +854,7 @@ func (a *Association) onCumulativeTSNAckPointAdvanced(totalBytesAcked int) {
 		a.log.Tracef("SACK: no more packet in-flight (pending=%d)", a.pendingQueue.size())
 		a.t3RTX.stop()
 	} else {
+		a.log.Debugf("[%s] T3-rtx timer start (pt2)", a.name())
 		a.t3RTX.start(a.rtoMgr.getRTO())
 	}
 
@@ -1031,6 +1040,7 @@ func (a *Association) handleSack(d *chunkSelectiveAck) ([]*packet, error) {
 	chunks := a.popPendingDataChunksToSend()
 	if len(chunks) > 0 {
 		// Start timer. (noop if already started)
+		a.log.Debugf("[%s] T3-rtx timer start (pt3)", a.name())
 		a.t3RTX.start(a.rtoMgr.getRTO())
 
 		packets = append(packets, a.bundleDataChunksIntoPackets(chunks)...)
@@ -1387,6 +1397,7 @@ func (a *Association) sendPayloadData(chunks []*chunkPayloadData) error {
 		}
 
 		// Start timer. (noop if already started)
+		a.log.Debugf("[%s] T3-rtx timer start (pt1)", a.name())
 		a.t3RTX.start(a.rtoMgr.getRTO())
 
 		return a.bundleDataChunksIntoPackets(chunks)
@@ -1465,14 +1476,18 @@ func (a *Association) retransmitPayloadData() error {
 	packets := a.bundleDataChunksIntoPackets(chunks)
 
 	a.lock.Unlock()
+	var err error
+
 	for _, p := range packets {
-		if err := a.send(p); err != nil {
-			return errors.Wrap(err, "Unable to send outbound packet")
+		if err = a.send(p); err != nil {
+			err = errors.Wrap(err, "Unable to send outbound packet")
+			break
 		}
 	}
+
 	a.lock.Lock()
 
-	return nil
+	return err
 }
 
 // generateNextTSN returns the myNextTSN and increases it. The caller should hold the lock.
@@ -1608,11 +1623,13 @@ func (a *Association) handleChunk(p *packet, c chunk) ([]*packet, error) {
 		return a.handleData(c), nil
 
 	case *chunkSelectiveAck:
-		p, err := a.handleSack(c)
-		if err != nil {
-			return nil, errors.Wrap(err, "failure handling SACK")
+		if a.state == established {
+			p, err := a.handleSack(c)
+			if err != nil {
+				return nil, errors.Wrap(err, "failure handling SACK")
+			}
+			return p, nil
 		}
-		return p, nil
 
 	case *chunkReconfig:
 		p, err := a.handleReconfig(c)
@@ -1665,8 +1682,8 @@ func (a *Association) onRetransmissionTimeout(id int, nRtos uint) {
 		a.ssthresh = max32(a.cwnd/2, 4*a.mtu)
 		a.cwnd = a.mtu
 
-		a.log.Debugf("T3-rtx timed out: nRtos=%d cwnd=%d ssthresh=%d",
-			nRtos, a.cwnd, a.ssthresh)
+		a.log.Debugf("[%s] T3-rtx timed out: nRtos=%d cwnd=%d ssthresh=%d",
+			a.name(), nRtos, a.cwnd, a.ssthresh)
 		err := a.retransmitPayloadData()
 		if err != nil {
 			a.log.Debugf("failed to retransmit DATA chunks (nRtos=%d): %v", nRtos, err)

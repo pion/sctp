@@ -277,7 +277,6 @@ func (s *Stream) OnBufferedAmountLow(f func()) {
 // of the specified amount of outgoing data has been delivered to the peer.
 func (s *Stream) onBufferReleased(nBytesReleased int) {
 	s.lock.Lock()
-	defer s.lock.Unlock()
 
 	if s.bufferedAmount < uint64(nBytesReleased) {
 		s.bufferedAmount = 0
@@ -292,6 +291,8 @@ func (s *Stream) onBufferReleased(nBytesReleased int) {
 		f := s.onBufferedAmountLow
 		s.lock.Unlock()
 		f()
-		s.lock.Lock()
+		return
 	}
+
+	s.lock.Unlock()
 }
