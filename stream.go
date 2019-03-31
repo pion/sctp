@@ -289,8 +289,9 @@ func (s *Stream) onBufferReleased(nBytesReleased int) {
 	s.log.Tracef("sctp/stream: bufferedAmount = %d", s.bufferedAmount)
 
 	if s.onBufferedAmountLow != nil && s.bufferedAmount < s.bufferedAmountLow {
+		f := s.onBufferedAmountLow
 		s.lock.Unlock()
-		s.onBufferedAmountLow()
+		f()
 		s.lock.Lock()
 	}
 }
