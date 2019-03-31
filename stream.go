@@ -4,6 +4,7 @@ import (
 	"math"
 	"sync"
 
+	"github.com/pions/logging"
 	"github.com/pkg/errors"
 )
 
@@ -18,24 +19,22 @@ const (
 
 // Stream represents an SCTP stream
 type Stream struct {
-	association *Association
-
-	lock sync.RWMutex
-
-	streamIdentifier   uint16
-	defaultPayloadType PayloadProtocolIdentifier
-
-	reassemblyQueue *reassemblyQueue
-	sequenceNumber  uint16
-
-	readNotifier *sync.Cond
-
-	readErr  error
-	writeErr error
-
-	unordered        bool
-	reliabilityType  byte
-	reliabilityValue uint32
+	association         *Association
+	lock                sync.RWMutex
+	streamIdentifier    uint16
+	defaultPayloadType  PayloadProtocolIdentifier
+	reassemblyQueue     *reassemblyQueue
+	sequenceNumber      uint16
+	readNotifier        *sync.Cond
+	readErr             error
+	writeErr            error
+	unordered           bool
+	reliabilityType     byte
+	reliabilityValue    uint32
+	bufferedAmount      uint64
+	bufferedAmountLow   uint64
+	onBufferedAmountLow func()
+	log                 *logging.LeveledLogger
 }
 
 // StreamIdentifier returns the Stream identifier associated to the stream.
@@ -214,6 +213,9 @@ func (s *Stream) packetize(raw []byte, ppi PayloadProtocolIdentifier) []*chunkPa
 		s.sequenceNumber++
 	}
 
+	s.bufferedAmount += uint64(len(raw))
+	s.log.Tracef("sctp/stream: bufferedAmount = %d", s.bufferedAmount)
+
 	return chunks
 }
 
@@ -234,4 +236,61 @@ func (s *Stream) Close() error {
 	// Reset the outgoing stream
 	// https://tools.ietf.org/html/rfc6525
 	return a.sendResetRequest(sid)
+}
+
+// BufferedAmount returns the number of bytes of data currently queued to be sent over this stream.
+func (s *Stream) BufferedAmount() uint64 {
+	s.lock.RLock()
+	defer s.lock.RUnlock()
+
+	return s.bufferedAmount
+}
+
+// BufferedAmountLowThreshold returns the number of bytes of buffered outgoing data that is
+// considered "low." Defaults to 0.
+func (s *Stream) BufferedAmountLowThreshold() uint64 {
+	s.lock.RLock()
+	defer s.lock.RUnlock()
+
+	return s.bufferedAmountLow
+}
+
+// SetBufferedAmountLowThreshold is used to update the threshold.
+// See BufferedAmountLowThreshold().
+func (s *Stream) SetBufferedAmountLowThreshold(th uint64) {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+
+	s.bufferedAmountLow = th
+}
+
+// OnBufferedAmountLow sets the callback handler which would be called when the number of
+// bytes of outgoing data buffered is lower than the threshold.
+func (s *Stream) OnBufferedAmountLow(f func()) {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+
+	s.onBufferedAmountLow = f
+}
+
+// This method is called by association's readLoop (go-)routine to notify this stream
+// of the specified amount of outgoing data has been delivered to the peer.
+func (s *Stream) onBufferReleased(nBytesReleased int) {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+
+	if s.bufferedAmount < uint64(nBytesReleased) {
+		s.bufferedAmount = 0
+		s.log.Errorf("released buffer size %d should be <= %d", nBytesReleased, s.bufferedAmount)
+	} else {
+		s.bufferedAmount -= uint64(nBytesReleased)
+	}
+
+	s.log.Tracef("sctp/stream: bufferedAmount = %d", s.bufferedAmount)
+
+	if s.onBufferedAmountLow != nil && s.bufferedAmount < s.bufferedAmountLow {
+		s.lock.Unlock()
+		s.onBufferedAmountLow()
+		s.lock.Lock()
+	}
 }

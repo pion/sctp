@@ -397,14 +397,14 @@ func TestAssocReliable(t *testing.T) {
 		s0, s1, err := establishSessionPair(br, a0, a1, si)
 		assert.Nil(t, err, "failed to establish session pair")
 
-		assert.Equal(t, uint64(0), a0.BufferedAmount(), "incorrect bufferedAmount")
+		assert.Equal(t, 0, a0.bufferedAmount(), "incorrect bufferedAmount")
 
 		n, err := s0.WriteSCTP([]byte(msg), PayloadTypeWebRTCBinary)
 		if err != nil {
 			assert.FailNow(t, "failed due to earlier error")
 		}
 		assert.Equal(t, len(msg), n, "unexpected length of received data")
-		assert.Equal(t, uint64(len(msg)), a0.BufferedAmount(), "incorrect bufferedAmount")
+		assert.Equal(t, len(msg), a0.bufferedAmount(), "incorrect bufferedAmount")
 
 		br.Process()
 
@@ -419,7 +419,7 @@ func TestAssocReliable(t *testing.T) {
 		br.Process()
 
 		assert.False(t, s0.reassemblyQueue.isReadable(), "should no longer be readable")
-		assert.Equal(t, uint64(0), a0.BufferedAmount(), "incorrect bufferedAmount")
+		assert.Equal(t, 0, a0.bufferedAmount(), "incorrect bufferedAmount")
 
 		closeAssociationPair(br, a0, a1)
 	})
