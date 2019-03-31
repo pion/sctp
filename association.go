@@ -118,8 +118,7 @@ type Association struct {
 	myCookie                *paramStateCookie
 	payloadQueue            *payloadQueue
 	inflightQueue           *payloadQueue
-	pendingOrderedQueue     *pendingQueue
-	pendingUnorderedQueue   *pendingQueue
+	pendingQueue            *pendingQueue
 	mtu                     uint32
 	maxPayloadSize          uint32 // max DATA chunk payload size
 	cumulativeTSNAckPoint   uint32
@@ -199,8 +198,7 @@ func createAssociation(netConn net.Conn) *Association {
 		myMaxNumInboundStreams:  math.MaxUint16,
 		payloadQueue:            newPayloadQueue(),
 		inflightQueue:           newPayloadQueue(),
-		pendingOrderedQueue:     newPendingQueue(),
-		pendingUnorderedQueue:   newPendingQueue(),
+		pendingQueue:            newPendingQueue(),
 		mtu:                     initialMTU,
 		maxPayloadSize:          initialMTU - (commonHeaderSize + dataChunkHeaderSize),
 		myVerificationTag:       r.Uint32(),
@@ -845,8 +843,7 @@ func (a *Association) onCumulativeTSNAckPointAdvanced(totalBytesAcked int) {
 	//   R2)  Whenever all outstanding data sent to an address have been
 	//        acknowledged, turn off the T3-rtx timer of that address.
 	if a.inflightQueue.size() == 0 {
-		a.log.Tracef("SACK: no more packet in-flight (pending=%d)",
-			a.pendingUnorderedQueue.size()+a.pendingOrderedQueue.size())
+		a.log.Tracef("SACK: no more packet in-flight (pending=%d)", a.pendingQueue.size())
 		a.t3RTX.stop()
 	} else {
 		a.t3RTX.start(a.rtoMgr.getRTO())
@@ -866,7 +863,7 @@ func (a *Association) onCumulativeTSNAckPointAdvanced(totalBytesAcked int) {
 		//      outstanding DATA chunk(s) acknowledged, and 2) the destination's
 		//      path MTU.
 		if !a.inFastRecovery &&
-			a.pendingUnorderedQueue.size()+a.pendingOrderedQueue.size() > 0 {
+			a.pendingQueue.size() > 0 {
 
 			a.cwnd += min32(uint32(totalBytesAcked), a.mtu)
 			a.log.Debugf("updated cwnd=%d", a.cwnd)
@@ -886,7 +883,7 @@ func (a *Association) onCumulativeTSNAckPointAdvanced(totalBytesAcked int) {
 		//      was greater than or equal to cwnd), increase cwnd by MTU, and
 		//      reset partial_bytes_acked to (partial_bytes_acked - cwnd).
 		if a.partialBytesAcked >= a.cwnd &&
-			a.pendingUnorderedQueue.size()+a.pendingOrderedQueue.size() > 0 {
+			a.pendingQueue.size() > 0 {
 
 			a.cwnd += a.mtu
 			a.partialBytesAcked -= a.cwnd
@@ -1266,19 +1263,13 @@ func (a *Association) resetStreams() *packet {
 }
 
 func (a *Association) peekNextPendingData() *chunkPayloadData {
-	c := a.pendingUnorderedQueue.get(0)
-	if c == nil {
-		c = a.pendingOrderedQueue.get(0)
-	}
-	return c
+	return a.pendingQueue.peek()
 }
 
 // Move the chunk peeked with peekNextPendingData() to the inflightQueue.
 func (a *Association) movePendingDataChunkToInflightQueue(c *chunkPayloadData) {
-	if c.unordered {
-		a.pendingUnorderedQueue.pop()
-	} else {
-		a.pendingOrderedQueue.pop()
+	if err := a.pendingQueue.pop(c); err != nil {
+		a.log.Errorf("failed to pop from pending queue: %s", err.Error())
 	}
 
 	// Assign TSN
@@ -1301,7 +1292,7 @@ func (a *Association) movePendingDataChunkToInflightQueue(c *chunkPayloadData) {
 func (a *Association) popPendingDataChunksToSend() []*chunkPayloadData {
 	chunks := []*chunkPayloadData{}
 
-	if a.pendingUnorderedQueue.size() > 0 || a.pendingOrderedQueue.size() > 0 {
+	if a.pendingQueue.size() > 0 {
 
 		// RFC 4960 sec 6.1.  Transmission of DATA Chunks
 		//   A) At any given time, the data sender MUST NOT transmit new data to
@@ -1385,13 +1376,7 @@ func (a *Association) sendPayloadData(chunks []*chunkPayloadData) error {
 
 		// Push the chunks into the pending queue first.
 		for _, c := range chunks {
-			if s, ok := a.streams[c.streamIdentifier]; ok {
-				if s.unordered {
-					a.pendingUnorderedQueue.push(c)
-				} else {
-					a.pendingOrderedQueue.push(c)
-				}
-			}
+			a.pendingQueue.push(c)
 		}
 
 		// Pop unsent data chunks from pending queue to send as much as
@@ -1723,9 +1708,7 @@ func (a *Association) bufferedAmount() int {
 	a.lock.RLock()
 	defer a.lock.RUnlock()
 
-	return a.pendingUnorderedQueue.getNumBytes() +
-		a.pendingOrderedQueue.getNumBytes() +
-		a.inflightQueue.getNumBytes()
+	return a.pendingQueue.getNumBytes() + a.inflightQueue.getNumBytes()
 }
 
 func (a *Association) name() string {

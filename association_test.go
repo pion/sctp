@@ -1416,8 +1416,7 @@ func TestAssocT3RtxTimer(t *testing.T) {
 		br.Process()
 		assert.False(t, s0.reassemblyQueue.isReadable(), "should no longer be readable")
 		a0.lock.RLock()
-		assert.Equal(t, 0, a0.pendingUnorderedQueue.size(), "should be no packet pending")
-		assert.Equal(t, 0, a0.pendingOrderedQueue.size(), "should be no packet pending")
+		assert.Equal(t, 0, a0.pendingQueue.size(), "should be no packet pending")
 		assert.Equal(t, 0, a0.inflightQueue.size(), "should be no packet inflight")
 		a0.lock.RUnlock()
 
