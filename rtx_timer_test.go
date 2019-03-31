@@ -329,4 +329,29 @@ func TestRtxTimer(t *testing.T) {
 		rt.stop()
 		assert.False(t, rt.isRunning(), "must be false")
 	})
+
+	t.Run("closed timer won't start", func(t *testing.T) {
+		var rtoCount int
+		timerID := 6
+		rt := newRTXTimer(timerID, &testTimerObserver{
+			onRTO: func(id int, nRtos uint) {
+				rtoCount++
+			},
+			onRtxFailure: func(id int) {},
+		}, pathMaxRetrans)
+
+		ok := rt.start(20)
+		assert.True(t, ok, "should be accepted")
+		assert.True(t, rt.isRunning(), "must be running")
+
+		rt.close()
+		assert.False(t, rt.isRunning(), "must be false")
+
+		ok = rt.start(20)
+		assert.False(t, ok, "should not start")
+		assert.False(t, rt.isRunning(), "must not be running")
+
+		time.Sleep(100 * time.Millisecond)
+		assert.Equal(t, 0, rtoCount, "RTO should not occur")
+	})
 }
