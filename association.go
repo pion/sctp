@@ -567,6 +567,57 @@ func (a *Association) handleInitAck(p *packet, i *chunkInitAck) error {
 }
 
 // The caller should hold the lock.
+func (a *Association) handleHeartbeat(c *chunkHeartbeat) []*packet {
+	a.log.Debug("chunkHeartbeat")
+	hbi, ok := c.params[0].(*paramHeartbeatInfo)
+	if !ok {
+		a.log.Warn("failed to handle Heartbeat, no ParamHeartbeatInfo")
+	}
+
+	return pack(&packet{
+		verificationTag: a.peerVerificationTag,
+		sourcePort:      a.sourcePort,
+		destinationPort: a.destinationPort,
+		chunks: []chunk{&chunkHeartbeatAck{
+			params: []param{
+				&paramHeartbeatInfo{
+					heartbeatInformation: hbi.heartbeatInformation,
+				},
+			},
+		}},
+	})
+}
+
+func (a *Association) handleCookieEcho(c *chunkCookieEcho) []*packet {
+	if !bytes.Equal(a.myCookie.cookie, c.cookie) {
+		return nil
+	}
+
+	// stop T1-init timer
+	a.t1Init.stop()
+	a.storedInit = nil
+	// stop T1-cookie timer
+	a.t1Cookie.stop()
+	a.storedCookieEcho = nil
+
+	p := &packet{
+		verificationTag: a.peerVerificationTag,
+		sourcePort:      a.sourcePort,
+		destinationPort: a.destinationPort,
+		chunks:          []chunk{&chunkCookieAck{}},
+	}
+
+	return pack(p)
+}
+
+func (a *Association) handleCookieAck(c *chunkCookieAck) []*packet {
+	// stop T1-cookie timer
+	a.t1Cookie.stop()
+	a.storedCookieEcho = nil
+	return nil
+}
+
+// The caller should hold the lock.
 func (a *Association) handleData(d *chunkPayloadData) []*packet {
 	canPush := a.payloadQueue.canPush(d, a.peerLastTSN)
 	if canPush {
@@ -687,27 +738,8 @@ func (a *Association) getOrCreateStream(streamIdentifier uint16) *Stream {
 }
 
 // The caller should hold the lock.
-func (a *Association) handleSack(d *chunkSelectiveAck) ([]*packet, error) {
-	a.log.Tracef("SACK: cumTSN=%d a_rwnd=%d", d.cumulativeTSNAck, d.advertisedReceiverWindowCredit)
-
-	if sna32GT(a.cumulativeTSNAckPoint, d.cumulativeTSNAck) {
-		// RFC 4960 sec 6.2.1.  Processing a Received SACK
-		// D)
-		//   i) If Cumulative TSN Ack is less than the Cumulative TSN Ack
-		//      Point, then drop the SACK.  Since Cumulative TSN Ack is
-		//      monotonically increasing, a SACK whose Cumulative TSN Ack is
-		//      less than the Cumulative TSN Ack Point indicates an out-of-
-		//      order SACK.
-
-		a.log.Debugf("SACK Cumulative ACK %v is older than ACK point %v",
-			d.cumulativeTSNAck,
-			a.cumulativeTSNAckPoint)
-
-		return nil, nil
-	}
-
+func (a *Association) processSelectiveAck(d *chunkSelectiveAck) (int, uint32, error) {
 	var totalBytesAcked int
-	var restartT3RTX bool
 
 	// New ack point, so pop all ACKed packets from inflightQueue
 	// We add 1 because the "currentAckPoint" has already been popped from the inflight queue
@@ -715,7 +747,7 @@ func (a *Association) handleSack(d *chunkSelectiveAck) ([]*packet, error) {
 	for i := a.cumulativeTSNAckPoint + 1; sna32LTE(i, d.cumulativeTSNAck); i++ {
 		c, ok := a.inflightQueue.pop(i)
 		if !ok {
-			return nil, errors.Errorf("TSN %v unable to be popped from inflight queue", i)
+			return 0, 0, errors.Errorf("TSN %v unable to be popped from inflight queue", i)
 		}
 
 		if !c.acked {
@@ -725,7 +757,8 @@ func (a *Association) handleSack(d *chunkSelectiveAck) ([]*packet, error) {
 			//        T3-rtx timer for that address with its current RTO (if there is
 			//        still outstanding data on that address).
 			if i == a.cumulativeTSNAckPoint+1 {
-				restartT3RTX = true
+				// T3 timer needs to be reset. Stop it for now.
+				a.t3RTX.stop()
 			}
 			totalBytesAcked += len(c.userData)
 
@@ -760,7 +793,7 @@ func (a *Association) handleSack(d *chunkSelectiveAck) ([]*packet, error) {
 			tsn := d.cumulativeTSNAck + uint32(i)
 			c, ok := a.inflightQueue.get(tsn)
 			if !ok {
-				return nil, errors.Errorf("Requested non-existent TSN %v", tsn)
+				return 0, 0, errors.Errorf("Requested non-existent TSN %v", tsn)
 			}
 
 			if !c.acked {
@@ -781,87 +814,66 @@ func (a *Association) handleSack(d *chunkSelectiveAck) ([]*packet, error) {
 		}
 	}
 
-	// New rwnd value
-	// RFC 4960 sec 6.2.1.  Processing a Received SACK
-	// D)
-	//   ii) Set rwnd equal to the newly received a_rwnd minus the number
-	//       of bytes still outstanding after processing the Cumulative
-	//       TSN Ack and the Gap Ack Blocks.
+	return totalBytesAcked, htna, nil
+}
 
-	// bytes acked were already subtracted by markAsAcked() method
-	bytesOutstanding := uint32(a.inflightQueue.getNumBytes())
-	if bytesOutstanding >= d.advertisedReceiverWindowCredit {
-		a.rwnd = 0
+// The caller should hold the lock.
+func (a *Association) onCumulativeTSNAckPointAdvanced(totalBytesAcked int) {
+	// RFC 4096, sec 6.3.2.  Retransmission Timer Rules
+	//   R2)  Whenever all outstanding data sent to an address have been
+	//        acknowledged, turn off the T3-rtx timer of that address.
+	if a.inflightQueue.size() == 0 {
+		a.log.Tracef("SACK: no more packet in-flight (pending=%d)",
+			a.pendingUnorderedQueue.size()+a.pendingOrderedQueue.size())
+		a.t3RTX.stop()
 	} else {
-		a.rwnd = d.advertisedReceiverWindowCredit - bytesOutstanding
+		a.t3RTX.start(a.rtoMgr.getRTO())
 	}
 
-	cumTSNAckPointAdvanced := false
-	if sna32LT(a.cumulativeTSNAckPoint, d.cumulativeTSNAck) {
-		cumTSNAckPointAdvanced = true
+	// Update congestion control parameters
+	if a.cwnd <= a.ssthresh {
+		// RFC 4096, sec 7.2.1.  Slow-Start
+		//   o  When cwnd is less than or equal to ssthresh, an SCTP endpoint MUST
+		//		use the slow-start algorithm to increase cwnd only if the current
+		//      congestion window is being fully utilized, an incoming SACK
+		//      advances the Cumulative TSN Ack Point, and the data sender is not
+		//      in Fast Recovery.  Only when these three conditions are met can
+		//      the cwnd be increased; otherwise, the cwnd MUST not be increased.
+		//		If these conditions are met, then cwnd MUST be increased by, at
+		//      most, the lesser of 1) the total size of the previously
+		//      outstanding DATA chunk(s) acknowledged, and 2) the destination's
+		//      path MTU.
+		if !a.inFastRecovery &&
+			a.pendingUnorderedQueue.size()+a.pendingOrderedQueue.size() > 0 {
 
-		a.log.Tracef("SACK: cumTSN advanced: %d -> %d",
-			a.cumulativeTSNAckPoint,
-			d.cumulativeTSNAck)
-
-		a.cumulativeTSNAckPoint = d.cumulativeTSNAck
-
-		// RFC 4096, sec 6.3.2.  Retransmission Timer Rules
-		//   R2)  Whenever all outstanding data sent to an address have been
-		//        acknowledged, turn off the T3-rtx timer of that address.
-		if a.inflightQueue.size() == 0 {
-			a.log.Tracef("SACK: no more packet in-flight (pending=%d)",
-				a.pendingUnorderedQueue.size()+a.pendingOrderedQueue.size())
-			a.t3RTX.stop()
-		} else {
-			if restartT3RTX {
-				a.t3RTX.stop()
-				a.t3RTX.start(a.rtoMgr.getRTO())
-			}
+			a.cwnd += min32(uint32(totalBytesAcked), a.mtu)
+			a.log.Debugf("updated cwnd=%d", a.cwnd)
 		}
+	} else {
+		// RFC 4096, sec 7.2.2.  Congestion Avoidance
+		//   o  Whenever cwnd is greater than ssthresh, upon each SACK arrival
+		//      that advances the Cumulative TSN Ack Point, increase
+		//      partial_bytes_acked by the total number of bytes of all new chunks
+		//      acknowledged in that SACK including chunks acknowledged by the new
+		//      Cumulative TSN Ack and by Gap Ack Blocks.
+		a.partialBytesAcked += uint32(totalBytesAcked)
 
-		if a.cwnd <= a.ssthresh {
-			// RFC 4096, sec 7.2.1.  Slow-Start
-			//   o  When cwnd is less than or equal to ssthresh, an SCTP endpoint MUST
-			//		use the slow-start algorithm to increase cwnd only if the current
-			//      congestion window is being fully utilized, an incoming SACK
-			//      advances the Cumulative TSN Ack Point, and the data sender is not
-			//      in Fast Recovery.  Only when these three conditions are met can
-			//      the cwnd be increased; otherwise, the cwnd MUST not be increased.
-			//		If these conditions are met, then cwnd MUST be increased by, at
-			//      most, the lesser of 1) the total size of the previously
-			//      outstanding DATA chunk(s) acknowledged, and 2) the destination's
-			//      path MTU.
-			if !a.inFastRecovery &&
-				a.pendingUnorderedQueue.size()+a.pendingOrderedQueue.size() > 0 {
+		//   o  When partial_bytes_acked is equal to or greater than cwnd and
+		//      before the arrival of the SACK the sender had cwnd or more bytes
+		//      of data outstanding (i.e., before arrival of the SACK, flightsize
+		//      was greater than or equal to cwnd), increase cwnd by MTU, and
+		//      reset partial_bytes_acked to (partial_bytes_acked - cwnd).
+		if a.partialBytesAcked >= a.cwnd &&
+			a.pendingUnorderedQueue.size()+a.pendingOrderedQueue.size() > 0 {
 
-				a.cwnd += min32(uint32(totalBytesAcked), a.mtu)
-				a.log.Debugf("updated cwnd=%d", a.cwnd)
-			}
-		} else {
-			// RFC 4096, sec 7.2.2.  Congestion Avoidance
-			//   o  Whenever cwnd is greater than ssthresh, upon each SACK arrival
-			//      that advances the Cumulative TSN Ack Point, increase
-			//      partial_bytes_acked by the total number of bytes of all new chunks
-			//      acknowledged in that SACK including chunks acknowledged by the new
-			//      Cumulative TSN Ack and by Gap Ack Blocks.
-			a.partialBytesAcked += uint32(totalBytesAcked)
-
-			//   o  When partial_bytes_acked is equal to or greater than cwnd and
-			//      before the arrival of the SACK the sender had cwnd or more bytes
-			//      of data outstanding (i.e., before arrival of the SACK, flightsize
-			//      was greater than or equal to cwnd), increase cwnd by MTU, and
-			//      reset partial_bytes_acked to (partial_bytes_acked - cwnd).
-			if a.partialBytesAcked >= a.cwnd &&
-				a.pendingUnorderedQueue.size()+a.pendingOrderedQueue.size() > 0 {
-
-				a.cwnd += a.mtu
-				a.partialBytesAcked -= a.cwnd
-				a.log.Debugf("updated cwnd=%d", a.cwnd)
-			}
+			a.cwnd += a.mtu
+			a.partialBytesAcked -= a.cwnd
+			a.log.Debugf("updated cwnd=%d", a.cwnd)
 		}
 	}
+}
 
+func (a *Association) processFastRetransmission(cumTSNAckPoint, htna uint32, cumTSNAckPointAdvanced bool) ([]chunk, error) {
 	toFastRetrans := []chunk{}
 	fastRetransSize := commonHeaderSize
 
@@ -871,7 +883,7 @@ func (a *Association) handleSack(d *chunkSelectiveAck) ([]*packet, error) {
 	// a)  Not in fast-recovery, or;
 	// b)  In fast-recovery AND the Cumulative TSN Ack Point advanced
 	if !a.inFastRecovery || (a.inFastRecovery && cumTSNAckPointAdvanced) {
-		for tsn := d.cumulativeTSNAck + 1; sna32LTE(tsn, htna); tsn++ {
+		for tsn := cumTSNAckPoint + 1; sna32LTE(tsn, htna); tsn++ {
 			c, ok := a.inflightQueue.get(tsn)
 			if !ok {
 				return nil, errors.Errorf("Requested non-existent TSN %v", tsn)
@@ -899,6 +911,67 @@ func (a *Association) handleSack(d *chunkSelectiveAck) ([]*packet, error) {
 		a.partialBytesAcked = 0
 
 		a.log.Debugf("enter fast-recovery: cwnd=%d ssthresh=%d", a.cwnd, a.ssthresh)
+	}
+
+	return toFastRetrans, nil
+}
+
+// The caller should hold the lock.
+func (a *Association) handleSack(d *chunkSelectiveAck) ([]*packet, error) {
+	a.log.Tracef("SACK: cumTSN=%d a_rwnd=%d", d.cumulativeTSNAck, d.advertisedReceiverWindowCredit)
+
+	if sna32GT(a.cumulativeTSNAckPoint, d.cumulativeTSNAck) {
+		// RFC 4960 sec 6.2.1.  Processing a Received SACK
+		// D)
+		//   i) If Cumulative TSN Ack is less than the Cumulative TSN Ack
+		//      Point, then drop the SACK.  Since Cumulative TSN Ack is
+		//      monotonically increasing, a SACK whose Cumulative TSN Ack is
+		//      less than the Cumulative TSN Ack Point indicates an out-of-
+		//      order SACK.
+
+		a.log.Debugf("SACK Cumulative ACK %v is older than ACK point %v",
+			d.cumulativeTSNAck,
+			a.cumulativeTSNAckPoint)
+
+		return nil, nil
+	}
+
+	// Process selective ack
+	totalBytesAcked, htna, err := a.processSelectiveAck(d)
+	if err != nil {
+		return nil, err
+	}
+
+	// New rwnd value
+	// RFC 4960 sec 6.2.1.  Processing a Received SACK
+	// D)
+	//   ii) Set rwnd equal to the newly received a_rwnd minus the number
+	//       of bytes still outstanding after processing the Cumulative
+	//       TSN Ack and the Gap Ack Blocks.
+
+	// bytes acked were already subtracted by markAsAcked() method
+	bytesOutstanding := uint32(a.inflightQueue.getNumBytes())
+	if bytesOutstanding >= d.advertisedReceiverWindowCredit {
+		a.rwnd = 0
+	} else {
+		a.rwnd = d.advertisedReceiverWindowCredit - bytesOutstanding
+	}
+
+	cumTSNAckPointAdvanced := false
+	if sna32LT(a.cumulativeTSNAckPoint, d.cumulativeTSNAck) {
+		a.log.Tracef("SACK: cumTSN advanced: %d -> %d",
+			a.cumulativeTSNAckPoint,
+			d.cumulativeTSNAck)
+
+		a.cumulativeTSNAckPoint = d.cumulativeTSNAck
+		cumTSNAckPointAdvanced = true
+
+		a.onCumulativeTSNAckPointAdvanced(totalBytesAcked)
+	}
+
+	toFastRetrans, err := a.processFastRetransmission(d.cumulativeTSNAck, htna, cumTSNAckPointAdvanced)
+	if err != nil {
+		return nil, err
 	}
 
 	packets := []*packet{}
@@ -1497,59 +1570,24 @@ func (a *Association) handleChunk(p *packet, c chunk) ([]*packet, error) {
 		}
 
 	case *chunkHeartbeat:
-		a.log.Debug("chunkHeartbeat")
-		hbi, ok := c.params[0].(*paramHeartbeatInfo)
-		if !ok {
-			a.log.Warn("failed to handle Heartbeat, no ParamHeartbeatInfo")
-		}
-
-		return pack(&packet{
-			verificationTag: a.peerVerificationTag,
-			sourcePort:      a.sourcePort,
-			destinationPort: a.destinationPort,
-			chunks: []chunk{&chunkHeartbeatAck{
-				params: []param{
-					&paramHeartbeatInfo{
-						heartbeatInformation: hbi.heartbeatInformation,
-					},
-				},
-			}},
-		}), nil
+		return a.handleHeartbeat(c), nil
 
 	case *chunkCookieEcho:
 		a.log.Debugf("[%s] chunkCookieEcho received in state '%s'", a.name(), a.state.String())
 		if a.state == closed || a.state == cookieWait || a.state == cookieEchoed {
-			if bytes.Equal(a.myCookie.cookie, c.cookie) {
-				// stop T1-init timer
-				a.t1Init.stop()
-				a.storedInit = nil
-				// stop T1-cookie timer
-				a.t1Cookie.stop()
-				a.storedCookieEcho = nil
-
-				p := &packet{
-					verificationTag: a.peerVerificationTag,
-					sourcePort:      a.sourcePort,
-					destinationPort: a.destinationPort,
-					chunks:          []chunk{&chunkCookieAck{}},
-				}
-				a.setState(established)
-				a.handshakeCompletedCh <- nil
-
-				return pack(p), nil
-			}
+			p := a.handleCookieEcho(c)
+			a.setState(established)
+			a.handshakeCompletedCh <- nil
+			return p, nil
 		}
 
 	case *chunkCookieAck:
 		a.log.Debugf("[%s] chunkCookieAck received in state '%s'", a.name(), a.state.String())
 		if a.state == cookieEchoed {
-			// stop T1-cookie timer
-			a.t1Cookie.stop()
-			a.storedCookieEcho = nil
-
+			p := a.handleCookieAck(c)
 			a.setState(established)
 			a.handshakeCompletedCh <- nil
-			return nil, nil
+			return p, nil
 		}
 
 		// RFC 4960
