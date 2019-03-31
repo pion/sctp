@@ -1204,18 +1204,19 @@ func (a *Association) handleForwardTSN(c *chunkForwardTSN) []*packet {
 }
 
 func (a *Association) sendResetRequest(streamIdentifier uint16) error {
+	a.lock.Lock()
 	p := a.createResetPacket(streamIdentifier)
+	a.lock.Unlock()
+
 	return a.send(p)
 }
 
+// The caller should hold the lock.
 func (a *Association) createResetPacket(streamIdentifier uint16) *packet {
-	a.lock.RLock()
 	lastTSN := a.myNextTSN - 1
-	a.lock.RUnlock()
 
 	// TODO: Re-transmission
 	a.ongoingReconfigOutgoing = &chunkReconfig{
-
 		paramA: &paramOutgoingResetRequest{
 			reconfigRequestSequenceNumber: a.generateNextRSN(),
 			senderLastTSN:                 lastTSN,
