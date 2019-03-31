@@ -957,6 +957,7 @@ func (a *Association) getPayloadDataToSend(onlyUnsent bool) []*packet {
 		if a.useForwardTSN {
 			// PR-SCTP
 			if s, ok := a.streams[d.streamIdentifier]; ok {
+				s.lock.RLock()
 				if s.reliabilityType == ReliabilityTypeRexmit {
 					if d.nSent >= s.reliabilityValue {
 						d.abandoned = true
@@ -969,6 +970,7 @@ func (a *Association) getPayloadDataToSend(onlyUnsent bool) []*packet {
 						//fmt.Printf("final (abandoned) tsn=%d (timed: %d)\n", d.tsn, elapsed)
 					}
 				}
+				s.lock.RUnlock()
 			}
 		}
 
