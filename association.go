@@ -610,7 +610,7 @@ func (a *Association) handleCookieEcho(c *chunkCookieEcho) []*packet {
 	return pack(p)
 }
 
-func (a *Association) handleCookieAck(c *chunkCookieAck) []*packet {
+func (a *Association) handleCookieAck() []*packet {
 	// stop T1-cookie timer
 	a.t1Cookie.stop()
 	a.storedCookieEcho = nil
@@ -1584,7 +1584,7 @@ func (a *Association) handleChunk(p *packet, c chunk) ([]*packet, error) {
 	case *chunkCookieAck:
 		a.log.Debugf("[%s] chunkCookieAck received in state '%s'", a.name(), a.state.String())
 		if a.state == cookieEchoed {
-			p := a.handleCookieAck(c)
+			p := a.handleCookieAck()
 			a.setState(established)
 			a.handshakeCompletedCh <- nil
 			return p, nil
