@@ -131,12 +131,16 @@ func (q *payloadQueue) getGapAckBlocks(cumulativeTSN uint32) (gapAckBlocks []gap
 	return gapAckBlocks
 }
 
-func (q *payloadQueue) markAsAcked(tsn uint32) {
+func (q *payloadQueue) markAsAcked(tsn uint32) int {
+	var nBytesAcked int
 	if c, ok := q.chunkMap[tsn]; ok {
 		c.acked = true
-		q.nBytes -= len(c.userData)
+		nBytesAcked = len(c.userData)
+		q.nBytes -= nBytesAcked
 		c.userData = []byte{}
 	}
+
+	return nBytesAcked
 }
 
 func (q *payloadQueue) getNumBytes() int {

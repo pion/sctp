@@ -710,6 +710,7 @@ func (a *Association) createStream(streamIdentifier uint16, accept bool) *Stream
 		streamIdentifier: streamIdentifier,
 		reassemblyQueue:  newReassemblyQueue(streamIdentifier),
 		readNotifier:     sync.NewCond(&sync.Mutex{}),
+		log:              a.log,
 	}
 
 	if accept {
@@ -760,7 +761,18 @@ func (a *Association) processSelectiveAck(d *chunkSelectiveAck) (int, uint32, er
 				// T3 timer needs to be reset. Stop it for now.
 				a.t3RTX.stop()
 			}
-			totalBytesAcked += len(c.userData)
+
+			nBytesAcked := len(c.userData)
+
+			// Report the number of bytes ackknowled to the stream who sent this DATA
+			// chunk.
+			if s, ok := a.streams[c.streamIdentifier]; ok {
+				a.lock.Unlock()
+				s.onBufferReleased(nBytesAcked)
+				a.lock.Lock()
+			}
+
+			totalBytesAcked += nBytesAcked
 
 			// RFC 4960 sec 6.3.1.  RTO Calculation
 			//   C4)  When data is in flight and when allowed by rule C5 below, a new
@@ -797,8 +809,18 @@ func (a *Association) processSelectiveAck(d *chunkSelectiveAck) (int, uint32, er
 			}
 
 			if !c.acked {
-				totalBytesAcked += len(c.userData)
-				a.inflightQueue.markAsAcked(tsn)
+				nBytesAcked := a.inflightQueue.markAsAcked(tsn)
+
+				// Report the number of bytes ackknowled to the stream who sent this DATA
+				// chunk.
+				if s, ok := a.streams[c.streamIdentifier]; ok {
+					a.lock.Unlock()
+					s.onBufferReleased(nBytesAcked)
+					a.lock.Lock()
+				}
+
+				totalBytesAcked += nBytesAcked
+
 				a.log.Tracef("tsn=%d has been sacked", c.tsn)
 
 				if c.nSent == 1 {
@@ -1695,14 +1717,15 @@ func (a *Association) onRetransmissionFailure(id int) {
 	}
 }
 
-// BufferedAmount returns total amount (in bytes) of currently buffered user data.
-func (a *Association) BufferedAmount() uint64 {
+// bufferedAmount returns total amount (in bytes) of currently buffered user data.
+// This is used only by testing.
+func (a *Association) bufferedAmount() int {
 	a.lock.RLock()
 	defer a.lock.RUnlock()
 
-	return uint64(a.pendingUnorderedQueue.getNumBytes() +
+	return a.pendingUnorderedQueue.getNumBytes() +
 		a.pendingOrderedQueue.getNumBytes() +
-		a.inflightQueue.getNumBytes())
+		a.inflightQueue.getNumBytes()
 }
 
 func (a *Association) name() string {
