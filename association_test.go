@@ -630,8 +630,7 @@ func TestAssocReliable(t *testing.T) {
 		}
 
 		// lock RTO value at 100 [msec]
-		a0.rtoMgr.rto = 100.0
-		a0.rtoMgr.noUpdate = true
+		a0.rtoMgr.setRTO(100.0, true)
 
 		s0, s1, err := establishSessionPair(br, a0, a1, si)
 		assert.Nil(t, err, "failed to establish session pair")
@@ -755,8 +754,7 @@ func TestAssocUnreliable(t *testing.T) {
 		assert.Nil(t, err, "failed to establish session pair")
 
 		// lock RTO value at 100 [msec]
-		a0.rtoMgr.rto = 100.0
-		a0.rtoMgr.noUpdate = true
+		a0.rtoMgr.setRTO(100.0, true)
 
 		// When we set the reliability value to 0 [times], then it will cause
 		// the chunk to be abandoned immediately after the first transmission.
@@ -1140,7 +1138,7 @@ func TestAssocT1InitTimer(t *testing.T) {
 		assert.Equal(t, rtoInitial, a1.rtoMgr.getRTO())
 
 		// modified rto for fast test
-		a0.rtoMgr.rto = 20
+		a0.rtoMgr.setRTO(20, false)
 
 		go func() {
 			err0 = <-a0.handshakeCompletedCh
@@ -1192,8 +1190,8 @@ func TestAssocT1InitTimer(t *testing.T) {
 		assert.Equal(t, rtoInitial, a1.rtoMgr.getRTO())
 
 		// modified rto for fast test
-		a0.rtoMgr.rto = 20
-		a1.rtoMgr.rto = 20
+		a0.rtoMgr.setRTO(20, false)
+		a1.rtoMgr.setRTO(20, false)
 
 		// fail after 4 retransmission
 		a0.t1Init.maxRetrans = 4
@@ -1253,7 +1251,7 @@ func TestAssocT1CookieTimer(t *testing.T) {
 		assert.Equal(t, rtoInitial, a1.rtoMgr.getRTO())
 
 		// modified rto for fast test
-		a0.rtoMgr.rto = 20
+		a0.rtoMgr.setRTO(20, false)
 
 		go func() {
 			err0 = <-a0.handshakeCompletedCh
@@ -1307,7 +1305,7 @@ func TestAssocT1CookieTimer(t *testing.T) {
 		assert.Equal(t, rtoInitial, a1.rtoMgr.getRTO())
 
 		// modified rto for fast test
-		a0.rtoMgr.rto = 20
+		a0.rtoMgr.setRTO(20, false)
 		// fail after 4 retransmission
 		a0.t1Cookie.maxRetrans = 4
 
@@ -1387,7 +1385,7 @@ func TestAssocT3RtxTimer(t *testing.T) {
 		}
 
 		// lock RTO value at 20 [msec]
-		a0.rtoMgr.rto = 20.0
+		a0.rtoMgr.setRTO(20.0, false)
 		a0.rtoMgr.noUpdate = true
 
 		s0, s1, err := establishSessionPair(br, a0, a1, si)
@@ -1417,9 +1415,11 @@ func TestAssocT3RtxTimer(t *testing.T) {
 
 		br.Process()
 		assert.False(t, s0.reassemblyQueue.isReadable(), "should no longer be readable")
+		a0.lock.RLock()
 		assert.Equal(t, 0, a0.pendingUnorderedQueue.size(), "should be no packet pending")
 		assert.Equal(t, 0, a0.pendingOrderedQueue.size(), "should be no packet pending")
 		assert.Equal(t, 0, a0.inflightQueue.size(), "should be no packet inflight")
+		a0.lock.RUnlock()
 
 		closeAssociationPair(br, a0, a1)
 	})

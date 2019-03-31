@@ -77,6 +77,15 @@ func (m *rtoManager) reset() {
 	m.rto = rtoInitial
 }
 
+// set RTO value for testing
+func (m *rtoManager) setRTO(rto float64, noUpdate bool) {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	m.rto = rto
+	m.noUpdate = noUpdate
+}
+
 // rtxTimerObserver is the inteface to a timer observer.
 // NOTE: Observers MUST NOT call start() or stop() method on rtxTimer
 // from within these callbacks.
