@@ -17,7 +17,7 @@ import (
 const (
 	receiveMTU           uint32 = 8192 // MTU for inbound packet (from DTLS)
 	initialMTU           uint32 = 1228 // initial MTU for outgoing packets (to DTLS)
-	maxReceiveBufferSize uint32 = 64 * 1024
+	maxReceiveBufferSize uint32 = 128 * 1024
 	commonHeaderSize     uint32 = 12
 	dataChunkHeaderSize  uint32 = 16
 )
@@ -222,7 +222,7 @@ func createAssociation(netConn net.Conn) *Association {
 	//     long idle period MUST be set to min(4*MTU, max (2*MTU, 4380
 	//     bytes)).
 	a.cwnd = min32(4*a.mtu, max32(2*a.mtu, 4380))
-	a.log.Debugf("initial cwnd=%d", a.cwnd)
+	a.log.Tracef("updated cwnd=%d ssthresh=%d inflight=%d (INI)", a.cwnd, a.ssthresh, a.inflightQueue.getNumBytes())
 
 	a.t1Init = newRTXTimer(timerT1Init, a, maxInitRetrans)
 	a.t1Cookie = newRTXTimer(timerT1Cookie, a, maxInitRetrans)
@@ -535,7 +535,7 @@ func (a *Association) handleInitAck(p *packet, i *chunkInitAck) error {
 	//     example, implementations MAY use the size of the receiver
 	//     advertised window).
 	a.ssthresh = a.rwnd
-	a.log.Debugf("initial ssthresh=%d", a.ssthresh)
+	a.log.Tracef("updated cwnd=%d ssthresh=%d inflight=%d (INI)", a.cwnd, a.ssthresh, a.inflightQueue.getNumBytes())
 
 	// stop T1-init timer
 	a.t1Init.stop()
@@ -854,7 +854,7 @@ func (a *Association) onCumulativeTSNAckPointAdvanced(totalBytesAcked int) {
 		a.log.Tracef("SACK: no more packet in-flight (pending=%d)", a.pendingQueue.size())
 		a.t3RTX.stop()
 	} else {
-		a.log.Debugf("[%s] T3-rtx timer start (pt2)", a.name())
+		a.log.Tracef("[%s] T3-rtx timer start (pt2)", a.name())
 		a.t3RTX.start(a.rtoMgr.getRTO())
 	}
 
@@ -875,7 +875,7 @@ func (a *Association) onCumulativeTSNAckPointAdvanced(totalBytesAcked int) {
 			a.pendingQueue.size() > 0 {
 
 			a.cwnd += min32(uint32(totalBytesAcked), a.mtu)
-			a.log.Debugf("updated cwnd=%d bytesAcked=%d inflight=%d (SS)", a.cwnd, totalBytesAcked, a.inflightQueue.getNumBytes())
+			a.log.Tracef("updated cwnd=%d ssthresh=%d inflight=%d (SS)", a.cwnd, a.ssthresh, a.inflightQueue.getNumBytes())
 		}
 	} else {
 		// RFC 4096, sec 7.2.2.  Congestion Avoidance
@@ -896,9 +896,8 @@ func (a *Association) onCumulativeTSNAckPointAdvanced(totalBytesAcked int) {
 
 			a.partialBytesAcked -= a.cwnd
 			a.cwnd += a.mtu
+			a.log.Tracef("updated cwnd=%d ssthresh=%d inflight=%d (CA)", a.cwnd, a.ssthresh, a.inflightQueue.getNumBytes())
 		}
-
-		a.log.Debugf("updated cwnd=%d bytesAcked=%d inflight=%d (CA)", a.cwnd, totalBytesAcked, a.inflightQueue.getNumBytes())
 	}
 }
 
@@ -939,7 +938,7 @@ func (a *Association) processFastRetransmission(cumTSNAckPoint, htna uint32, cum
 		a.cwnd = a.ssthresh
 		a.partialBytesAcked = 0
 
-		a.log.Debugf("enter fast-recovery: cwnd=%d ssthresh=%d", a.cwnd, a.ssthresh)
+		a.log.Tracef("updated cwnd=%d ssthresh=%d inflight=%d (FR)", a.cwnd, a.ssthresh, a.inflightQueue.getNumBytes())
 	}
 
 	return toFastRetrans, nil
@@ -1041,7 +1040,7 @@ func (a *Association) handleSack(d *chunkSelectiveAck) ([]*packet, error) {
 	chunks := a.popPendingDataChunksToSend()
 	if len(chunks) > 0 {
 		// Start timer. (noop if already started)
-		a.log.Debugf("[%s] T3-rtx timer start (pt3)", a.name())
+		a.log.Tracef("[%s] T3-rtx timer start (pt3)", a.name())
 		a.t3RTX.start(a.rtoMgr.getRTO())
 
 		packets = append(packets, a.bundleDataChunksIntoPackets(chunks)...)
@@ -1399,7 +1398,7 @@ func (a *Association) sendPayloadData(chunks []*chunkPayloadData) error {
 		}
 
 		// Start timer. (noop if already started)
-		a.log.Debugf("[%s] T3-rtx timer start (pt1)", a.name())
+		a.log.Tracef("[%s] T3-rtx timer start (pt1)", a.name())
 		a.t3RTX.start(a.rtoMgr.getRTO())
 
 		return a.bundleDataChunksIntoPackets(chunks)
@@ -1683,6 +1682,7 @@ func (a *Association) onRetransmissionTimeout(id int, nRtos uint) {
 
 		a.ssthresh = max32(a.cwnd/2, 4*a.mtu)
 		a.cwnd = a.mtu
+		a.log.Tracef("updated cwnd=%d ssthresh=%d inflight=%d (RTO)", a.cwnd, a.ssthresh, a.inflightQueue.getNumBytes())
 
 		a.log.Debugf("[%s] T3-rtx timed out: nRtos=%d cwnd=%d ssthresh=%d",
 			a.name(), nRtos, a.cwnd, a.ssthresh)
@@ -1731,8 +1731,10 @@ func (a *Association) bufferedAmount() int {
 }
 
 func (a *Association) name() string {
-	if a.netConn != nil && a.netConn.LocalAddr() != nil {
-		return a.netConn.LocalAddr().String()
-	}
+	/*
+		if a.netConn != nil && a.netConn.LocalAddr() != nil {
+			return a.netConn.LocalAddr().String()
+		}
+	*/
 	return fmt.Sprintf("%p", a)
 }

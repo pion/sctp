@@ -1,7 +1,6 @@
 package sctp
 
 import (
-	//"fmt"
 	"math"
 	"sync"
 	"time"

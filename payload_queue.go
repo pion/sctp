@@ -1,7 +1,6 @@
 package sctp
 
 import (
-	"fmt"
 	"sort"
 )
 
@@ -31,7 +30,6 @@ func (q *payloadQueue) updateSortedKeys() {
 	sort.Slice(q.sorted, func(i, j int) bool {
 		return sna32LT(q.sorted[i], q.sorted[j])
 	})
-	//fmt.Printf("After sorted: %v\n", q.sorted)
 }
 
 func (q *payloadQueue) canPush(p *chunkPayloadData, cumulativeTSN uint32) bool {
@@ -76,7 +74,6 @@ func (q *payloadQueue) pop(tsn uint32) (*chunkPayloadData, bool) {
 			q.nBytes -= len(c.userData)
 			return c, true
 		}
-		fmt.Println("sorted-key array may be corrupted")
 	}
 
 	return nil, false
