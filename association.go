@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pions/logging"
 	"github.com/pkg/errors"
 )
 
@@ -136,11 +137,13 @@ type Association struct {
 	acceptCh             chan *Stream
 	closeCh              chan struct{}
 	handshakeCompletedCh chan error
+
+	log logging.LeveledLogger
 }
 
 // Server accepts a SCTP stream over a conn
-func Server(netConn net.Conn) (*Association, error) {
-	a := createAssocation(netConn)
+func Server(config Config) (*Association, error) {
+	a := createAssocation(config)
 	go a.readLoop()
 
 	select {
@@ -155,8 +158,8 @@ func Server(netConn net.Conn) (*Association, error) {
 }
 
 // Client opens a SCTP stream over a conn
-func Client(netConn net.Conn) (*Association, error) {
-	a := createAssocation(netConn)
+func Client(config Config) (*Association, error) {
+	a := createAssocation(config)
 	go a.readLoop()
 	a.init()
 
@@ -171,13 +174,20 @@ func Client(netConn net.Conn) (*Association, error) {
 	}
 }
 
-func createAssocation(netConn net.Conn) *Association {
+// Config collects the arguments to createAssociation construction into
+// a single structure
+type Config struct {
+	NetConn       net.Conn
+	LoggerFactory logging.LoggerFactory
+}
+
+func createAssocation(config Config) *Association {
 	rs := rand.NewSource(time.Now().UnixNano())
 	r := rand.New(rs)
 
 	tsn := r.Uint32()
 	a := &Association{
-		netConn:                 netConn,
+		netConn:                 config.NetConn,
 		myMaxNumOutboundStreams: math.MaxUint16,
 		myMaxNumInboundStreams:  math.MaxUint16,
 		myReceiverWindowCredit:  10 * 1500, // 10 Max MTU packets buffer
@@ -195,6 +205,7 @@ func createAssocation(netConn net.Conn) *Association {
 		handshakeCompletedCh:    make(chan error),
 		cumulativeTSNAckPoint:   tsn - 1,
 		advancedPeerTSNAckPoint: tsn - 1,
+		log:                     config.LoggerFactory.NewLogger("association"),
 	}
 
 	a.t1Init = newRTXTimer(timerT1Init, a, maxInitRetrans)
@@ -219,8 +230,7 @@ func (a *Association) init() {
 
 	err := a.sendInit()
 	if err != nil {
-		// TODO: use logging
-		fmt.Printf("Failed to send init: %v\n", err)
+		a.log.Errorf("Failed to send init: %v\n", err)
 	}
 
 	//fmt.Println("starting T1-init timer")
@@ -315,7 +325,7 @@ func (a *Association) readLoop() {
 		}
 
 		if err = a.handleInbound(buffer[:n]); err != nil {
-			fmt.Println(errors.Wrap(err, "Failed to push SCTP packet"))
+			a.log.Error(errors.Wrap(err, "Failed to push SCTP packet").Error())
 		}
 	}
 }
@@ -475,7 +485,7 @@ func (a *Association) handleInitAck(p *packet, i *chunkInitAck) error {
 	a.peerLastTSN = i.initialTSN - 1
 	if a.sourcePort != p.destinationPort ||
 		a.destinationPort != p.sourcePort {
-		fmt.Println("handleInitAck: port mismatch")
+		a.log.Warn("handleInitAck: port mismatch")
 	}
 
 	// stop T1-init timer
@@ -1072,21 +1082,21 @@ func (a *Association) handleChunk(p *packet, c chunk) ([]*packet, error) {
 		return nil, nil
 
 	case *chunkAbort:
-		fmt.Println("Abort chunk, with errors:")
+		a.log.Debug("Abort chunk")
 		for _, e := range c.errorCauses {
-			fmt.Printf("error cause: %s\n", e)
+			a.log.Debugf("error cause: %s\n", e)
 		}
 
 	case *chunkError:
-		fmt.Println("Error chunk, with errors:")
+		a.log.Debug("Abort chunk")
 		for _, e := range c.errorCauses {
-			fmt.Printf("error cause: %s\n", e)
+			a.log.Debugf("error cause: %s\n", e)
 		}
 
 	case *chunkHeartbeat:
 		hbi, ok := c.params[0].(*paramHeartbeatInfo)
 		if !ok {
-			fmt.Println("Failed to handle Heartbeat, no ParamHeartbeatInfo")
+			a.log.Debug("Failed to handle Heartbeat, no ParamHeartbeatInfo")
 		}
 
 		return pack(&packet{
@@ -1180,7 +1190,7 @@ func (a *Association) onRetransmissionTimeout(id int, nRtos uint) {
 		err := a.sendInit()
 		if err != nil {
 			// TODO: use logging
-			fmt.Printf("Failed to retransmit init (nRtos=%d): %v\n", nRtos, err)
+			a.log.Errorf("Failed to retransmit init (nRtos=%d): %v\n", nRtos, err)
 		}
 		return
 	}
@@ -1188,8 +1198,7 @@ func (a *Association) onRetransmissionTimeout(id int, nRtos uint) {
 	if id == timerT1Cookie {
 		err := a.sendCookieEcho()
 		if err != nil {
-			// TODO: use logging
-			fmt.Printf("Failed to retransmit cookie-echo (nRtos=%d): %v\n", nRtos, err)
+			a.log.Errorf("Failed to retransmit cookie-echo (nRtos=%d): %v\n", nRtos, err)
 		}
 		return
 	}
@@ -1200,13 +1209,14 @@ func (a *Association) onRetransmissionFailure(id int) {
 	defer a.lock.Unlock()
 
 	if id == timerT1Init {
-		fmt.Println("RTX Failure: T1-init")
+		a.log.Debug("RTX Failure: T1-init")
+
 		a.handshakeCompletedCh <- fmt.Errorf("handshake failed (INIT ACK)")
 		return
 	}
 
 	if id == timerT1Cookie {
-		fmt.Println("RTX Failure: T1-cookie")
+		a.log.Debug("RTX Failure: T1-cookie")
 		a.handshakeCompletedCh <- fmt.Errorf("handshake failed (COOKIE ECHO)")
 		return
 	}

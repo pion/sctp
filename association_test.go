@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/pions/transport/test"
+	"github.com/pions/logging"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -112,12 +113,20 @@ func association(piper piperFunc) (*Association, *Association, error) {
 
 	// Setup client
 	go func() {
-		client, err := Client(ca)
+		config := Config{
+			NetConn: ca,
+			LoggerFactory: logging.NewDefaultLoggerFactory(),
+		}
+		client, err := Client(config)
 		c <- result{client, err}
 	}()
 
+	config := Config{
+		NetConn: cb,
+		LoggerFactory: logging.NewDefaultLoggerFactory(),
+	}
 	// Setup server
-	server, err := Server(cb)
+	server, err := Server(config)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -236,11 +245,19 @@ func createNewAssociationPair(br *test.Bridge) (*Association, *Association, erro
 	handshake1Ch := make(chan bool)
 
 	go func() {
-		a0, err0 = Client(br.GetConn0())
+		config := Config{
+			NetConn: br.GetConn0(),
+			LoggerFactory: logging.NewDefaultLoggerFactory(),
+		}
+		a0, err0 = Client(config)
 		handshake0Ch <- true
 	}()
 	go func() {
-		a1, err1 = Client(br.GetConn1())
+		config := Config{
+			NetConn: br.GetConn1(),
+			LoggerFactory: logging.NewDefaultLoggerFactory(),
+		}
+		a1, err1 = Client(config)
 		handshake1Ch <- true
 	}()
 
@@ -949,9 +966,12 @@ func TestAssocUnreliable(t *testing.T) {
 func TestCreateForwardTSN(t *testing.T) {
 
 	t.Run("forward one abandoned", func(t *testing.T) {
-		conn := &dumbConn{}
+		config := Config{
+			NetConn: &dumbConn{},
+			LoggerFactory: logging.NewDefaultLoggerFactory(),
+		}
 
-		a := createAssocation(conn)
+		a := createAssocation(config)
 
 		a.cumulativeTSNAckPoint = 9
 		a.advancedPeerTSNAckPoint = 10
@@ -975,9 +995,12 @@ func TestCreateForwardTSN(t *testing.T) {
 	})
 
 	t.Run("forward two abandoned with the same SI", func(t *testing.T) {
-		conn := &dumbConn{}
+		config := Config{
+			NetConn: &dumbConn{},
+			LoggerFactory: logging.NewDefaultLoggerFactory(),
+		}
 
-		a := createAssocation(conn)
+		a := createAssocation(config)
 
 		a.cumulativeTSNAckPoint = 9
 		a.advancedPeerTSNAckPoint = 12
@@ -1037,8 +1060,11 @@ func TestCreateForwardTSN(t *testing.T) {
 
 func TestHandleForwardTSN(t *testing.T) {
 	t.Run("forward 3 unreceived chunks", func(t *testing.T) {
-		conn := &dumbConn{}
-		a := createAssocation(conn)
+		config := Config{
+			NetConn: &dumbConn{},
+			LoggerFactory: logging.NewDefaultLoggerFactory(),
+		}
+		a := createAssocation(config)
 		a.useForwardTSN = true
 		prevTSN := a.peerLastTSN
 
@@ -1053,8 +1079,11 @@ func TestHandleForwardTSN(t *testing.T) {
 	})
 
 	t.Run("forward 1 then one more for received chunk", func(t *testing.T) {
-		conn := &dumbConn{}
-		a := createAssocation(conn)
+		config := Config{
+			NetConn: &dumbConn{},
+			LoggerFactory: logging.NewDefaultLoggerFactory(),
+		}
+		a := createAssocation(config)
 		a.useForwardTSN = true
 		prevTSN := a.peerLastTSN
 
@@ -1084,9 +1113,19 @@ func TestHandleForwardTSN(t *testing.T) {
 func TestAssocT1InitTimer(t *testing.T) {
 	t.Run("Retransmission success", func(t *testing.T) {
 		br := test.NewBridge()
-		a0 := createAssocation(br.GetConn0())
+
+		config0 := Config{
+			NetConn: br.GetConn0(),
+			LoggerFactory: logging.NewDefaultLoggerFactory(),
+		}
+		a0 := createAssocation(config0)
 		go a0.readLoop()
-		a1 := createAssocation(br.GetConn1())
+
+		config1 := Config{
+			NetConn: br.GetConn1(),
+			LoggerFactory: logging.NewDefaultLoggerFactory(),
+		}
+		a1 := createAssocation(config1)
 		go a1.readLoop()
 
 		var err0, err1 error
@@ -1136,9 +1175,19 @@ func TestAssocT1InitTimer(t *testing.T) {
 
 	t.Run("Retransmission failure", func(t *testing.T) {
 		br := test.NewBridge()
-		a0 := createAssocation(br.GetConn0())
+
+		config0 := Config{
+			NetConn: br.GetConn0(),
+			LoggerFactory: logging.NewDefaultLoggerFactory(),
+		}
+		a0 := createAssocation(config0)
 		go a0.readLoop()
-		a1 := createAssocation(br.GetConn1())
+
+		config1 := Config{
+			NetConn: br.GetConn1(),
+			LoggerFactory: logging.NewDefaultLoggerFactory(),
+		}
+		a1 := createAssocation(config1)
 		go a1.readLoop()
 
 		var err0, err1 error
@@ -1197,10 +1246,21 @@ func TestAssocT1InitTimer(t *testing.T) {
 func TestAssocT1CookieTimer(t *testing.T) {
 	t.Run("Retransmission success", func(t *testing.T) {
 		br := test.NewBridge()
-		a0 := createAssocation(br.GetConn0())
+
+		config0 := Config{
+			NetConn: br.GetConn0(),
+			LoggerFactory: logging.NewDefaultLoggerFactory(),
+		}
+		a0 := createAssocation(config0)
 		go a0.readLoop()
-		a1 := createAssocation(br.GetConn1())
+
+		config1 := Config{
+			NetConn: br.GetConn1(),
+			LoggerFactory: logging.NewDefaultLoggerFactory(),
+		}
+		a1 := createAssocation(config1)
 		go a1.readLoop()
+
 
 		var err0, err1 error
 		a0ReadyCh := make(chan bool)
@@ -1252,9 +1312,19 @@ func TestAssocT1CookieTimer(t *testing.T) {
 
 	t.Run("Retransmission failure", func(t *testing.T) {
 		br := test.NewBridge()
-		a0 := createAssocation(br.GetConn0())
+
+		config0 := Config{
+			NetConn: br.GetConn0(),
+			LoggerFactory: logging.NewDefaultLoggerFactory(),
+		}
+		a0 := createAssocation(config0)
 		go a0.readLoop()
-		a1 := createAssocation(br.GetConn1())
+
+		config1 := Config{
+			NetConn: br.GetConn1(),
+			LoggerFactory: logging.NewDefaultLoggerFactory(),
+		}
+		a1 := createAssocation(config1)
 		go a1.readLoop()
 
 		var err0 error
