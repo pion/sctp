@@ -114,11 +114,9 @@ func (s *Stream) ReadSCTP(p []byte) (int, PayloadProtocolIdentifier, error) {
 func (s *Stream) handleData(pd *chunkPayloadData) {
 	var readable bool
 	s.lock.Lock()
-	//fmt.Printf("stream[%d]: handleData ts=%d ssn=%d\n", s.streamIdentifier, pd.tsn, pd.streamSequenceNumber)
 	if s.reassemblyQueue.push(pd) {
 		readable = s.reassemblyQueue.isReadable()
 	}
-	//fmt.Printf("stream[%d]: handleData readable? %v\n", s.streamIdentifier, readable)
 	s.lock.Unlock()
 
 	// Notify the reader asynchronously if there's a data chunk to read.
@@ -132,10 +130,8 @@ func (s *Stream) handleForwardTSN(newCumulativeTSN uint32, ssn uint16) {
 	s.lock.Lock()
 	// Remove all chunks older than or equal to the new TSN from
 	// the reassemblyQueue.
-	//fmt.Printf("stream[%d]: handleForwardTSN newTSN=%d ssn=%d\n", s.streamIdentifier, newCumulativeTSN, ssn)
 	s.reassemblyQueue.forwardTSN(newCumulativeTSN, s.unordered, ssn)
 	readable = s.reassemblyQueue.isReadable()
-	//fmt.Printf("stream[%d]: handleForwardTSN readable? %v\n", s.streamIdentifier, readable)
 	s.lock.Unlock()
 
 	// Notify the reader asynchronously if there's a data chunk to read.

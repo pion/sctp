@@ -32,7 +32,6 @@ func TestRTOManager(t *testing.T) {
 		for i := 0; i < 5; i++ {
 			m.setNewRTT(600)
 			rto = m.getRTO()
-			//fmt.Printf("rto: %.03f, srtt:%.03f rttvar:%.03f\n", rto, m.srtt, m.rttvar)
 			assert.Equal(t, exp[i], int32(math.Floor(rto)), "should be equal")
 		}
 	})
@@ -51,7 +50,6 @@ func TestRTOManager(t *testing.T) {
 		for i := 0; i < 5; i++ {
 			m.setNewRTT(30000)
 			rto = m.getRTO()
-			//fmt.Printf("rto: %.03f, srtt:%.03f rttvar:%.03f\n", rto, m.srtt, m.rttvar)
 			assert.Equal(t, exp[i], int32(math.Floor(rto)), "should be equal")
 		}
 	})
@@ -96,8 +94,6 @@ func TestRtxTimer(t *testing.T) {
 				// 60 : 2 (90)
 				// 120: 3 (210)
 				// 240: 4 (550) <== expected in 650 msec
-				//fmt.Printf("nCbs=%d at %v\n", nCbs, time.Now().Sub(since).Seconds()*1000)
-
 				assert.Equal(t, timerID, id, "unexpted timer ID: %d", id)
 			},
 			onRtxFailure: func(id int) {},

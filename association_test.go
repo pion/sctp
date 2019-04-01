@@ -13,24 +13,6 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-/*
-func TestAssocInit(t *testing.T) {
-	rawPkt := []byte{0x13, 0x88, 0x13, 0x88, 0x00, 0x00, 0x00, 0x00, 0x81, 0x46, 0x9d, 0xfc, 0x01, 0x00, 0x00, 0x56, 0x55,
-		0xb9, 0x64, 0xa5, 0x00, 0x02, 0x00, 0x00, 0x04, 0x00, 0x08, 0x00, 0xe8, 0x6d, 0x10, 0x30, 0xc0, 0x00, 0x00, 0x04, 0x80,
-		0x08, 0x00, 0x09, 0xc0, 0x0f, 0xc1, 0x80, 0x82, 0x00, 0x00, 0x00, 0x80, 0x02, 0x00, 0x24, 0x9f, 0xeb, 0xbb, 0x5c, 0x50,
-		0xc9, 0xbf, 0x75, 0x9c, 0xb1, 0x2c, 0x57, 0x4f, 0xa4, 0x5a, 0x51, 0xba, 0x60, 0x17, 0x78, 0x27, 0x94, 0x5c, 0x31, 0xe6,
-		0x5d, 0x5b, 0x09, 0x47, 0xe2, 0x22, 0x06, 0x80, 0x04, 0x00, 0x06, 0x00, 0x01, 0x00, 0x00, 0x80, 0x03, 0x00, 0x06, 0x80, 0xc1, 0x00, 0x00}
-
-	conn := &dumbConn{}
-	assoc := createAssociation(conn)
-	if err := assoc.handleInbound(rawPkt); err != nil {
-		// TODO
-		fmt.Println(err)
-		// t.Error(errors.Wrap(err, "Failed to HandleInbound"))
-	}
-}
-*/
-
 func TestAssocStressDuplex(t *testing.T) {
 	// Limit runtime in case of deadlocks
 	lim := test.TimeOut(time.Second * 20)
@@ -261,12 +243,10 @@ loop1:
 
 		select {
 		case a0handshakeDone = <-handshake0Ch:
-			//fmt.Println("a0 handshake complete")
 			if a1handshakeDone {
 				break loop1
 			}
 		case a1handshakeDone = <-handshake1Ch:
-			//fmt.Println("a1 handshake complete")
 			if a0handshakeDone {
 				break loop1
 			}
@@ -293,13 +273,11 @@ func closeAssociationPair(br *test.Bridge, a0, a1 *Association) {
 	close1Ch := make(chan bool)
 
 	go func() {
-		//fmt.Println("closing a0..")
 		//nolint:errcheck,gosec
 		a0.Close()
 		close0Ch <- true
 	}()
 	go func() {
-		//fmt.Println("closing a1..")
 		//nolint:errcheck,gosec
 		a1.Close()
 		close1Ch <- true
@@ -314,12 +292,10 @@ loop1:
 
 		select {
 		case a0closed = <-close0Ch:
-			//fmt.Println("a0 closed")
 			if a1closed {
 				break loop1
 			}
 		case a1closed = <-close1Ch:
-			//fmt.Println("a1 closed")
 			if a0closed {
 				break loop1
 			}
@@ -1424,15 +1400,6 @@ func TestAssocT3RtxTimer(t *testing.T) {
 	})
 }
 
-/*
-func newTestTimer(t *testing.T, inMsec time.Duration) *time.Timer {
-	return time.AfterFunc(inMsec*time.Millisecond, func() {
-		fmt.Println("TIMED OUT!!!")
-		assert.FailNow(t, "test timed out")
-	})
-}
-*/
-
 func TestAssocCongestionControl(t *testing.T) {
 	// sbuf - large enobh not to be bundled
 	sbuf := make([]byte, 1000)
@@ -1502,7 +1469,7 @@ func TestAssocCongestionControl(t *testing.T) {
 
 	t.Run("Congestion Avoidance", func(t *testing.T) {
 		const si uint16 = 6
-		const nData = 400
+		const nData = 1000
 		var n int
 		var ppi PayloadProtocolIdentifier
 		br := test.NewBridge()
@@ -1530,7 +1497,7 @@ func TestAssocCongestionControl(t *testing.T) {
 					break
 				}
 			}
-			time.Sleep(10 * time.Millisecond)
+			time.Sleep(4 * time.Millisecond)
 		}
 
 		rbuf := make([]byte, 3000)
