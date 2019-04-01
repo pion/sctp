@@ -1082,13 +1082,13 @@ func (a *Association) handleChunk(p *packet, c chunk) ([]*packet, error) {
 		return nil, nil
 
 	case *chunkAbort:
-		a.log.Debug("Abort chunk")
+		a.log.Warn("Abort chunk")
 		for _, e := range c.errorCauses {
 			a.log.Debugf("error cause: %s\n", e)
 		}
 
 	case *chunkError:
-		a.log.Debug("Abort chunk")
+		a.log.Warn("Error chunk")
 		for _, e := range c.errorCauses {
 			a.log.Debugf("error cause: %s\n", e)
 		}
