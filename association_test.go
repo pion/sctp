@@ -1499,4 +1499,63 @@ func TestAssocCongestionControl(t *testing.T) {
 
 		closeAssociationPair(br, a0, a1)
 	})
+
+	t.Run("Congestion Avoidance", func(t *testing.T) {
+		const si uint16 = 6
+		const nData = 400
+		var n int
+		var ppi PayloadProtocolIdentifier
+		br := test.NewBridge()
+
+		a0, a1, err := createNewAssociationPair(br)
+		if !assert.Nil(t, err, "failed to create associations") {
+			assert.FailNow(t, "failed due to earlier error")
+		}
+
+		s0, s1, err := establishSessionPair(br, a0, a1, si)
+		assert.Nil(t, err, "failed to establish session pair")
+
+		for i := 0; i < nData; i++ {
+			binary.BigEndian.PutUint32(sbuf, uint32(i)) // uint32 sequence number
+			n, err = s0.WriteSCTP(sbuf, PayloadTypeWebRTCBinary)
+			assert.Nil(t, err, "WriteSCTP failed")
+			assert.Equal(t, n, len(sbuf), "unexpected length of received data")
+		}
+
+		// Repeat calling br.Tick() until the buffered amount becomes 0
+		for s0.BufferedAmount() > 0 {
+			for {
+				n = br.Tick()
+				if n == 0 {
+					break
+				}
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+
+		rbuf := make([]byte, 3000)
+
+		// Try to read all 4 packets
+		for i := 0; i < nData; i++ {
+			// The receiver (s1) should be readable
+			if !assert.True(t, s1.reassemblyQueue.isReadable(), "should be readable") {
+				return
+			}
+
+			n, ppi, err = s1.ReadSCTP(rbuf)
+			if !assert.Nil(t, err, "ReadSCTP failed") {
+				return
+			}
+			assert.Equal(t, len(sbuf), n, "unexpected length of received data")
+			assert.Equal(t, i, int(binary.BigEndian.Uint32(rbuf)), "unexpected length of received data")
+			assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
+		}
+
+		a0.lock.RLock()
+		inFastRecovery := a0.inFastRecovery
+		a0.lock.RUnlock()
+		assert.False(t, inFastRecovery, "should not be in fast-recovery")
+
+		closeAssociationPair(br, a0, a1)
+	})
 }

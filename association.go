@@ -875,7 +875,7 @@ func (a *Association) onCumulativeTSNAckPointAdvanced(totalBytesAcked int) {
 			a.pendingQueue.size() > 0 {
 
 			a.cwnd += min32(uint32(totalBytesAcked), a.mtu)
-			a.log.Debugf("updated cwnd=%d", a.cwnd)
+			a.log.Debugf("updated cwnd=%d bytesAcked=%d inflight=%d (SS)", a.cwnd, totalBytesAcked, a.inflightQueue.getNumBytes())
 		}
 	} else {
 		// RFC 4096, sec 7.2.2.  Congestion Avoidance
@@ -894,10 +894,11 @@ func (a *Association) onCumulativeTSNAckPointAdvanced(totalBytesAcked int) {
 		if a.partialBytesAcked >= a.cwnd &&
 			a.pendingQueue.size() > 0 {
 
-			a.cwnd += a.mtu
 			a.partialBytesAcked -= a.cwnd
-			a.log.Debugf("updated cwnd=%d", a.cwnd)
+			a.cwnd += a.mtu
 		}
+
+		a.log.Debugf("updated cwnd=%d bytesAcked=%d inflight=%d (CA)", a.cwnd, totalBytesAcked, a.inflightQueue.getNumBytes())
 	}
 }
 
