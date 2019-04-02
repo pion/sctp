@@ -10,7 +10,7 @@ import (
 func TestSessionBufferedAmount(t *testing.T) {
 	t.Run("bufferedAmount", func(t *testing.T) {
 		s := &Stream{
-			log: logging.NewScopedLogger("sctp-test"),
+			log: logging.NewDefaultLoggerFactory().NewLogger("sctp-test"),
 		}
 
 		assert.Equal(t, uint64(0), s.BufferedAmount())
@@ -24,7 +24,7 @@ func TestSessionBufferedAmount(t *testing.T) {
 
 	t.Run("OnBufferedAmountLow", func(t *testing.T) {
 		s := &Stream{
-			log: logging.NewScopedLogger("sctp-test"),
+			log: logging.NewDefaultLoggerFactory().NewLogger("sctp-test"),
 		}
 
 		s.bufferedAmount = 4096
