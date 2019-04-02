@@ -154,9 +154,16 @@ type Association struct {
 	log logging.LeveledLogger
 }
 
+// Config collects the arguments to createAssociation construction into
+// a single structure
+type Config struct {
+	NetConn       net.Conn
+	LoggerFactory logging.LoggerFactory
+}
+
 // Server accepts a SCTP stream over a conn
-func Server(netConn net.Conn) (*Association, error) {
-	a := createAssociation(netConn)
+func Server(config Config) (*Association, error) {
+	a := createAssociation(config)
 	go a.readLoop()
 
 	select {
@@ -171,8 +178,8 @@ func Server(netConn net.Conn) (*Association, error) {
 }
 
 // Client opens a SCTP stream over a conn
-func Client(netConn net.Conn) (*Association, error) {
-	a := createAssociation(netConn)
+func Client(config Config) (*Association, error) {
+	a := createAssociation(config)
 	go a.readLoop()
 	a.init()
 
@@ -187,13 +194,13 @@ func Client(netConn net.Conn) (*Association, error) {
 	}
 }
 
-func createAssociation(netConn net.Conn) *Association {
+func createAssociation(config Config) *Association {
 	rs := rand.NewSource(time.Now().UnixNano())
 	r := rand.New(rs)
 
 	tsn := r.Uint32()
 	a := &Association{
-		netConn:                 netConn,
+		netConn:                 config.NetConn,
 		myMaxNumOutboundStreams: math.MaxUint16,
 		myMaxNumInboundStreams:  math.MaxUint16,
 		payloadQueue:            newPayloadQueue(),
@@ -214,7 +221,7 @@ func createAssociation(netConn net.Conn) *Association {
 		cumulativeTSNAckPoint:   tsn - 1,
 		advancedPeerTSNAckPoint: tsn - 1,
 		silentError:             errors.New("sliently discard"),
-		log:                     logging.NewDefaultLoggerFactory().NewLogger("sctp"),
+		log:                     config.LoggerFactory.NewLogger("sctp"),
 	}
 
 	// RFC 4690 Sec 7.2.1
