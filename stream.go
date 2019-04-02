@@ -34,7 +34,7 @@ type Stream struct {
 	bufferedAmount      uint64
 	bufferedAmountLow   uint64
 	onBufferedAmountLow func()
-	log                 *logging.LeveledLogger
+	log                 logging.LeveledLogger
 }
 
 // StreamIdentifier returns the Stream identifier associated to the stream.

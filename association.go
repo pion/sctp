@@ -151,7 +151,7 @@ type Association struct {
 	// local error
 	silentError error
 
-	log *logging.LeveledLogger
+	log logging.LeveledLogger
 }
 
 // Server accepts a SCTP stream over a conn
@@ -214,7 +214,7 @@ func createAssociation(netConn net.Conn) *Association {
 		cumulativeTSNAckPoint:   tsn - 1,
 		advancedPeerTSNAckPoint: tsn - 1,
 		silentError:             errors.New("sliently discard"),
-		log:                     logging.NewScopedLogger("sctp"),
+		log:                     logging.NewDefaultLoggerFactory().NewLogger("sctp"),
 	}
 
 	// RFC 4690 Sec 7.2.1
