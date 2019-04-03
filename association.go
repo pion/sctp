@@ -595,7 +595,9 @@ func (a *Association) createStream(streamIdentifier uint16, accept bool) *Stream
 	a.streams[streamIdentifier] = s
 
 	if accept {
+		a.lock.Unlock()
 		a.acceptCh <- s
+		a.lock.Lock()
 	}
 
 	return s
