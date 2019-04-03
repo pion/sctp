@@ -1298,3 +1298,33 @@ func TestAssocT1CookieTimer(t *testing.T) {
 		_ = a1.Close() // #nosec
 	})
 }
+
+func TestAssocCreateNewStream(t *testing.T) {
+	t.Run("acceptChSize", func(t *testing.T) {
+		conn := &dumbConn{}
+		a := createAssocation(conn)
+
+		for i := 0; i < acceptChSize; i++ {
+			s := a.createStream(uint16(i), true)
+			_, ok := a.streams[s.streamIdentifier]
+			assert.True(t, ok, "should be in a.streams map")
+		}
+
+		newSI := uint16(acceptChSize)
+		s := a.createStream(newSI, true)
+		assert.Nil(t, s, "should be nil")
+		_, ok := a.streams[newSI]
+		assert.False(t, ok, "should NOT be in a.streams map")
+
+		toBeIgnored := &chunkPayloadData{
+			beginningFragment: true,
+			endingFragment:    true,
+			tsn:               a.peerLastTSN + 1,
+			streamIdentifier:  newSI,
+			userData:          []byte("ABC"),
+		}
+
+		p := a.handleData(toBeIgnored)
+		assert.Nil(t, p, "should be nil")
+	})
+}

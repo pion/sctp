@@ -32,6 +32,19 @@ func (r *payloadQueue) pushNoCheck(p *chunkPayloadData) {
 	r.orderedPackets.sort()
 }
 
+func (r *payloadQueue) canPush(p *chunkPayloadData, cumulativeTSN uint32) bool {
+	_, ok := r.orderedPackets.search(p.tsn)
+
+	// If the Data payload is already in our queue or older than our cumulativeTSN marker
+	if ok || sna32LTE(p.tsn, cumulativeTSN) {
+		// Found the packet, log in dups
+		r.dupTSN = append(r.dupTSN, p.tsn)
+		return false
+	}
+
+	return true
+}
+
 func (r *payloadQueue) push(p *chunkPayloadData, cumulativeTSN uint32) bool {
 	_, ok := r.orderedPackets.search(p.tsn)
 
