@@ -41,6 +41,11 @@ const (
 	timerT3RTX
 )
 
+// other constants
+const (
+	acceptChSize = 16
+)
+
 func (a associationState) String() string {
 	switch a {
 	case closed:
@@ -190,7 +195,7 @@ func createAssocation(netConn net.Conn) *Association {
 		state:                   closed,
 		rtoMgr:                  newRTOManager(),
 		streams:                 make(map[uint16]*Stream),
-		acceptCh:                make(chan *Stream),
+		acceptCh:                make(chan *Stream, acceptChSize),
 		closeCh:                 make(chan struct{}),
 		handshakeCompletedCh:    make(chan error),
 		cumulativeTSNAckPoint:   tsn - 1,
@@ -516,10 +521,17 @@ func (a *Association) handleInitAck(p *packet, i *chunkInitAck) error {
 
 // The caller should hold the lock.
 func (a *Association) handleData(d *chunkPayloadData) []*packet {
-	added := a.payloadQueue.push(d, a.peerLastTSN)
-	if added {
+	canPush := a.payloadQueue.canPush(d, a.peerLastTSN)
+	if canPush {
 		// Pass the new chunk to stream level as soon as it arrives
 		s := a.getOrCreateStream(d.streamIdentifier)
+		if s == nil {
+			// silentely discard the data. (sender will retry on T3-rtx timeout)
+			// see pions/sctp#30
+			return nil
+		}
+
+		a.payloadQueue.pushNoCheck(d)
 		s.handleData(d)
 	}
 
@@ -592,10 +604,17 @@ func (a *Association) createStream(streamIdentifier uint16, accept bool) *Stream
 		readNotifier:     sync.NewCond(&sync.Mutex{}),
 	}
 
-	a.streams[streamIdentifier] = s
-
 	if accept {
-		a.acceptCh <- s
+		select {
+		case a.acceptCh <- s:
+			a.streams[streamIdentifier] = s
+			// TODO: a.log.Debug("accepted a new stream (streamIdentifier: %d)", streamIdentifier)
+		default:
+			// TODO: a.log.Debug("dropped a new stream (acceptCh size: %d)", len(a.acceptCh))
+			return nil
+		}
+	} else {
+		a.streams[streamIdentifier] = s
 	}
 
 	return s
