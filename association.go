@@ -730,9 +730,9 @@ func (a *Association) createStream(streamIdentifier uint16, accept bool) *Stream
 		select {
 		case a.acceptCh <- s:
 			a.streams[streamIdentifier] = s
-			// TODO: a.log.Debug("accepted a new stream (streamIdentifier: %d)", streamIdentifier)
+			a.log.Debugf("accepted a new stream (streamIdentifier: %d)", streamIdentifier)
 		default:
-			// TODO: a.log.Debug("dropped a new stream (acceptCh size: %d)", len(a.acceptCh))
+			a.log.Debugf("dropped a new stream (acceptCh size: %d)", len(a.acceptCh))
 			return nil
 		}
 	} else {
