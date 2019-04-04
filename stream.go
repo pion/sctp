@@ -4,7 +4,7 @@ import (
 	"math"
 	"sync"
 
-	"github.com/pions/logging"
+	"github.com/pion/logging"
 	"github.com/pkg/errors"
 )
 
