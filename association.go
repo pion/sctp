@@ -527,7 +527,7 @@ func (a *Association) handleData(d *chunkPayloadData) []*packet {
 		s := a.getOrCreateStream(d.streamIdentifier)
 		if s == nil {
 			// silentely discard the data. (sender will retry on T3-rtx timeout)
-			// see pions/sctp#30
+			// see pion/sctp#30
 			return nil
 		}
 
