@@ -1369,9 +1369,13 @@ func TestAssocT1CookieTimer(t *testing.T) {
 }
 
 func TestAssocCreateNewStream(t *testing.T) {
+	loggerFactory := logging.NewDefaultLoggerFactory()
+
 	t.Run("acceptChSize", func(t *testing.T) {
-		conn := &dumbConn{}
-		a := createAssociation(conn)
+		a := createAssociation(Config{
+			NetConn:       &dumbConn{},
+			LoggerFactory: loggerFactory,
+		})
 
 		for i := 0; i < acceptChSize; i++ {
 			s := a.createStream(uint16(i), true)
