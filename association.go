@@ -22,7 +22,7 @@ const (
 	dataChunkHeaderSize  uint32 = 16
 )
 
-var errAssociationClosed = errors.New("The association is closed")
+var errAssociationClosed = errors.Errorf("The association is closed")
 
 // associationState is an enum for the states that an Association will transition
 // through while connecting
@@ -220,7 +220,7 @@ func createAssociation(config Config) *Association {
 		handshakeCompletedCh:    make(chan error),
 		cumulativeTSNAckPoint:   tsn - 1,
 		advancedPeerTSNAckPoint: tsn - 1,
-		silentError:             errors.New("silently discard"),
+		silentError:             errors.Errorf("silently discard"),
 		log:                     config.LoggerFactory.NewLogger("sctp"),
 	}
 
@@ -265,7 +265,7 @@ func (a *Association) init() {
 func (a *Association) sendInit() error {
 	a.log.Debug("sending INIT")
 	if a.storedInit == nil {
-		return fmt.Errorf("INIT not stored to send")
+		return errors.Errorf("INIT not stored to send")
 	}
 
 	outbound := &packet{}
@@ -287,7 +287,7 @@ func (a *Association) sendInit() error {
 // caller must hold a.lock
 func (a *Association) sendCookieEcho() error {
 	if a.storedCookieEcho == nil {
-		return fmt.Errorf("cookieEcho not stored to send")
+		return errors.Errorf("cookieEcho not stored to send")
 	}
 
 	a.log.Debug("sending COOKIE-ECHO")
@@ -408,7 +408,7 @@ func checkPacket(p *packet) error {
 	// identify the association to which this packet belongs.  The port
 	// number 0 MUST NOT be used.
 	if p.sourcePort == 0 {
-		return errors.New("SCTP Packet must not have a source port of 0")
+		return errors.Errorf("SCTP Packet must not have a source port of 0")
 	}
 
 	// This is the SCTP port number to which this packet is destined.
@@ -416,7 +416,7 @@ func checkPacket(p *packet) error {
 	// SCTP packet to the correct receiving endpoint/application.  The
 	// port number 0 MUST NOT be used.
 	if p.destinationPort == 0 {
-		return errors.New("SCTP Packet must not have a destination port of 0")
+		return errors.Errorf("SCTP Packet must not have a destination port of 0")
 	}
 
 	// Check values on the packet that are specific to a particular chunk type
@@ -427,7 +427,7 @@ func checkPacket(p *packet) error {
 			// They MUST be the only chunks present in the SCTP packets that carry
 			// them.
 			if len(p.chunks) != 1 {
-				return errors.New("INIT chunk must not be bundled with any other chunk")
+				return errors.Errorf("INIT chunk must not be bundled with any other chunk")
 			}
 
 			// A packet containing an INIT chunk MUST have a zero Verification
@@ -561,7 +561,7 @@ func (a *Association) handleInitAck(p *packet, i *chunkInitAck) error {
 		}
 	}
 	if cookieParam == nil {
-		return errors.New("no cookie in InitAck")
+		return errors.Errorf("no cookie in InitAck")
 	}
 
 	a.storedCookieEcho = &chunkCookieEcho{}
@@ -698,7 +698,7 @@ func (a *Association) OpenStream(streamIdentifier uint16, defaultPayloadType Pay
 	defer a.lock.Unlock()
 
 	if _, ok := a.streams[streamIdentifier]; ok {
-		return nil, fmt.Errorf("there already exists a stream with identifier %d", streamIdentifier)
+		return nil, errors.Errorf("there already exists a stream with identifier %d", streamIdentifier)
 	}
 
 	s := a.createStream(streamIdentifier, false)
@@ -1660,7 +1660,7 @@ func (a *Association) handleChunk(p *packet, c chunk) ([]*packet, error) {
 		return a.handleForwardTSN(c), nil
 
 	default:
-		return nil, errors.New("unhandled chunk type")
+		return nil, errors.Errorf("unhandled chunk type")
 	}
 
 	return nil, nil
@@ -1718,13 +1718,13 @@ func (a *Association) onRetransmissionFailure(id int) {
 
 	if id == timerT1Init {
 		a.log.Error("retransmission failure: T1-init")
-		a.handshakeCompletedCh <- fmt.Errorf("handshake failed (INIT ACK)")
+		a.handshakeCompletedCh <- errors.Errorf("handshake failed (INIT ACK)")
 		return
 	}
 
 	if id == timerT1Cookie {
 		a.log.Error("retransmission failure: T1-cookie")
-		a.handshakeCompletedCh <- fmt.Errorf("handshake failed (COOKIE ECHO)")
+		a.handshakeCompletedCh <- errors.Errorf("handshake failed (COOKIE ECHO)")
 		return
 	}
 
