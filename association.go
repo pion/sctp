@@ -173,7 +173,7 @@ func Server(config Config) (*Association, error) {
 		}
 		return a, nil
 	case <-a.closeCh:
-		return nil, errors.Errorf("Association closed before connecting")
+		return nil, errors.Errorf("association closed before connecting")
 	}
 }
 
@@ -190,7 +190,7 @@ func Client(config Config) (*Association, error) {
 		}
 		return a, nil
 	case <-a.closeCh:
-		return nil, errors.Errorf("Association closed before connecting")
+		return nil, errors.Errorf("association closed before connecting")
 	}
 }
 
@@ -265,7 +265,7 @@ func (a *Association) init() {
 func (a *Association) sendInit() error {
 	a.log.Debug("sending INIT")
 	if a.storedInit == nil {
-		return errors.Errorf("INIT not stored to send")
+		return errors.Errorf("the init not stored to send")
 	}
 
 	outbound := &packet{}
@@ -355,7 +355,7 @@ func (a *Association) readLoop() {
 		}
 
 		if err = a.handleInbound(buffer[:n]); err != nil {
-			a.log.Warn(errors.Wrap(err, "Failed to push SCTP packet").Error())
+			a.log.Warn(errors.Wrap(err, "failed to push SCTP packet").Error())
 		}
 	}
 }
@@ -376,22 +376,22 @@ func (a *Association) unregisterStream(s *Stream, err error) {
 func (a *Association) handleInbound(raw []byte) error {
 	p := &packet{}
 	if err := p.unmarshal(raw); err != nil {
-		return errors.Wrap(err, "Unable to parse SCTP packet")
+		return errors.Wrap(err, "unable to parse SCTP packet")
 	}
 
 	if err := checkPacket(p); err != nil {
-		return errors.Wrap(err, "Failed validating packet")
+		return errors.Wrap(err, "failed validating packet")
 	}
 
 	for _, c := range p.chunks {
 		packets, err := a.handleChunk(p, c)
 		if err != nil {
-			return errors.Wrap(err, "Failed handling chunk")
+			return errors.Wrap(err, "failed handling chunk")
 		}
 		for _, p := range packets {
 			err = a.send(p)
 			if err != nil {
-				return errors.Wrap(err, "Failed sending reply")
+				return errors.Wrap(err, "failed sending reply")
 			}
 		}
 	}
@@ -408,7 +408,7 @@ func checkPacket(p *packet) error {
 	// identify the association to which this packet belongs.  The port
 	// number 0 MUST NOT be used.
 	if p.sourcePort == 0 {
-		return errors.Errorf("SCTP Packet must not have a source port of 0")
+		return errors.Errorf("sctp packet must not have a source port of 0")
 	}
 
 	// This is the SCTP port number to which this packet is destined.
@@ -416,7 +416,7 @@ func checkPacket(p *packet) error {
 	// SCTP packet to the correct receiving endpoint/application.  The
 	// port number 0 MUST NOT be used.
 	if p.destinationPort == 0 {
-		return errors.Errorf("SCTP Packet must not have a destination port of 0")
+		return errors.Errorf("sctp packet must not have a destination port of 0")
 	}
 
 	// Check values on the packet that are specific to a particular chunk type
@@ -427,13 +427,13 @@ func checkPacket(p *packet) error {
 			// They MUST be the only chunks present in the SCTP packets that carry
 			// them.
 			if len(p.chunks) != 1 {
-				return errors.Errorf("INIT chunk must not be bundled with any other chunk")
+				return errors.Errorf("init chunk must not be bundled with any other chunk")
 			}
 
 			// A packet containing an INIT chunk MUST have a zero Verification
 			// Tag.
 			if p.verificationTag != 0 {
-				return errors.Errorf("INIT chunk expects a verification tag of 0 on the packet when out-of-the-blue")
+				return errors.Errorf("init chunk expects a verification tag of 0 on the packet when out-of-the-blue")
 			}
 		}
 	}
@@ -761,7 +761,7 @@ func (a *Association) processSelectiveAck(d *chunkSelectiveAck) (int, uint32, er
 	for i := a.cumulativeTSNAckPoint + 1; sna32LTE(i, d.cumulativeTSNAck); i++ {
 		c, ok := a.inflightQueue.pop(i)
 		if !ok {
-			return 0, 0, errors.Errorf("TSN %v unable to be popped from inflight queue", i)
+			return 0, 0, errors.Errorf("tsn %v unable to be popped from inflight queue", i)
 		}
 
 		if !c.acked {
@@ -818,7 +818,7 @@ func (a *Association) processSelectiveAck(d *chunkSelectiveAck) (int, uint32, er
 			tsn := d.cumulativeTSNAck + uint32(i)
 			c, ok := a.inflightQueue.get(tsn)
 			if !ok {
-				return 0, 0, errors.Errorf("Requested non-existent TSN %v", tsn)
+				return 0, 0, errors.Errorf("requested non-existent TSN %v", tsn)
 			}
 
 			if !c.acked {
@@ -922,7 +922,7 @@ func (a *Association) processFastRetransmission(cumTSNAckPoint, htna uint32, cum
 		for tsn := cumTSNAckPoint + 1; sna32LTE(tsn, htna); tsn++ {
 			c, ok := a.inflightQueue.get(tsn)
 			if !ok {
-				return nil, errors.Errorf("Requested non-existent TSN %v", tsn)
+				return nil, errors.Errorf("requested non-existent TSN %v", tsn)
 			}
 			if !c.acked && !c.abandoned && c.missIndicator < 3 {
 				c.missIndicator++
@@ -1420,7 +1420,7 @@ func (a *Association) sendPayloadData(chunks []*chunkPayloadData) error {
 
 	for _, p := range packets {
 		if err := a.send(p); err != nil {
-			return errors.Wrap(err, "Unable to send outbound packet")
+			return errors.Wrap(err, "unable to send outbound packet")
 		}
 	}
 
@@ -1496,7 +1496,7 @@ func (a *Association) retransmitPayloadData() error {
 
 	for _, p := range packets {
 		if err = a.send(p); err != nil {
-			err = errors.Wrap(err, "Unable to send outbound packet")
+			err = errors.Wrap(err, "unable to send outbound packet")
 			break
 		}
 	}
@@ -1528,7 +1528,7 @@ func (a *Association) send(p *packet) error {
 	raw, err := p.marshal()
 	a.lock.Unlock()
 	if err != nil {
-		return errors.Wrap(err, "Failed to send packet to outbound handler")
+		return errors.Wrap(err, "failed to send packet to outbound handler")
 	}
 
 	_, err = a.netConn.Write(raw)
@@ -1544,7 +1544,7 @@ func (a *Association) handleChunk(p *packet, c chunk) ([]*packet, error) {
 	defer a.lock.Unlock()
 
 	if _, err := c.check(); err != nil {
-		return nil, errors.Wrap(err, "Failed validating chunk")
+		return nil, errors.Wrap(err, "failed validating chunk")
 		// TODO: Create ABORT
 	}
 
@@ -1568,11 +1568,11 @@ func (a *Association) handleChunk(p *packet, c chunk) ([]*packet, error) {
 			// Upon receipt of an INIT in the COOKIE-ECHOED state, an endpoint MUST
 			// respond with an INIT ACK using the same parameters it sent in its
 			// original INIT chunk (including its Initiate Tag, unchanged)
-			return nil, errors.Errorf("TODO respond with original cookie %s", a.state.String())
+			return nil, errors.Errorf("todo: respond with original cookie %s", a.state.String())
 		default:
 			// 5.2.2.  Unexpected INIT in States Other than CLOSED, COOKIE-ECHOED,
 			//        COOKIE-WAIT, and SHUTDOWN-ACK-SENT
-			return nil, errors.Errorf("TODO Handle Init when in state %s", a.state.String())
+			return nil, errors.Errorf("todo: handle Init when in state %s", a.state.String())
 		}
 
 	case *chunkInitAck:
