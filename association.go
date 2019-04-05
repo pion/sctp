@@ -173,7 +173,7 @@ func Server(config Config) (*Association, error) {
 		}
 		return a, nil
 	case <-a.closeCh:
-		return nil, errors.Errorf("Assocation closed before connecting")
+		return nil, errors.Errorf("Association closed before connecting")
 	}
 }
 
@@ -190,7 +190,7 @@ func Client(config Config) (*Association, error) {
 		}
 		return a, nil
 	case <-a.closeCh:
-		return nil, errors.Errorf("Assocation closed before connecting")
+		return nil, errors.Errorf("Association closed before connecting")
 	}
 }
 
@@ -220,7 +220,7 @@ func createAssociation(config Config) *Association {
 		handshakeCompletedCh:    make(chan error),
 		cumulativeTSNAckPoint:   tsn - 1,
 		advancedPeerTSNAckPoint: tsn - 1,
-		silentError:             errors.New("sliently discard"),
+		silentError:             errors.New("silently discard"),
 		log:                     config.LoggerFactory.NewLogger("sctp"),
 	}
 
@@ -599,6 +599,7 @@ func (a *Association) handleHeartbeat(c *chunkHeartbeat) []*packet {
 	})
 }
 
+// The caller should hold the lock.
 func (a *Association) handleCookieEcho(c *chunkCookieEcho) []*packet {
 	if !bytes.Equal(a.myCookie.cookie, c.cookie) {
 		return nil
@@ -620,6 +621,7 @@ func (a *Association) handleCookieEcho(c *chunkCookieEcho) []*packet {
 	return pack(p)
 }
 
+// The caller should hold the lock.
 func (a *Association) handleCookieAck() []*packet {
 	// stop T1-cookie timer
 	a.t1Cookie.stop()
@@ -681,6 +683,7 @@ func (a *Association) handleData(d *chunkPayloadData) []*packet {
 	return reply
 }
 
+// The caller should hold the lock.
 func (a *Association) getMyReceiverWindowCredit() uint32 {
 	bytesQueued := uint32(a.payloadQueue.getNumBytes())
 	if bytesQueued >= maxReceiveBufferSize {
@@ -774,7 +777,7 @@ func (a *Association) processSelectiveAck(d *chunkSelectiveAck) (int, uint32, er
 
 			nBytesAcked := len(c.userData)
 
-			// Report the number of bytes ackknowled to the stream who sent this DATA
+			// Report the number of bytes acknowledged to the stream who sent this DATA
 			// chunk.
 			if s, ok := a.streams[c.streamIdentifier]; ok {
 				a.lock.Unlock()
@@ -821,7 +824,7 @@ func (a *Association) processSelectiveAck(d *chunkSelectiveAck) (int, uint32, er
 			if !c.acked {
 				nBytesAcked := a.inflightQueue.markAsAcked(tsn)
 
-				// Report the number of bytes ackknowled to the stream who sent this DATA
+				// Report the number of bytes acknowledged to the stream who sent this DATA
 				// chunk.
 				if s, ok := a.streams[c.streamIdentifier]; ok {
 					a.lock.Unlock()
@@ -892,7 +895,7 @@ func (a *Association) onCumulativeTSNAckPointAdvanced(totalBytesAcked int) {
 
 		//   o  When partial_bytes_acked is equal to or greater than cwnd and
 		//      before the arrival of the SACK the sender had cwnd or more bytes
-		//      of data outstanding (i.e., before arrival of the SACK, flightsize
+		//      of data outstanding (i.e., before arrival of the SACK, flight size
 		//      was greater than or equal to cwnd), increase cwnd by MTU, and
 		//      reset partial_bytes_acked to (partial_bytes_acked - cwnd).
 		if a.partialBytesAcked >= a.cwnd &&
@@ -905,6 +908,7 @@ func (a *Association) onCumulativeTSNAckPointAdvanced(totalBytesAcked int) {
 	}
 }
 
+// The caller should hold the lock.
 func (a *Association) processFastRetransmission(cumTSNAckPoint, htna uint32, cumTSNAckPointAdvanced bool) ([]chunk, error) {
 	toFastRetrans := []chunk{}
 	fastRetransSize := commonHeaderSize
@@ -1054,6 +1058,7 @@ func (a *Association) handleSack(d *chunkSelectiveAck) ([]*packet, error) {
 
 // createForwardTSN generates ForwardTSN chunk.
 // This method will be be called if useForwardTSN is set to false.
+// The caller should hold the lock.
 func (a *Association) createForwardTSN() *chunkForwardTSN {
 	// RFC 3758 Sec 3.5 C4
 	streamMap := map[uint16]uint16{} // to report only once per SI
@@ -1104,6 +1109,7 @@ func (a *Association) createPacket(cs []chunk) *packet {
 	}
 }
 
+// The caller should hold the lock.
 func (a *Association) handleReconfig(c *chunkReconfig) ([]*packet, error) {
 	a.log.Debug("handleReconfig")
 
@@ -1129,6 +1135,7 @@ func (a *Association) handleReconfig(c *chunkReconfig) ([]*packet, error) {
 	return pp, nil
 }
 
+// The caller should hold the lock.
 func (a *Association) handleForwardTSN(c *chunkForwardTSN) []*packet {
 	a.log.Debugf("handleForward: %s", c.String())
 
@@ -1230,6 +1237,7 @@ func (a *Association) createResetPacket(streamIdentifier uint16) *packet {
 
 }
 
+// The caller should hold the lock.
 func (a *Association) handleReconfigParam(raw param) (*packet, error) {
 	// TODO: Check RSN
 	switch p := raw.(type) {
@@ -1252,6 +1260,7 @@ func (a *Association) handleReconfigParam(raw param) (*packet, error) {
 	}
 }
 
+// The caller should hold the lock.
 func (a *Association) resetStreams() *packet {
 	result := reconfigResultSuccessPerformed
 	p := a.ongoingResetRequest
@@ -1276,11 +1285,13 @@ func (a *Association) resetStreams() *packet {
 	}})
 }
 
+// The caller should hold the lock.
 func (a *Association) peekNextPendingData() *chunkPayloadData {
 	return a.pendingQueue.peek()
 }
 
 // Move the chunk peeked with peekNextPendingData() to the inflightQueue.
+// The caller should hold the lock.
 func (a *Association) movePendingDataChunkToInflightQueue(c *chunkPayloadData) {
 	if err := a.pendingQueue.pop(c); err != nil {
 		a.log.Errorf("failed to pop from pending queue: %s", err.Error())
@@ -1393,7 +1404,7 @@ func (a *Association) sendPayloadData(chunks []*chunkPayloadData) error {
 			a.pendingQueue.push(c)
 		}
 
-		// Pop unsent data chunks from pending queue to send as much as
+		// Pop unsent data chunks from the pending queue to send as much as
 		// cwnd and rwnd allow.
 		chunks := a.popPendingDataChunksToSend()
 		if len(chunks) == 0 {
@@ -1416,6 +1427,7 @@ func (a *Association) sendPayloadData(chunks []*chunkPayloadData) error {
 	return nil
 }
 
+// The caller should hold the lock.
 func (a *Association) checkPartialReliabilityStatus(c *chunkPayloadData) {
 	if !a.useForwardTSN {
 		return
@@ -1495,6 +1507,7 @@ func (a *Association) retransmitPayloadData() error {
 }
 
 // generateNextTSN returns the myNextTSN and increases it. The caller should hold the lock.
+// The caller should hold the lock.
 func (a *Association) generateNextTSN() uint32 {
 	tsn := a.myNextTSN
 	a.myNextTSN++
@@ -1502,13 +1515,14 @@ func (a *Association) generateNextTSN() uint32 {
 }
 
 // generateNextRSN returns the myNextRSN and increases it. The caller should hold the lock.
+// The caller should hold the lock.
 func (a *Association) generateNextRSN() uint32 {
 	rsn := a.myNextRSN
 	a.myNextRSN++
 	return rsn
 }
 
-// send sends a packet over netConn. The caller should hold the lock.
+// send sends a packet over netConn.
 func (a *Association) send(p *packet) error {
 	a.lock.Lock()
 	raw, err := p.marshal()
