@@ -233,7 +233,7 @@ func createAssociation(config Config) *Association {
 
 	a.t1Init = newRTXTimer(timerT1Init, a, maxInitRetrans)
 	a.t1Cookie = newRTXTimer(timerT1Cookie, a, maxInitRetrans)
-	a.t3RTX = newRTXTimer(timerT3RTX, a, 0 /* rtx forever */)
+	a.t3RTX = newRTXTimer(timerT3RTX, a, noMaxRetrans) // retransmit forever
 
 	return a
 }
@@ -335,7 +335,6 @@ func (a *Association) readLoop() {
 	var closeErr error
 	defer func() {
 		a.lock.Lock()
-		//closeErr := errors.New("association closed")
 		for _, s := range a.streams {
 			a.unregisterStream(s, closeErr)
 		}
@@ -464,6 +463,7 @@ func min32(a, b uint32) uint32 {
 }
 
 // setState sets the state of the Association.
+// The caller should hold the lock.
 func (a *Association) setState(state associationState) {
 	if a.state != state {
 		a.log.Debugf("[%s] state change: '%s' => '%s'", a.name(), a.state.String(), state.String())
@@ -544,7 +544,6 @@ func (a *Association) handleInitAck(p *packet, i *chunkInitAck) error {
 	a.ssthresh = a.rwnd
 	a.log.Tracef("updated cwnd=%d ssthresh=%d inflight=%d (INI)", a.cwnd, a.ssthresh, a.inflightQueue.getNumBytes())
 
-	// stop T1-init timer
 	a.t1Init.stop()
 	a.storedInit = nil
 
@@ -573,7 +572,6 @@ func (a *Association) handleInitAck(p *packet, i *chunkInitAck) error {
 		a.log.Errorf("failed to send init: %v", err)
 	}
 
-	// start t1-cookie timer
 	a.t1Cookie.start(a.rtoMgr.getRTO())
 
 	return nil
@@ -606,10 +604,9 @@ func (a *Association) handleCookieEcho(c *chunkCookieEcho) []*packet {
 		return nil
 	}
 
-	// stop T1-init timer
 	a.t1Init.stop()
 	a.storedInit = nil
-	// stop T1-cookie timer
+
 	a.t1Cookie.stop()
 	a.storedCookieEcho = nil
 
@@ -928,7 +925,6 @@ func (a *Association) processFastRetransmission(cumTSNAckPoint, htna uint32, cum
 				if c.missIndicator == 3 {
 					dataChunkSize := dataChunkHeaderSize + uint32(len(c.userData))
 					if a.mtu-fastRetransSize >= dataChunkSize {
-						// TODO: reliability updates here
 						fastRetransSize += dataChunkSize
 						toFastRetrans = append(toFastRetrans, c)
 						a.log.Tracef("fast-retransmit: tsn=%d", tsn)
@@ -1738,10 +1734,5 @@ func (a *Association) bufferedAmount() int {
 }
 
 func (a *Association) name() string {
-	/*
-		if a.netConn != nil && a.netConn.LocalAddr() != nil {
-			return a.netConn.LocalAddr().String()
-		}
-	*/
 	return fmt.Sprintf("%p", a)
 }

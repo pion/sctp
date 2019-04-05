@@ -41,7 +41,8 @@ Check out the **[contributing wiki](https://github.com/pion/webrtc/wiki/Contribu
 * [chenkaiC4](https://github.com/chenkaiC4) - *Fix GolangCI Linter*
 * [Ronan J](https://github.com/ronanj) - *Fix PPID*
 * [Michael MacDonald](https://github.com/mjmac) - *Fix races*
-* [Yutaka Takeda](https://github.com/enobufs) - *PR-SCTP*
+* [Yutaka Takeda](https://github.com/enobufs) - *PR-SCTP, Retransmissions, Congestion Control*
+* [Antoine Baché](https://github.com/Antonito) - *SCTP Profiling*
 
 ### License
 MIT License - see [LICENSE](LICENSE) for full text
