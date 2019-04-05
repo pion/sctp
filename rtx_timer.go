@@ -14,6 +14,7 @@ const (
 	rtoBeta        float64 = 0.25
 	maxInitRetrans uint    = 8
 	pathMaxRetrans uint    = 5
+	noMaxRetrans   uint    = 0
 )
 
 // rtoManager manages Rtx timeout values.
