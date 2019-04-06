@@ -1071,7 +1071,6 @@ func (a *Association) createForwardTSN() *chunkForwardTSN {
 			continue
 		}
 
-		a.log.Tracef("building fwdtsn: si=%d ssn=%d tsn=%d acked=%v", c.streamIdentifier, c.streamSequenceNumber, c.tsn, c.acked)
 		ssn, ok := streamMap[c.streamIdentifier]
 		if !ok {
 			streamMap[c.streamIdentifier] = c.streamSequenceNumber
@@ -1088,7 +1087,9 @@ func (a *Association) createForwardTSN() *chunkForwardTSN {
 		streams:          []chunkForwardTSNStream{},
 	}
 
+	a.log.Tracef("building fwdtsn: newCumulativeTSN=%d", fwdtsn.newCumulativeTSN)
 	for si, ssn := range streamMap {
+		a.log.Tracef(" - si=%d ssn=%d", si, ssn)
 		fwdtsn.streams = append(fwdtsn.streams, chunkForwardTSNStream{
 			identifier: si,
 			sequence:   ssn,
@@ -1162,31 +1163,35 @@ func (a *Association) handleForwardTSN(c *chunkForwardTSN) []*packet {
 	//   its cumulative TSN point to the value carried in the FORWARD TSN
 	//   chunk,
 
-	// Advance peerLastTSN
-	for sna32LT(a.peerLastTSN, c.newCumulativeTSN) {
-		a.payloadQueue.pop(a.peerLastTSN + 1) // may not exist
-		a.peerLastTSN++
-	}
-
-	// From RFC 3758 Sec 3.6:
-	//   .. and then MUST further advance its cumulative TSN point locally
-	//   if possible
-	// Meaning, if peerLastTSN+1 points to a chunk that is received,
-	// advance peerLastTSN until peerLastTSN+1 points to unreceived chunk.
-	for {
-		if _, popOk := a.payloadQueue.pop(a.peerLastTSN + 1); !popOk {
-			break
+	if sna32LT(a.peerLastTSN, c.newCumulativeTSN) {
+		// Advance peerLastTSN
+		for sna32LT(a.peerLastTSN, c.newCumulativeTSN) {
+			a.payloadQueue.pop(a.peerLastTSN + 1) // may not exist
+			a.peerLastTSN++
 		}
-		a.peerLastTSN++
-	}
 
-	// Report new peerLastTSN value and abandoned largest SSN value to
-	// corresponding streams so that the abandoned chunks can be removed
-	// from the reassemblyQueue.
-	for _, forwarded := range c.streams {
-		if s, ok := a.streams[forwarded.identifier]; ok {
-			s.handleForwardTSN(c.newCumulativeTSN, forwarded.sequence)
+		// From RFC 3758 Sec 3.6:
+		//   .. and then MUST further advance its cumulative TSN point locally
+		//   if possible
+		// Meaning, if peerLastTSN+1 points to a chunk that is received,
+		// advance peerLastTSN until peerLastTSN+1 points to unreceived chunk.
+		for {
+			if _, popOk := a.payloadQueue.pop(a.peerLastTSN + 1); !popOk {
+				break
+			}
+			a.peerLastTSN++
 		}
+
+		// Report new peerLastTSN value and abandoned largest SSN value to
+		// corresponding streams so that the abandoned chunks can be removed
+		// from the reassemblyQueue.
+		for _, forwarded := range c.streams {
+			if s, ok := a.streams[forwarded.identifier]; ok {
+				s.handleForwardTSN(c.newCumulativeTSN, forwarded.sequence)
+			}
+		}
+
+		return nil
 	}
 
 	// From RFC 3758 Sec 3.6:
