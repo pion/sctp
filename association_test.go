@@ -1086,9 +1086,10 @@ func TestHandleForwardTSN(t *testing.T) {
 			streams:          []chunkForwardTSNStream{{identifier: 0, sequence: 0}},
 		}
 
-		a.handleForwardTSN(fwdtsn)
+		p := a.handleForwardTSN(fwdtsn)
 
 		assert.Equal(t, a.peerLastTSN, prevTSN+3, "peerLastTSN should advance by 3 ")
+		assert.Nil(t, p, "no sack should be generated")
 	})
 
 	t.Run("forward 1 then one more for received chunk", func(t *testing.T) {
@@ -1116,9 +1117,31 @@ func TestHandleForwardTSN(t *testing.T) {
 			},
 		}
 
-		a.handleForwardTSN(fwdtsn)
+		p := a.handleForwardTSN(fwdtsn)
 
 		assert.Equal(t, a.peerLastTSN, prevTSN+2, "peerLastTSN should advance by 3 ")
+		assert.Nil(t, p, "no sack should be generated")
+	})
+
+	t.Run("dup forward TSN chunk should generate sack", func(t *testing.T) {
+		a := createAssociation(Config{
+			NetConn:       &dumbConn{},
+			LoggerFactory: loggerFactory,
+		})
+		a.useForwardTSN = true
+		prevTSN := a.peerLastTSN
+
+		fwdtsn := &chunkForwardTSN{
+			newCumulativeTSN: a.peerLastTSN, // old TSN
+			streams: []chunkForwardTSNStream{
+				{identifier: 0, sequence: 1},
+			},
+		}
+
+		p := a.handleForwardTSN(fwdtsn)
+
+		assert.Equal(t, a.peerLastTSN, prevTSN, "peerLastTSN should not advance")
+		assert.NotNil(t, p, "sack should be generated")
 	})
 }
 
