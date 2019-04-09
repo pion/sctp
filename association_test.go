@@ -1,8 +1,10 @@
 package sctp
 
 import (
+	cryptoRand "crypto/rand"
 	"encoding/binary"
 	"fmt"
+	"math"
 	"math/rand"
 	"net"
 	"sync"
@@ -226,7 +228,7 @@ func (c *dumbConn) SetWriteDeadline(t time.Time) error {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-func createNewAssociationPair(br *test.Bridge) (*Association, *Association, error) {
+func createNewAssociationPair(br *test.Bridge, ackMode int) (*Association, *Association, error) {
 	var a0, a1 *Association
 	var err0, err1 error
 	loggerFactory := logging.NewDefaultLoggerFactory()
@@ -251,6 +253,7 @@ func createNewAssociationPair(br *test.Bridge) (*Association, *Association, erro
 
 	a0handshakeDone := false
 	a1handshakeDone := false
+
 loop1:
 	for i := 0; i < 100; i++ {
 		time.Sleep(10 * time.Millisecond)
@@ -279,6 +282,9 @@ loop1:
 	if err1 != nil {
 		return nil, nil, err1
 	}
+
+	a0.ackMode = ackMode
+	a1.ackMode = ackMode
 
 	return a0, a1, nil
 }
@@ -316,6 +322,22 @@ loop1:
 			}
 		default:
 		}
+	}
+}
+
+func flushBuffers(br *test.Bridge, a0, a1 *Association) {
+	for {
+		for {
+			n := br.Tick()
+			if n == 0 {
+				break
+			}
+		}
+
+		if a0.bufferedAmount() == 0 && a1.bufferedAmount() == 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -362,6 +384,8 @@ func establishSessionPair(br *test.Bridge, a0, a1 *Association, si uint16) (*Str
 		return nil, nil, fmt.Errorf("received data mismatch")
 	}
 
+	flushBuffers(br, a0, a1)
+
 	return s0, s1, nil
 }
 
@@ -380,7 +404,7 @@ func TestAssocReliable(t *testing.T) {
 		const msg = "ABC"
 		br := test.NewBridge()
 
-		a0, a1, err := createNewAssociationPair(br)
+		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay)
 		if !assert.Nil(t, err, "failed to create associations") {
 			assert.FailNow(t, "failed due to earlier error")
 		}
@@ -407,8 +431,6 @@ func TestAssocReliable(t *testing.T) {
 		assert.Equal(t, n, len(msg), "unexpected length of received data")
 		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
 
-		br.Process()
-
 		assert.False(t, s0.reassemblyQueue.isReadable(), "should no longer be readable")
 		assert.Equal(t, 0, a0.bufferedAmount(), "incorrect bufferedAmount")
 
@@ -423,7 +445,7 @@ func TestAssocReliable(t *testing.T) {
 		var ppi PayloadProtocolIdentifier
 		br := test.NewBridge()
 
-		a0, a1, err := createNewAssociationPair(br)
+		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay)
 		if !assert.Nil(t, err, "failed to create associations") {
 			assert.FailNow(t, "failed due to earlier error")
 		}
@@ -465,13 +487,13 @@ func TestAssocReliable(t *testing.T) {
 		closeAssociationPair(br, a0, a1)
 	})
 
-	t.Run("ordered fragmentated then defragmented", func(t *testing.T) {
+	t.Run("ordered fragmented then defragmented", func(t *testing.T) {
 		const si uint16 = 3
 		var n int
 		var ppi PayloadProtocolIdentifier
 		br := test.NewBridge()
 
-		a0, a1, err := createNewAssociationPair(br)
+		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay)
 		if !assert.Nil(t, err, "failed to create associations") {
 			assert.FailNow(t, "failed due to earlier error")
 		}
@@ -508,13 +530,13 @@ func TestAssocReliable(t *testing.T) {
 		closeAssociationPair(br, a0, a1)
 	})
 
-	t.Run("unordered fragmentated then defragmented", func(t *testing.T) {
+	t.Run("unordered fragmented then defragmented", func(t *testing.T) {
 		const si uint16 = 4
 		var n int
 		var ppi PayloadProtocolIdentifier
 		br := test.NewBridge()
 
-		a0, a1, err := createNewAssociationPair(br)
+		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay)
 		if !assert.Nil(t, err, "failed to create associations") {
 			assert.FailNow(t, "failed due to earlier error")
 		}
@@ -559,7 +581,7 @@ func TestAssocReliable(t *testing.T) {
 		var ppi PayloadProtocolIdentifier
 		br := test.NewBridge()
 
-		a0, a1, err := createNewAssociationPair(br)
+		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay)
 		if !assert.Nil(t, err, "failed to create associations") {
 			assert.FailNow(t, "failed due to earlier error")
 		}
@@ -615,7 +637,7 @@ func TestAssocReliable(t *testing.T) {
 		var ppi PayloadProtocolIdentifier
 		br := test.NewBridge()
 
-		a0, a1, err := createNewAssociationPair(br)
+		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay)
 		if !assert.Nil(t, err, "failed to create associations") {
 			assert.FailNow(t, "failed due to earlier error")
 		}
@@ -689,7 +711,7 @@ func TestAssocUnreliable(t *testing.T) {
 		const si uint16 = 1
 		br := test.NewBridge()
 
-		a0, a1, err := createNewAssociationPair(br)
+		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay)
 		if !assert.Nil(t, err, "failed to create associations") {
 			assert.FailNow(t, "failed due to earlier error")
 		}
@@ -736,7 +758,7 @@ func TestAssocUnreliable(t *testing.T) {
 		const si uint16 = 1
 		br := test.NewBridge()
 
-		a0, a1, err := createNewAssociationPair(br)
+		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay)
 		if !assert.Nil(t, err, "failed to create associations") {
 			assert.FailNow(t, "failed due to earlier error")
 		}
@@ -788,7 +810,7 @@ func TestAssocUnreliable(t *testing.T) {
 		const si uint16 = 2
 		br := test.NewBridge()
 
-		a0, a1, err := createNewAssociationPair(br)
+		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay)
 		if !assert.Nil(t, err, "failed to create associations") {
 			assert.FailNow(t, "failed due to earlier error")
 		}
@@ -835,7 +857,7 @@ func TestAssocUnreliable(t *testing.T) {
 		const si uint16 = 1
 		br := test.NewBridge()
 
-		a0, a1, err := createNewAssociationPair(br)
+		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay)
 		if !assert.Nil(t, err, "failed to create associations") {
 			assert.FailNow(t, "failed due to earlier error")
 		}
@@ -885,7 +907,7 @@ func TestAssocUnreliable(t *testing.T) {
 		const si uint16 = 3
 		br := test.NewBridge()
 
-		a0, a1, err := createNewAssociationPair(br)
+		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay)
 		if !assert.Nil(t, err, "failed to create associations") {
 			assert.FailNow(t, "failed due to earlier error")
 		}
@@ -932,7 +954,7 @@ func TestAssocUnreliable(t *testing.T) {
 		const si uint16 = 3
 		br := test.NewBridge()
 
-		a0, a1, err := createNewAssociationPair(br)
+		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay)
 		if !assert.Nil(t, err, "failed to create associations") {
 			assert.FailNow(t, "failed due to earlier error")
 		}
@@ -1434,7 +1456,7 @@ func TestAssocT3RtxTimer(t *testing.T) {
 		var ppi PayloadProtocolIdentifier
 		br := test.NewBridge()
 
-		a0, a1, err := createNewAssociationPair(br)
+		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay)
 		if !assert.Nil(t, err, "failed to create associations") {
 			assert.FailNow(t, "failed due to earlier error")
 		}
@@ -1496,7 +1518,7 @@ func TestAssocCongestionControl(t *testing.T) {
 		var ppi PayloadProtocolIdentifier
 		br := test.NewBridge()
 
-		a0, a1, err := createNewAssociationPair(br)
+		a0, a1, err := createNewAssociationPair(br, ackModeNormal)
 		if !assert.Nil(t, err, "failed to create associations") {
 			assert.FailNow(t, "failed due to earlier error")
 		}
@@ -1525,7 +1547,11 @@ func TestAssocCongestionControl(t *testing.T) {
 		// Try to read all 4 packets
 		for i := 0; i < 4; i++ {
 			// The receiver (s1) should be readable
-			if !assert.True(t, s1.reassemblyQueue.isReadable(), "should be readable") {
+			s1.lock.RLock()
+			readable := s1.reassemblyQueue.isReadable()
+			s1.lock.RUnlock()
+
+			if !assert.True(t, readable, "should be readable") {
 				return
 			}
 
@@ -1543,17 +1569,27 @@ func TestAssocCongestionControl(t *testing.T) {
 		a0.lock.RUnlock()
 		assert.False(t, inFastRecovery, "should not be in fast-recovery")
 
+		t.Logf("nDATAs      : %d\n", a1.stats.getNumDATAs())
+		t.Logf("nSACKs      : %d\n", a0.stats.getNumSACKs())
+		t.Logf("nAckTimeouts: %d\n", a1.stats.getNumAckTimeouts())
+		t.Logf("nFastRetrans: %d\n", a0.stats.getNumFastRetrans())
+
+		assert.Equal(t, uint64(1), a0.stats.getNumFastRetrans(), "should be 1")
+
 		closeAssociationPair(br, a0, a1)
 	})
 
 	t.Run("Congestion Avoidance", func(t *testing.T) {
 		const si uint16 = 6
-		const nData = 1000
+		const nPacketsToSend = 1000
 		var n int
+		var nPacketsReceived int
 		var ppi PayloadProtocolIdentifier
+		rbuf := make([]byte, 3000)
+
 		br := test.NewBridge()
 
-		a0, a1, err := createNewAssociationPair(br)
+		a0, a1, err := createNewAssociationPair(br, ackModeNormal)
 		if !assert.Nil(t, err, "failed to create associations") {
 			assert.FailNow(t, "failed due to earlier error")
 		}
@@ -1561,12 +1597,185 @@ func TestAssocCongestionControl(t *testing.T) {
 		s0, s1, err := establishSessionPair(br, a0, a1, si)
 		assert.Nil(t, err, "failed to establish session pair")
 
-		for i := 0; i < nData; i++ {
+		a0.stats.reset()
+		a1.stats.reset()
+
+		for i := 0; i < nPacketsToSend; i++ {
 			binary.BigEndian.PutUint32(sbuf, uint32(i)) // uint32 sequence number
 			n, err = s0.WriteSCTP(sbuf, PayloadTypeWebRTCBinary)
 			assert.Nil(t, err, "WriteSCTP failed")
 			assert.Equal(t, n, len(sbuf), "unexpected length of received data")
 		}
+
+		// Repeat calling br.Tick() until the buffered amount becomes 0
+		for s0.BufferedAmount() > 0 && nPacketsReceived < nPacketsToSend {
+			for {
+				n = br.Tick()
+				if n == 0 {
+					break
+				}
+			}
+
+			for {
+				s1.lock.RLock()
+				readable := s1.reassemblyQueue.isReadable()
+				s1.lock.RUnlock()
+				if !readable {
+					break
+				}
+				n, ppi, err = s1.ReadSCTP(rbuf)
+				if !assert.Nil(t, err, "ReadSCTP failed") {
+					return
+				}
+				assert.Equal(t, len(sbuf), n, "unexpected length of received data")
+				assert.Equal(t, nPacketsReceived, int(binary.BigEndian.Uint32(rbuf)), "unexpected length of received data")
+				assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
+
+				nPacketsReceived++
+			}
+		}
+
+		br.Process()
+
+		a0.lock.RLock()
+		inFastRecovery := a0.inFastRecovery
+		cwnd := a0.cwnd
+		ssthresh := a0.ssthresh
+		a0.lock.RUnlock()
+		assert.False(t, inFastRecovery, "should not be in fast-recovery")
+		assert.True(t, cwnd > ssthresh, "should not be in congestion avoidance mode")
+		assert.True(t, ssthresh >= 128*1024, "should not be less than the initial size of 128KB")
+
+		assert.Equal(t, nPacketsReceived, nPacketsToSend, "unexpected num of packets received")
+		assert.Equal(t, 0, s1.getNumBytesInReassemblyQueue(), "reassembly queue should be empty")
+
+		t.Logf("nDATAs      : %d\n", a1.stats.getNumDATAs())
+		t.Logf("nSACKs      : %d\n", a0.stats.getNumSACKs())
+		t.Logf("nT3Timeouts : %d\n", a0.stats.getNumT3Timeouts())
+
+		assert.Equal(t, uint64(nPacketsToSend), a1.stats.getNumDATAs(), "packet count mismatch")
+		assert.True(t, a0.stats.getNumSACKs() < 20, "too many sacks")
+		assert.Equal(t, uint64(0), a0.stats.getNumT3Timeouts(), "should be no retransmit")
+
+		closeAssociationPair(br, a0, a1)
+	})
+
+	// This is to test even rwnd becomes 0, sender should be able to send a zero window probe
+	// on T3-rtx retramission timeout to complete receiving all the packets.
+	t.Run("Slow reader", func(t *testing.T) {
+		const si uint16 = 6
+		nPacketsToSend := int(math.Floor(float64(maxReceiveBufferSize)/1000.0)) * 2
+		var n int
+		var nPacketsReceived int
+		var ppi PayloadProtocolIdentifier
+		rbuf := make([]byte, 3000)
+
+		br := test.NewBridge()
+
+		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay)
+		if !assert.Nil(t, err, "failed to create associations") {
+			assert.FailNow(t, "failed due to earlier error")
+		}
+
+		s0, s1, err := establishSessionPair(br, a0, a1, si)
+		assert.Nil(t, err, "failed to establish session pair")
+
+		for i := 0; i < nPacketsToSend; i++ {
+			binary.BigEndian.PutUint32(sbuf, uint32(i)) // uint32 sequence number
+			n, err = s0.WriteSCTP(sbuf, PayloadTypeWebRTCBinary)
+			assert.Nil(t, err, "WriteSCTP failed")
+			assert.Equal(t, n, len(sbuf), "unexpected length of received data")
+		}
+
+		// 1. First forward packets to receiver until rwnd becomes 0
+		// 2. Wait until the sender's cwnd becomes 1*MTU (RTO occurred)
+		// 3. Stat reading a1's data
+		var hasRTOed bool
+		for s0.BufferedAmount() > 0 && nPacketsReceived < nPacketsToSend {
+			for {
+				n = br.Tick()
+				if n == 0 {
+					break
+				}
+			}
+
+			if !hasRTOed {
+				a1.lock.RLock()
+				rwnd := a1.getMyReceiverWindowCredit()
+				a1.lock.RUnlock()
+				a0.lock.RLock()
+				cwnd := a0.cwnd
+				a0.lock.RUnlock()
+				if cwnd > a0.mtu || rwnd > 0 {
+					// Do not read until a1.getMyReceiverWindowCredit() becomes zero
+					continue
+				}
+
+				hasRTOed = true
+			}
+
+			for {
+				s1.lock.RLock()
+				readable := s1.reassemblyQueue.isReadable()
+				s1.lock.RUnlock()
+				if !readable {
+					break
+				}
+				n, ppi, err = s1.ReadSCTP(rbuf)
+				if !assert.Nil(t, err, "ReadSCTP failed") {
+					return
+				}
+				assert.Equal(t, len(sbuf), n, "unexpected length of received data")
+				assert.Equal(t, nPacketsReceived, int(binary.BigEndian.Uint32(rbuf)), "unexpected length of received data")
+				assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
+
+				nPacketsReceived++
+			}
+
+			time.Sleep(4 * time.Millisecond)
+		}
+
+		br.Process()
+
+		assert.Equal(t, nPacketsReceived, nPacketsToSend, "unexpected num of packets received")
+		assert.Equal(t, 0, s1.getNumBytesInReassemblyQueue(), "reassembly queue should be empty")
+
+		t.Logf("nDATAs      : %d\n", a1.stats.getNumDATAs())
+		t.Logf("nSACKs      : %d\n", a0.stats.getNumSACKs())
+		t.Logf("nAckTimeouts: %d\n", a1.stats.getNumAckTimeouts())
+
+		closeAssociationPair(br, a0, a1)
+	})
+}
+
+func TestAssocDelayedAck(t *testing.T) {
+	t.Run("Ack all DATA chunks with one SACK", func(t *testing.T) {
+		const si uint16 = 6
+		var n int
+		var nPacketsReceived int
+		var ppi PayloadProtocolIdentifier
+		sbuf := make([]byte, 4000) // size should be less than initial cwnd (4380)
+		rbuf := make([]byte, 4000)
+
+		_, _ = cryptoRand.Read(sbuf)
+
+		br := test.NewBridge()
+
+		a0, a1, err := createNewAssociationPair(br, ackModeAlwaysDelay)
+		if !assert.Nil(t, err, "failed to create associations") {
+			assert.FailNow(t, "failed due to earlier error")
+		}
+
+		s0, s1, err := establishSessionPair(br, a0, a1, si)
+		assert.Nil(t, err, "failed to establish session pair")
+
+		a0.stats.reset()
+		a1.stats.reset()
+
+		// Writes data (will fragmented)
+		n, err = s0.WriteSCTP(sbuf, PayloadTypeWebRTCBinary)
+		assert.Nil(t, err, "WriteSCTP failed")
+		assert.Equal(t, n, len(sbuf), "unexpected length of received data")
 
 		// Repeat calling br.Tick() until the buffered amount becomes 0
 		for s0.BufferedAmount() > 0 {
@@ -1576,31 +1785,38 @@ func TestAssocCongestionControl(t *testing.T) {
 					break
 				}
 			}
-			time.Sleep(4 * time.Millisecond)
+
+			for {
+				s1.lock.RLock()
+				readable := s1.reassemblyQueue.isReadable()
+				s1.lock.RUnlock()
+				if !readable {
+					break
+				}
+				n, ppi, err = s1.ReadSCTP(rbuf)
+				if !assert.Nil(t, err, "ReadSCTP failed") {
+					return
+				}
+				assert.Equal(t, len(sbuf), n, "unexpected length of received data")
+				assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
+
+				nPacketsReceived++
+			}
 		}
 
-		rbuf := make([]byte, 3000)
+		br.Process()
 
-		// Try to read all 4 packets
-		for i := 0; i < nData; i++ {
-			// The receiver (s1) should be readable
-			if !assert.True(t, s1.reassemblyQueue.isReadable(), "should be readable") {
-				return
-			}
+		assert.Equal(t, 1, nPacketsReceived, "should be one packet received")
+		assert.Equal(t, 0, s1.getNumBytesInReassemblyQueue(), "reassembly queue should be empty")
 
-			n, ppi, err = s1.ReadSCTP(rbuf)
-			if !assert.Nil(t, err, "ReadSCTP failed") {
-				return
-			}
-			assert.Equal(t, len(sbuf), n, "unexpected length of received data")
-			assert.Equal(t, i, int(binary.BigEndian.Uint32(rbuf)), "unexpected length of received data")
-			assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
-		}
+		t.Logf("nDATAs      : %d\n", a1.stats.getNumDATAs())
+		t.Logf("nSACKs      : %d\n", a0.stats.getNumSACKs())
+		t.Logf("nAckTimeouts: %d\n", a1.stats.getNumAckTimeouts())
 
-		a0.lock.RLock()
-		inFastRecovery := a0.inFastRecovery
-		a0.lock.RUnlock()
-		assert.False(t, inFastRecovery, "should not be in fast-recovery")
+		assert.Equal(t, uint64(4), a1.stats.getNumDATAs(), "DATA chunk count mismatch")
+		assert.Equal(t, uint64(1), a0.stats.getNumSACKs(), "sack count should be one")
+		assert.Equal(t, uint64(1), a1.stats.getNumAckTimeouts(), "ackTimeout count mismatch")
+		assert.Equal(t, uint64(0), a0.stats.getNumT3Timeouts(), "should be no retransmit")
 
 		closeAssociationPair(br, a0, a1)
 	})

@@ -30,37 +30,37 @@ const (
 func (c chunkType) String() string {
 	switch c {
 	case ctPayloadData:
-		return "Payload data"
+		return "DATA"
 	case ctInit:
-		return "Initiation"
+		return "INIT"
 	case ctInitAck:
-		return "Initiation Acknowledgement"
+		return "INIT-ACK"
 	case ctSack:
-		return "Selective Acknowledgement"
+		return "SACK"
 	case ctHeartbeat:
-		return "Heartbeat"
+		return "HEARTBEAT"
 	case ctHeartbeatAck:
-		return "Heartbeat Acknowledgement"
+		return "HEARTBEAT-ACK"
 	case ctAbort:
-		return "Abort"
+		return "ABORT"
 	case ctShutdown:
-		return "Shutdown"
+		return "SHUTDOWN"
 	case ctShutdownAck:
-		return "Shutdown Acknowledgement"
+		return "SHUTDOWN-ACK"
 	case ctError:
-		return "Error"
+		return "ERROR"
 	case ctCookieEcho:
-		return "Cookie Echo"
+		return "COOKIE-ECHO"
 	case ctCookieAck:
-		return "Cookie Acknowledgement"
+		return "COOKIE-ACK"
 	case ctCWR:
-		return "Congestion Window Reduced"
+		return "ECNE" // Explicit Congestion Notification Echo
 	case ctShutdownComplete:
-		return "Shutdown Complete"
+		return "SHUTDOWN-COMPLETE"
 	case ctReconfig:
-		return "Re-configuration Chunk (RE-CONFIG)"
+		return "RECONFIG" // Re-configuration
 	case ctForwardTSN:
-		return "FORWARD TSN"
+		return "FORWARD-TSN"
 	default:
 		return fmt.Sprintf("Unknown ChunkType: %d", c)
 	}
