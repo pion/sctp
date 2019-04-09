@@ -27,6 +27,7 @@ func TestReassemblyQueue(t *testing.T) {
 
 		complete = rq.push(chunk)
 		assert.False(t, complete, "chunk set should not be complete yet")
+		assert.Equal(t, 3, rq.getNumBytes(), "num bytes mismatch")
 
 		chunk = &chunkPayloadData{
 			payloadType:          orgPpi,
@@ -38,12 +39,14 @@ func TestReassemblyQueue(t *testing.T) {
 
 		complete = rq.push(chunk)
 		assert.True(t, complete, "chunk set should be complete")
+		assert.Equal(t, 7, rq.getNumBytes(), "num bytes mismatch")
 
 		buf := make([]byte, 16)
 
 		n, ppi, err := rq.read(buf)
 		assert.Nil(t, err, "read() should succeed")
 		assert.Equal(t, 7, n, "should received 7 bytes")
+		assert.Equal(t, 0, rq.getNumBytes(), "num bytes mismatch")
 		assert.Equal(t, ppi, orgPpi, "should have valid ppi")
 		assert.Equal(t, string(buf[:n]), "ABCDEFG", "data should match")
 	})
@@ -67,6 +70,7 @@ func TestReassemblyQueue(t *testing.T) {
 
 		complete = rq.push(chunk)
 		assert.False(t, complete, "chunk set should not be complete yet")
+		assert.Equal(t, 3, rq.getNumBytes(), "num bytes mismatch")
 
 		chunk = &chunkPayloadData{
 			payloadType:          orgPpi,
@@ -78,6 +82,7 @@ func TestReassemblyQueue(t *testing.T) {
 
 		complete = rq.push(chunk)
 		assert.False(t, complete, "chunk set should not be complete yet")
+		assert.Equal(t, 7, rq.getNumBytes(), "num bytes mismatch")
 
 		chunk = &chunkPayloadData{
 			payloadType:          orgPpi,
@@ -90,12 +95,14 @@ func TestReassemblyQueue(t *testing.T) {
 
 		complete = rq.push(chunk)
 		assert.True(t, complete, "chunk set should be complete")
+		assert.Equal(t, 8, rq.getNumBytes(), "num bytes mismatch")
 
 		buf := make([]byte, 16)
 
 		n, ppi, err := rq.read(buf)
 		assert.Nil(t, err, "read() should succeed")
 		assert.Equal(t, 8, n, "should received 8 bytes")
+		assert.Equal(t, 0, rq.getNumBytes(), "num bytes mismatch")
 		assert.Equal(t, ppi, orgPpi, "should have valid ppi")
 		assert.Equal(t, string(buf[:n]), "ABCDEFGH", "data should match")
 	})
@@ -119,6 +126,7 @@ func TestReassemblyQueue(t *testing.T) {
 
 		complete = rq.push(chunk)
 		assert.True(t, complete, "chunk set should be complete")
+		assert.Equal(t, 3, rq.getNumBytes(), "num bytes mismatch")
 
 		chunk = &chunkPayloadData{
 			payloadType:          orgPpi,
@@ -132,6 +140,7 @@ func TestReassemblyQueue(t *testing.T) {
 
 		complete = rq.push(chunk)
 		assert.True(t, complete, "chunk set should be complete")
+		assert.Equal(t, 6, rq.getNumBytes(), "num bytes mismatch")
 
 		//
 		// Now we have two complete chunks ready to read in the reassemblyQueue.
@@ -143,6 +152,7 @@ func TestReassemblyQueue(t *testing.T) {
 		n, ppi, err := rq.read(buf)
 		assert.Nil(t, err, "read() should succeed")
 		assert.Equal(t, 3, n, "should received 3 bytes")
+		assert.Equal(t, 3, rq.getNumBytes(), "num bytes mismatch")
 		assert.Equal(t, ppi, orgPpi, "should have valid ppi")
 		assert.Equal(t, string(buf[:n]), "DEF", "data should match")
 
@@ -150,6 +160,7 @@ func TestReassemblyQueue(t *testing.T) {
 		n, ppi, err = rq.read(buf)
 		assert.Nil(t, err, "read() should succeed")
 		assert.Equal(t, 3, n, "should received 3 bytes")
+		assert.Equal(t, 0, rq.getNumBytes(), "num bytes mismatch")
 		assert.Equal(t, ppi, orgPpi, "should have valid ppi")
 		assert.Equal(t, string(buf[:n]), "ABC", "data should match")
 	})
@@ -173,6 +184,7 @@ func TestReassemblyQueue(t *testing.T) {
 
 		complete = rq.push(chunk)
 		assert.False(t, complete, "chunk set should not be complete yet")
+		assert.Equal(t, 2, rq.getNumBytes(), "num bytes mismatch")
 
 		chunk = &chunkPayloadData{
 			payloadType:          orgPpi,
@@ -185,6 +197,7 @@ func TestReassemblyQueue(t *testing.T) {
 
 		complete = rq.push(chunk)
 		assert.False(t, complete, "chunk set should not be complete yet")
+		assert.Equal(t, 10, rq.getNumBytes(), "num bytes mismatch")
 
 		chunk = &chunkPayloadData{
 			payloadType:          orgPpi,
@@ -198,6 +211,7 @@ func TestReassemblyQueue(t *testing.T) {
 
 		complete = rq.push(chunk)
 		assert.True(t, complete, "chunk set should be complete")
+		assert.Equal(t, 14, rq.getNumBytes(), "num bytes mismatch")
 
 		//
 		// Now we have two complete chunks ready to read in the reassemblyQueue.
@@ -208,7 +222,8 @@ func TestReassemblyQueue(t *testing.T) {
 		// Should pick the one that has "GOOD"
 		n, ppi, err := rq.read(buf)
 		assert.Nil(t, err, "read() should succeed")
-		assert.Equal(t, 4, n, "should received 3 bytes")
+		assert.Equal(t, 4, n, "should receive 4 bytes")
+		assert.Equal(t, 10, rq.getNumBytes(), "num bytes mismatch")
 		assert.Equal(t, ppi, orgPpi, "should have valid ppi")
 		assert.Equal(t, string(buf[:n]), "GOOD", "data should match")
 	})
@@ -233,6 +248,7 @@ func TestReassemblyQueue(t *testing.T) {
 
 		complete = rq.push(chunk)
 		assert.False(t, complete, "chunk should be ignored")
+		assert.Equal(t, 0, rq.getNumBytes(), "num bytes mismatch")
 	})
 
 	t.Run("ignores chunk with stale SSN", func(t *testing.T) {
@@ -255,6 +271,7 @@ func TestReassemblyQueue(t *testing.T) {
 
 		complete = rq.push(chunk)
 		assert.False(t, complete, "chunk should not be ignored")
+		assert.Equal(t, 0, rq.getNumBytes(), "num bytes mismatch")
 	})
 
 	t.Run("should fail to read incomplete chunk", func(t *testing.T) {
@@ -275,10 +292,12 @@ func TestReassemblyQueue(t *testing.T) {
 
 		complete = rq.push(chunk)
 		assert.False(t, complete, "the set should not be complete")
+		assert.Equal(t, 2, rq.getNumBytes(), "num bytes mismatch")
 
 		buf := make([]byte, 16)
 		_, _, err := rq.read(buf)
 		assert.NotNil(t, err, "read() should not succeed")
+		assert.Equal(t, 2, rq.getNumBytes(), "num bytes mismatch")
 	})
 
 	t.Run("should fail to read if the next SSN is not ready", func(t *testing.T) {
@@ -300,10 +319,12 @@ func TestReassemblyQueue(t *testing.T) {
 
 		complete = rq.push(chunk)
 		assert.True(t, complete, "the set should be complete")
+		assert.Equal(t, 2, rq.getNumBytes(), "num bytes mismatch")
 
 		buf := make([]byte, 16)
 		_, _, err := rq.read(buf)
 		assert.NotNil(t, err, "read() should not succeed")
+		assert.Equal(t, 2, rq.getNumBytes(), "num bytes mismatch")
 	})
 
 	t.Run("detect buffer too short", func(t *testing.T) {
@@ -325,10 +346,12 @@ func TestReassemblyQueue(t *testing.T) {
 
 		complete = rq.push(chunk)
 		assert.True(t, complete, "the set should be complete")
+		assert.Equal(t, 10, rq.getNumBytes(), "num bytes mismatch")
 
 		buf := make([]byte, 8) // <- passing buffer too short
 		_, _, err := rq.read(buf)
 		assert.Equal(t, io.ErrShortBuffer, err, "read() should not succeed")
+		assert.Equal(t, 0, rq.getNumBytes(), "num bytes mismatch")
 	})
 
 	t.Run("forwardTSN for ordered fragments", func(t *testing.T) {
@@ -352,6 +375,7 @@ func TestReassemblyQueue(t *testing.T) {
 
 		complete = rq.push(chunk)
 		assert.True(t, complete, "chunk set should be complete")
+		assert.Equal(t, 3, rq.getNumBytes(), "num bytes mismatch")
 
 		chunk = &chunkPayloadData{
 			payloadType:          orgPpi,
@@ -363,6 +387,7 @@ func TestReassemblyQueue(t *testing.T) {
 
 		complete = rq.push(chunk)
 		assert.False(t, complete, "chunk set should not be complete yet")
+		assert.Equal(t, 6, rq.getNumBytes(), "num bytes mismatch")
 
 		chunk = &chunkPayloadData{
 			payloadType:          orgPpi,
@@ -373,10 +398,12 @@ func TestReassemblyQueue(t *testing.T) {
 
 		complete = rq.push(chunk)
 		assert.False(t, complete, "chunk set should not be complete yet")
+		assert.Equal(t, 9, rq.getNumBytes(), "num bytes mismatch")
 
 		rq.forwardTSN(13, false, ssnDropped)
 
 		assert.Equal(t, 1, len(rq.ordered), "there should be one chunk left")
+		assert.Equal(t, 3, rq.getNumBytes(), "num bytes mismatch")
 	})
 
 	t.Run("forwardTSN for unordered fragments", func(t *testing.T) {
@@ -400,6 +427,7 @@ func TestReassemblyQueue(t *testing.T) {
 
 		complete = rq.push(chunk)
 		assert.False(t, complete, "chunk set should not be complete yet")
+		assert.Equal(t, 3, rq.getNumBytes(), "num bytes mismatch")
 
 		chunk = &chunkPayloadData{
 			payloadType:          orgPpi,
@@ -411,6 +439,7 @@ func TestReassemblyQueue(t *testing.T) {
 
 		complete = rq.push(chunk)
 		assert.False(t, complete, "chunk set should not be complete yet")
+		assert.Equal(t, 6, rq.getNumBytes(), "num bytes mismatch")
 
 		chunk = &chunkPayloadData{
 			payloadType:          orgPpi,
@@ -423,6 +452,7 @@ func TestReassemblyQueue(t *testing.T) {
 
 		complete = rq.push(chunk)
 		assert.False(t, complete, "chunk set should not be complete yet")
+		assert.Equal(t, 9, rq.getNumBytes(), "num bytes mismatch")
 
 		// At this point, there are 3 chunks in the rq.unorderedChunks.
 		// This call should remove chunks with tsn equals to 13 or older.
@@ -430,6 +460,7 @@ func TestReassemblyQueue(t *testing.T) {
 
 		// As a result, there should be one chunk (tsn=14)
 		assert.Equal(t, 1, len(rq.unorderedChunks), "there should be one chunk kept")
+		assert.Equal(t, 3, rq.getNumBytes(), "num bytes mismatch")
 	})
 }
 
