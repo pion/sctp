@@ -3,6 +3,7 @@ package sctp
 import (
 	"encoding/binary"
 	"fmt"
+	"math"
 	"math/rand"
 	"net"
 	"sync"
@@ -1525,7 +1526,11 @@ func TestAssocCongestionControl(t *testing.T) {
 		// Try to read all 4 packets
 		for i := 0; i < 4; i++ {
 			// The receiver (s1) should be readable
-			if !assert.True(t, s1.reassemblyQueue.isReadable(), "should be readable") {
+			s1.lock.RLock()
+			readable := s1.reassemblyQueue.isReadable()
+			s1.lock.RUnlock()
+
+			if !assert.True(t, readable, "should be readable") {
 				return
 			}
 
@@ -1548,9 +1553,12 @@ func TestAssocCongestionControl(t *testing.T) {
 
 	t.Run("Congestion Avoidance", func(t *testing.T) {
 		const si uint16 = 6
-		const nData = 1000
+		const nPacketsToSend = 1000
 		var n int
+		var nPacketsReceived int
 		var ppi PayloadProtocolIdentifier
+		rbuf := make([]byte, 3000)
+
 		br := test.NewBridge()
 
 		a0, a1, err := createNewAssociationPair(br)
@@ -1561,7 +1569,7 @@ func TestAssocCongestionControl(t *testing.T) {
 		s0, s1, err := establishSessionPair(br, a0, a1, si)
 		assert.Nil(t, err, "failed to establish session pair")
 
-		for i := 0; i < nData; i++ {
+		for i := 0; i < nPacketsToSend; i++ {
 			binary.BigEndian.PutUint32(sbuf, uint32(i)) // uint32 sequence number
 			n, err = s0.WriteSCTP(sbuf, PayloadTypeWebRTCBinary)
 			assert.Nil(t, err, "WriteSCTP failed")
@@ -1569,38 +1577,131 @@ func TestAssocCongestionControl(t *testing.T) {
 		}
 
 		// Repeat calling br.Tick() until the buffered amount becomes 0
-		for s0.BufferedAmount() > 0 {
+		for s0.BufferedAmount() > 0 && nPacketsReceived < nPacketsToSend {
 			for {
 				n = br.Tick()
 				if n == 0 {
 					break
 				}
 			}
-			time.Sleep(4 * time.Millisecond)
-		}
 
-		rbuf := make([]byte, 3000)
+			for {
+				s1.lock.RLock()
+				readable := s1.reassemblyQueue.isReadable()
+				s1.lock.RUnlock()
+				if !readable {
+					break
+				}
+				n, ppi, err = s1.ReadSCTP(rbuf)
+				if !assert.Nil(t, err, "ReadSCTP failed") {
+					return
+				}
+				assert.Equal(t, len(sbuf), n, "unexpected length of received data")
+				assert.Equal(t, nPacketsReceived, int(binary.BigEndian.Uint32(rbuf)), "unexpected length of received data")
+				assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
 
-		// Try to read all 4 packets
-		for i := 0; i < nData; i++ {
-			// The receiver (s1) should be readable
-			if !assert.True(t, s1.reassemblyQueue.isReadable(), "should be readable") {
-				return
+				nPacketsReceived++
 			}
 
-			n, ppi, err = s1.ReadSCTP(rbuf)
-			if !assert.Nil(t, err, "ReadSCTP failed") {
-				return
-			}
-			assert.Equal(t, len(sbuf), n, "unexpected length of received data")
-			assert.Equal(t, i, int(binary.BigEndian.Uint32(rbuf)), "unexpected length of received data")
-			assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
+			time.Sleep(2 * time.Millisecond)
 		}
+
+		br.Process()
 
 		a0.lock.RLock()
 		inFastRecovery := a0.inFastRecovery
+		cwnd := a0.cwnd
+		ssthresh := a0.ssthresh
 		a0.lock.RUnlock()
 		assert.False(t, inFastRecovery, "should not be in fast-recovery")
+		assert.True(t, cwnd > ssthresh, "should not be in congestion avoidance mode")
+		assert.True(t, ssthresh >= 128*1024, "should not be less than the initial size of 128KB")
+
+		assert.Equal(t, nPacketsReceived, nPacketsToSend, "unexpected num of packets received")
+		assert.Equal(t, 0, s1.getNumBytesInReassemblyQueue(), "reassembly queue should be empty")
+
+		closeAssociationPair(br, a0, a1)
+	})
+
+	// This is to test even rwnd becomes 0, sender should be able to send a zero window probe
+	// on T3-rtx retramission timeout to complete receiving all the packets.
+	t.Run("Slow reader", func(t *testing.T) {
+		const si uint16 = 6
+		nPacketsToSend := int(math.Floor(float64(maxReceiveBufferSize)/1000.0)) * 2
+		var n int
+		var nPacketsReceived int
+		var ppi PayloadProtocolIdentifier
+		rbuf := make([]byte, 3000)
+
+		br := test.NewBridge()
+
+		a0, a1, err := createNewAssociationPair(br)
+		if !assert.Nil(t, err, "failed to create associations") {
+			assert.FailNow(t, "failed due to earlier error")
+		}
+
+		s0, s1, err := establishSessionPair(br, a0, a1, si)
+		assert.Nil(t, err, "failed to establish session pair")
+
+		for i := 0; i < nPacketsToSend; i++ {
+			binary.BigEndian.PutUint32(sbuf, uint32(i)) // uint32 sequence number
+			n, err = s0.WriteSCTP(sbuf, PayloadTypeWebRTCBinary)
+			assert.Nil(t, err, "WriteSCTP failed")
+			assert.Equal(t, n, len(sbuf), "unexpected length of received data")
+		}
+
+		// 1. First forward packets to receiver until rwnd becomes 0
+		// 2. Wait until the sender's cwnd becomes 1*MTU (RTO occurred)
+		// 3. Stat reading a1's data
+		var hasRTOed bool
+		for s0.BufferedAmount() > 0 && nPacketsReceived < nPacketsToSend {
+			for {
+				n = br.Tick()
+				if n == 0 {
+					break
+				}
+			}
+
+			if !hasRTOed {
+				a1.lock.RLock()
+				rwnd := a1.getMyReceiverWindowCredit()
+				a1.lock.RUnlock()
+				a0.lock.RLock()
+				cwnd := a0.cwnd
+				a0.lock.RUnlock()
+				if cwnd > a0.mtu || rwnd > 0 {
+					// Do not read until a1.getMyReceiverWindowCredit() becomes zero
+					continue
+				}
+
+				hasRTOed = true
+			}
+
+			for {
+				s1.lock.RLock()
+				readable := s1.reassemblyQueue.isReadable()
+				s1.lock.RUnlock()
+				if !readable {
+					break
+				}
+				n, ppi, err = s1.ReadSCTP(rbuf)
+				if !assert.Nil(t, err, "ReadSCTP failed") {
+					return
+				}
+				assert.Equal(t, len(sbuf), n, "unexpected length of received data")
+				assert.Equal(t, nPacketsReceived, int(binary.BigEndian.Uint32(rbuf)), "unexpected length of received data")
+				assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
+
+				nPacketsReceived++
+			}
+
+			time.Sleep(4 * time.Millisecond)
+		}
+
+		br.Process()
+
+		assert.Equal(t, nPacketsReceived, nPacketsToSend, "unexpected num of packets received")
+		assert.Equal(t, 0, s1.getNumBytesInReassemblyQueue(), "reassembly queue should be empty")
 
 		closeAssociationPair(br, a0, a1)
 	})

@@ -644,6 +644,8 @@ func (a *Association) handleData(d *chunkPayloadData) []*packet {
 			// Pass the new chunk to stream level as soon as it arrives
 			a.payloadQueue.push(d, a.peerLastTSN)
 			s.handleData(d)
+		} else {
+			a.log.Debugf("receive buffer full. dropping DATA with tsn=%d", d.tsn)
 		}
 	}
 
@@ -685,7 +687,11 @@ func (a *Association) handleData(d *chunkPayloadData) []*packet {
 
 // The caller should hold the lock.
 func (a *Association) getMyReceiverWindowCredit() uint32 {
-	bytesQueued := uint32(a.payloadQueue.getNumBytes())
+	var bytesQueued uint32
+	for _, s := range a.streams {
+		bytesQueued += uint32(s.getNumBytesInReassemblyQueue())
+	}
+
 	if bytesQueued >= maxReceiveBufferSize {
 		return 0
 	}
@@ -1345,6 +1351,7 @@ func (a *Association) popPendingDataChunksToSend() []*chunkPayloadData {
 			}
 
 			if dataLen > a.rwnd {
+				a.log.Debugf("cannot send new data as dataLen %d > a.rwnd %d", dataLen, a.rwnd)
 				break // no more rwnd
 			}
 

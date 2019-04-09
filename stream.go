@@ -292,3 +292,8 @@ func (s *Stream) onBufferReleased(nBytesReleased int) {
 
 	s.lock.Unlock()
 }
+
+func (s *Stream) getNumBytesInReassemblyQueue() int {
+	// No lock is required as it reads the size with atomic load function.
+	return s.reassemblyQueue.getNumBytes()
+}

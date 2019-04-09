@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"sync/atomic"
 )
 
 func sortChunksByTSN(a []*chunkPayloadData) {
@@ -101,6 +102,7 @@ type reassemblyQueue struct {
 	ordered         []*chunkSet
 	unordered       []*chunkSet
 	unorderedChunks []*chunkPayloadData
+	nBytes          uint64
 }
 
 func newReassemblyQueue(si uint16) *reassemblyQueue {
@@ -127,6 +129,7 @@ func (r *reassemblyQueue) push(chunk *chunkPayloadData) bool {
 	if chunk.unordered {
 		// First, insert into unorderedChunks array
 		r.unorderedChunks = append(r.unorderedChunks, chunk)
+		atomic.AddUint64(&r.nBytes, uint64(len(chunk.userData)))
 		sortChunksByTSN(r.unorderedChunks)
 
 		// Scan unorderedChunks that are contiguous (in TSN)
@@ -163,6 +166,8 @@ func (r *reassemblyQueue) push(chunk *chunkPayloadData) bool {
 			sortChunksBySSN(r.ordered)
 		}
 	}
+
+	atomic.AddUint64(&r.nBytes, uint64(len(chunk.userData)))
 
 	return cset.push(chunk)
 }
@@ -269,15 +274,20 @@ func (r *reassemblyQueue) read(buf []byte) (int, PayloadProtocolIdentifier, erro
 	// Concat all fragments into the buffer
 	nWritten := 0
 	ppi := cset.ppi
+	var err error
 	for _, c := range cset.chunks {
-		n := copy(buf[nWritten:], c.userData)
-		nWritten += n
-		if n < len(c.userData) {
-			return nWritten, ppi, io.ErrShortBuffer
+		toCopy := len(c.userData)
+		r.subtractNumBytes(toCopy)
+		if err == nil {
+			n := copy(buf[nWritten:], c.userData)
+			nWritten += n
+			if n < toCopy {
+				err = io.ErrShortBuffer
+			}
 		}
 	}
 
-	return nWritten, ppi, nil
+	return nWritten, ppi, err
 }
 
 func (r *reassemblyQueue) forwardTSN(newCumulativeTSN uint32, unordered bool, lastSSN uint16) {
@@ -297,6 +307,9 @@ func (r *reassemblyQueue) forwardTSN(newCumulativeTSN uint32, unordered bool, la
 			lastIdx = i
 		}
 		if lastIdx >= 0 {
+			for _, c := range r.unorderedChunks[0 : lastIdx+1] {
+				r.subtractNumBytes(len(c.userData))
+			}
 			r.unorderedChunks = r.unorderedChunks[lastIdx+1:]
 		}
 	} else {
@@ -307,7 +320,11 @@ func (r *reassemblyQueue) forwardTSN(newCumulativeTSN uint32, unordered bool, la
 		for _, set := range r.ordered {
 			if sna16LTE(set.ssn, lastSSN) {
 				if !set.isComplete() {
-					continue // drop
+					// drop the set
+					for _, c := range set.chunks {
+						r.subtractNumBytes(len(c.userData))
+					}
+					continue
 				}
 			}
 			keep = append(keep, set)
@@ -319,4 +336,17 @@ func (r *reassemblyQueue) forwardTSN(newCumulativeTSN uint32, unordered bool, la
 			r.nextSSN = lastSSN + 1
 		}
 	}
+}
+
+func (r *reassemblyQueue) subtractNumBytes(nBytes int) {
+	cur := atomic.LoadUint64(&r.nBytes)
+	if int(cur) >= nBytes {
+		atomic.AddUint64(&r.nBytes, -uint64(nBytes))
+	} else {
+		atomic.StoreUint64(&r.nBytes, 0)
+	}
+}
+
+func (r *reassemblyQueue) getNumBytes() int {
+	return int(atomic.LoadUint64(&r.nBytes))
 }
