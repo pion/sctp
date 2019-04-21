@@ -1,6 +1,7 @@
 package sctp
 
 import (
+	"fmt"
 	"sort"
 )
 
@@ -126,6 +127,15 @@ func (q *payloadQueue) getGapAckBlocks(cumulativeTSN uint32) (gapAckBlocks []gap
 	})
 
 	return gapAckBlocks
+}
+
+func (q *payloadQueue) getGapAckBlocksString(cumulativeTSN uint32) string {
+	gapAckBlocks := q.getGapAckBlocks(cumulativeTSN)
+	str := fmt.Sprintf("cumTSN=%d", cumulativeTSN)
+	for _, b := range gapAckBlocks {
+		str += fmt.Sprintf(",%d-%d", b.start, b.end)
+	}
+	return str
 }
 
 func (q *payloadQueue) markAsAcked(tsn uint32) int {

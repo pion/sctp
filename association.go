@@ -346,11 +346,11 @@ func (a *Association) Close() error {
 	<-a.closeCh
 
 	a.log.Debugf("[%s] association closed", a.name())
-	a.log.Debugf("[%s] stats nDATAs (in) : %d\n", a.name(), a.stats.getNumDATAs())
-	a.log.Debugf("[%s] stats nSACKs (in) : %d\n", a.name(), a.stats.getNumSACKs())
-	a.log.Debugf("[%s] stats nT3Timeouts : %d\n", a.name(), a.stats.getNumT3Timeouts())
-	a.log.Debugf("[%s] stats nAckTimeouts: %d\n", a.name(), a.stats.getNumAckTimeouts())
-	a.log.Debugf("[%s] stats nFastRetrans: %d\n", a.name(), a.stats.getNumFastRetrans())
+	a.log.Debugf("[%s] stats nDATAs (in) : %d", a.name(), a.stats.getNumDATAs())
+	a.log.Debugf("[%s] stats nSACKs (in) : %d", a.name(), a.stats.getNumSACKs())
+	a.log.Debugf("[%s] stats nT3Timeouts : %d", a.name(), a.stats.getNumT3Timeouts())
+	a.log.Debugf("[%s] stats nAckTimeouts: %d", a.name(), a.stats.getNumAckTimeouts())
+	a.log.Debugf("[%s] stats nFastRetrans: %d", a.name(), a.stats.getNumFastRetrans())
 	return nil
 }
 
@@ -696,7 +696,7 @@ func (a *Association) handleData(d *chunkPayloadData) []*packet {
 
 	hasPacketLoss := (a.payloadQueue.size() > 0)
 	if hasPacketLoss {
-		a.log.Debugf("[%s] packetloss !!!!!!!", a.name())
+		a.log.Debugf("[%s] packetloss: %s", a.name(), a.payloadQueue.getGapAckBlocksString(a.peerLastTSN))
 	}
 
 	if (!d.immediateSack && !hasPacketLoss && a.ackMode == ackModeNormal) || a.ackMode == ackModeAlwaysDelay {
@@ -881,6 +881,7 @@ func (a *Association) processSelectiveAck(d *chunkSelectiveAck) (int, uint32, er
 				a.log.Tracef("tsn=%d has been sacked", c.tsn)
 
 				if c.nSent == 1 {
+					a.minTSN2MeasureRTT = a.myNextTSN
 					rtt := time.Since(c.since).Seconds() * 1000.0
 					a.rtoMgr.setNewRTT(rtt)
 					a.log.Tracef("SACK: measured-rtt=%f new-rto=%f", rtt, a.rtoMgr.getRTO())
@@ -958,10 +959,23 @@ func (a *Association) processFastRetransmission(cumTSNAckPoint, htna uint32, cum
 	// HTNA algorithm - RFC 4960 Sec 7.2.4
 	// Increment missIndicator of each chunks that the SACK reported missing
 	// when either of the following is met:
-	// a)  Not in fast-recovery, or;
+	// a)  Not in fast-recovery
+	//     miss indications are incremented only for missing TSNs prior to the
+	//     highest TSN newly acknowledged in the SACK.
 	// b)  In fast-recovery AND the Cumulative TSN Ack Point advanced
+	//     the miss indications are incremented for all TSNs reported missing
+	//     in the SACK.
 	if !a.inFastRecovery || (a.inFastRecovery && cumTSNAckPointAdvanced) {
-		for tsn := cumTSNAckPoint + 1; sna32LTE(tsn, htna); tsn++ {
+		var maxTSN uint32
+		if !a.inFastRecovery {
+			// a) increment only for missing TSNs prior to the HTNA
+			maxTSN = htna
+		} else {
+			// b) increment for all TSNs reported missing
+			maxTSN = cumTSNAckPoint + uint32(a.inflightQueue.size()) + 1
+		}
+
+		for tsn := cumTSNAckPoint + 1; sna32LT(tsn, maxTSN); tsn++ {
 			c, ok := a.inflightQueue.get(tsn)
 			if !ok {
 				return nil, errors.Errorf("requested non-existent TSN %v", tsn)
@@ -969,12 +983,23 @@ func (a *Association) processFastRetransmission(cumTSNAckPoint, htna uint32, cum
 			if !c.acked && !c.abandoned && c.missIndicator < 3 {
 				c.missIndicator++
 				if c.missIndicator == 3 {
+					// RFC 4960 Sec 7.2.4 Fast Retransmit on Gap Reports
+					//  3)  Determine how many of the earliest (i.e., lowest TSN) DATA chunks
+					//      marked for retransmission will fit into a single packet, subject
+					//      to constraint of the path MTU of the destination transport
+					//      address to which the packet is being sent.  Call this value K.
+					//      Retransmit those K DATA chunks in a single packet.  When a Fast
+					//      Retransmit is being performed, the sender SHOULD ignore the value
+					//      of cwnd and SHOULD NOT delay retransmission for this single
+					//		packet.
 					dataChunkSize := dataChunkHeaderSize + uint32(len(c.userData))
 					if a.mtu-fastRetransSize >= dataChunkSize {
 						fastRetransSize += dataChunkSize
 						a.stats.incFastRetrans()
+						c.nSent++
+						a.checkPartialReliabilityStatus(c)
 						toFastRetrans = append(toFastRetrans, c)
-						a.log.Tracef("fast-retransmit: tsn=%d", tsn)
+						a.log.Tracef("fast-retransmit: tsn=%d sent=%d htna=%d", tsn, c.nSent, htna)
 					}
 				}
 			}
@@ -982,6 +1007,10 @@ func (a *Association) processFastRetransmission(cumTSNAckPoint, htna uint32, cum
 	}
 
 	if len(toFastRetrans) > 0 && !a.inFastRecovery {
+		// 2)  If not in Fast Recovery, adjust the ssthresh and cwnd of the
+		//     destination address(es) to which the missing DATA chunks were
+		//     last sent, according to the formula described in Section 7.2.3.
+
 		a.inFastRecovery = true
 		a.fastRecoverExitPoint = htna
 		a.ssthresh = max32(a.cwnd/2, 4*a.mtu)
@@ -1090,11 +1119,13 @@ func (a *Association) handleSack(d *chunkSelectiveAck) ([]*packet, error) {
 
 	chunks := a.popPendingDataChunksToSend()
 	if len(chunks) > 0 {
+		packets = append(packets, a.bundleDataChunksIntoPackets(chunks)...)
+	}
+
+	if a.inflightQueue.size() > 0 {
 		// Start timer. (noop if already started)
 		a.log.Tracef("[%s] T3-rtx timer start (pt3)", a.name())
 		a.t3RTX.start(a.rtoMgr.getRTO())
-
-		packets = append(packets, a.bundleDataChunksIntoPackets(chunks)...)
 	}
 
 	return packets, nil
