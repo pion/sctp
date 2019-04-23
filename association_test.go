@@ -1627,7 +1627,7 @@ func TestAssocCongestionControl(t *testing.T) {
 
 	t.Run("Congestion Avoidance", func(t *testing.T) {
 		const si uint16 = 6
-		const nPacketsToSend = 1000
+		const nPacketsToSend = 2000
 		var n int
 		var nPacketsReceived int
 		var ppi PayloadProtocolIdentifier
@@ -1689,8 +1689,8 @@ func TestAssocCongestionControl(t *testing.T) {
 		ssthresh := a0.ssthresh
 		a0.lock.RUnlock()
 		assert.False(t, inFastRecovery, "should not be in fast-recovery")
-		assert.True(t, cwnd > ssthresh, "should not be in congestion avoidance mode")
-		assert.True(t, ssthresh >= 128*1024, "should not be less than the initial size of 128KB")
+		assert.True(t, cwnd > ssthresh, "should be in congestion avoidance mode")
+		assert.True(t, ssthresh >= maxReceiveBufferSize, "should not be less than the initial size of 128KB")
 
 		assert.Equal(t, nPacketsReceived, nPacketsToSend, "unexpected num of packets received")
 		assert.Equal(t, 0, s1.getNumBytesInReassemblyQueue(), "reassembly queue should be empty")
@@ -1700,7 +1700,7 @@ func TestAssocCongestionControl(t *testing.T) {
 		t.Logf("nT3Timeouts : %d\n", a0.stats.getNumT3Timeouts())
 
 		assert.Equal(t, uint64(nPacketsToSend), a1.stats.getNumDATAs(), "packet count mismatch")
-		assert.True(t, a0.stats.getNumSACKs() < 20, "too many sacks")
+		assert.True(t, a0.stats.getNumSACKs() < nPacketsToSend/20, "too many sacks")
 		assert.Equal(t, uint64(0), a0.stats.getNumT3Timeouts(), "should be no retransmit")
 
 		closeAssociationPair(br, a0, a1)
