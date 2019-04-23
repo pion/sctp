@@ -1803,7 +1803,10 @@ func TestAssocDelayedAck(t *testing.T) {
 		sbuf := make([]byte, 4000) // size should be less than initial cwnd (4380)
 		rbuf := make([]byte, 4000)
 
-		_, _ = cryptoRand.Read(sbuf)
+		_, err := cryptoRand.Read(sbuf)
+		if !assert.Nil(t, err, "failed to create associations") {
+			return
+		}
 
 		br := test.NewBridge()
 
