@@ -389,7 +389,7 @@ func (a *Association) readLoop() {
 		n, err := a.netConn.Read(buffer)
 		if err != nil {
 			closeErr = err
-			return
+			break
 		}
 
 		if err = a.handleInbound(buffer[:n]); err != nil {
@@ -656,7 +656,28 @@ func setSupportedExtensions(init *chunkInitCommon) {
 }
 
 // The caller should hold the lock.
-func (a *Association) handleInit(p *packet, i *chunkInit) *packet {
+func (a *Association) handleInit(p *packet, i *chunkInit) ([]*packet, error) {
+	state := a.getState()
+	a.log.Debugf("[%s] chunkInit received in state '%s'", a.name(), getAssociationStateString(state))
+
+	// https://tools.ietf.org/html/rfc4960#section-5.2.1
+	// Upon receipt of an INIT in the COOKIE-WAIT state, an endpoint MUST
+	// respond with an INIT ACK using the same parameters it sent in its
+	// original INIT chunk (including its Initiate Tag, unchanged).  When
+	// responding, the endpoint MUST send the INIT ACK back to the same
+	// address that the original INIT (sent by this endpoint) was sent.
+
+	// https://tools.ietf.org/html/rfc4960#section-5.2.1
+	// Upon receipt of an INIT in the COOKIE-ECHOED state, an endpoint MUST
+	// respond with an INIT ACK using the same parameters it sent in its
+	// original INIT chunk (including its Initiate Tag, unchanged)
+
+	if state != closed && state != cookieWait && state != cookieEchoed {
+		// 5.2.2.  Unexpected INIT in States Other than CLOSED, COOKIE-ECHOED,
+		//        COOKIE-WAIT, and SHUTDOWN-ACK-SENT
+		return nil, errors.Errorf("todo: handle Init when in state %s", getAssociationStateString(state))
+	}
+
 	// Should we be setting any of these permanently until we've ACKed further?
 	a.myMaxNumInboundStreams = min16(i.numInboundStreams, a.myMaxNumInboundStreams)
 	a.myMaxNumOutboundStreams = min16(i.numOutboundStreams, a.myMaxNumOutboundStreams)
@@ -693,11 +714,23 @@ func (a *Association) handleInit(p *packet, i *chunkInit) *packet {
 
 	outbound.chunks = []chunk{initAck}
 
-	return outbound
+	return pack(outbound), nil
 }
 
 // The caller should hold the lock.
 func (a *Association) handleInitAck(p *packet, i *chunkInitAck) error {
+	state := a.getState()
+	a.log.Debugf("[%s] chunkInitAck received in state '%s'", a.name(), getAssociationStateString(state))
+	if state != cookieWait {
+		// RFC 4960
+		// 5.2.3.  Unexpected INIT ACK
+		//   If an INIT ACK is received by an endpoint in any state other than the
+		//   COOKIE-WAIT state, the endpoint should discard the INIT ACK chunk.
+		//   An unexpected INIT ACK usually indicates the processing of an old or
+		//   duplicated INIT chunk.
+		return nil
+	}
+
 	a.myMaxNumInboundStreams = min16(i.numInboundStreams, a.myMaxNumInboundStreams)
 	a.myMaxNumOutboundStreams = min16(i.numOutboundStreams, a.myMaxNumOutboundStreams)
 	a.peerVerificationTag = i.initiateTag
@@ -705,7 +738,7 @@ func (a *Association) handleInitAck(p *packet, i *chunkInitAck) error {
 	if a.sourcePort != p.destinationPort ||
 		a.destinationPort != p.sourcePort {
 		a.log.Warn("handleInitAck: port mismatch")
-		return a.silentError
+		return nil
 	}
 
 	a.rwnd = i.advertisedReceiverWindowCredit
@@ -747,7 +780,7 @@ func (a *Association) handleInitAck(p *packet, i *chunkInitAck) error {
 	}
 
 	a.t1Cookie.start(a.rtoMgr.getRTO())
-
+	a.setState(cookieEchoed)
 	return nil
 }
 
@@ -775,6 +808,12 @@ func (a *Association) handleHeartbeat(c *chunkHeartbeat) []*packet {
 
 // The caller should hold the lock.
 func (a *Association) handleCookieEcho(c *chunkCookieEcho) []*packet {
+	state := a.getState()
+	a.log.Debugf("[%s] COOKIE-ECHO received in state '%s'", a.name(), getAssociationStateString(state))
+	if state != closed && state != cookieWait && state != cookieEchoed {
+		return nil
+	}
+
 	if !bytes.Equal(a.myCookie.cookie, c.cookie) {
 		return nil
 	}
@@ -792,14 +831,28 @@ func (a *Association) handleCookieEcho(c *chunkCookieEcho) []*packet {
 		chunks:          []chunk{&chunkCookieAck{}},
 	}
 
+	a.setState(established)
+	a.handshakeCompletedCh <- nil
 	return pack(p)
 }
 
 // The caller should hold the lock.
 func (a *Association) handleCookieAck() []*packet {
-	// stop T1-cookie timer
+	state := a.getState()
+	a.log.Debugf("[%s] COOKIE-ACK received in state '%s'", a.name(), getAssociationStateString(state))
+	if state != cookieEchoed {
+		// RFC 4960
+		// 5.2.5.  Handle Duplicate COOKIE-ACK.
+		//   At any state other than COOKIE-ECHOED, an endpoint should silently
+		//   discard a received COOKIE ACK chunk.
+		return nil
+	}
+
 	a.t1Cookie.stop()
 	a.storedCookieEcho = nil
+
+	a.setState(established)
+	a.handshakeCompletedCh <- nil
 	return nil
 }
 
@@ -1155,6 +1208,11 @@ func (a *Association) processFastRetransmission(cumTSNAckPoint, htna uint32, cum
 // The caller should hold the lock.
 func (a *Association) handleSack(d *chunkSelectiveAck) ([]*packet, error) {
 	a.log.Tracef("SACK: cumTSN=%d a_rwnd=%d", d.cumulativeTSNAck, d.advertisedReceiverWindowCredit)
+	state := a.getState()
+	if state != established {
+		return nil, nil
+	}
+
 	a.stats.incSACKs()
 
 	if sna32GT(a.cumulativeTSNAckPoint, d.cumulativeTSNAck) {
@@ -1756,52 +1814,12 @@ func (a *Association) handleChunk(p *packet, c chunk) error {
 		// TODO: Create ABORT
 	}
 
-	state := a.getState()
 	switch c := c.(type) {
 	case *chunkInit:
-		a.log.Debugf("[%s] chunkInit received in state '%s'", a.name(), getAssociationStateString(state))
-		switch state {
-		case closed:
-			packets = pack(a.handleInit(p, c))
-		case cookieWait:
-			// https://tools.ietf.org/html/rfc4960#section-5.2.1
-			// Upon receipt of an INIT in the COOKIE-WAIT state, an endpoint MUST
-			// respond with an INIT ACK using the same parameters it sent in its
-			// original INIT chunk (including its Initiate Tag, unchanged).  When
-			// responding, the endpoint MUST send the INIT ACK back to the same
-			// address that the original INIT (sent by this endpoint) was sent.
-			packets = pack(a.handleInit(p, c))
-
-		case cookieEchoed:
-			// https://tools.ietf.org/html/rfc4960#section-5.2.1
-			// Upon receipt of an INIT in the COOKIE-ECHOED state, an endpoint MUST
-			// respond with an INIT ACK using the same parameters it sent in its
-			// original INIT chunk (including its Initiate Tag, unchanged)
-			err = errors.Errorf("todo: respond with original cookie %s", getAssociationStateString(state))
-		default:
-			// 5.2.2.  Unexpected INIT in States Other than CLOSED, COOKIE-ECHOED,
-			//        COOKIE-WAIT, and SHUTDOWN-ACK-SENT
-			err = errors.Errorf("todo: handle Init when in state %s", getAssociationStateString(state))
-		}
+		packets, err = a.handleInit(p, c)
 
 	case *chunkInitAck:
-		a.log.Debugf("[%s] chunkInitAck received in state '%s'", a.name(), getAssociationStateString(state))
-		if state == cookieWait {
-			err = a.handleInitAck(p, c)
-			if err != nil {
-				if err == a.silentError {
-					err = nil
-				}
-			} else {
-				a.setState(cookieEchoed)
-			}
-		}
-		// RFC 4960
-		// 5.2.3.  Unexpected INIT ACK
-		//   If an INIT ACK is received by an endpoint in any state other than the
-		//   COOKIE-WAIT state, the endpoint should discard the INIT ACK chunk.
-		//   An unexpected INIT ACK usually indicates the processing of an old or
-		//   duplicated INIT chunk.
+		err = a.handleInitAck(p, c)
 
 	case *chunkAbort:
 		a.log.Debugf("Abort chunk, with following errors:")
@@ -1819,44 +1837,20 @@ func (a *Association) handleChunk(p *packet, c chunk) error {
 		packets = a.handleHeartbeat(c)
 
 	case *chunkCookieEcho:
-		a.log.Debugf("[%s] chunkCookieEcho received in state '%s'", a.name(), getAssociationStateString(state))
-		if state == closed || state == cookieWait || state == cookieEchoed {
-			packets = a.handleCookieEcho(c)
-			a.setState(established)
-			a.handshakeCompletedCh <- nil
-		}
+		packets = a.handleCookieEcho(c)
 
 	case *chunkCookieAck:
-		a.log.Debugf("[%s] chunkCookieAck received in state '%s'", a.name(), getAssociationStateString(state))
-		if state == cookieEchoed {
-			packets = a.handleCookieAck()
-			a.setState(established)
-			a.log.Debugf("[%s] chunkCookieAck before handshakeCompletedCh", a.name())
-			a.handshakeCompletedCh <- nil
-			a.log.Debugf("[%s] chunkCookieAck after handshakeCompletedCh", a.name())
-		}
-		// RFC 4960
-		// 5.2.5.  Handle Duplicate COOKIE-ACK.
-		//   At any state other than COOKIE-ECHOED, an endpoint should silently
-		//   discard a received COOKIE ACK chunk.
+		packets = a.handleCookieAck()
 
-		// TODO Abort
 	case *chunkPayloadData:
 		packets = a.handleData(c)
 
 	case *chunkSelectiveAck:
-		if state == established {
-			packets, err = a.handleSack(c)
-			if err != nil {
-				err = errors.Wrap(err, "failure handling SACK")
-			}
-		}
+		packets, err = a.handleSack(c)
 
 	case *chunkReconfig:
 		packets, err = a.handleReconfig(c)
-		if err != nil {
-			err = errors.Wrap(err, "failure handling reconfig")
-		}
+
 	case *chunkForwardTSN:
 		packets = a.handleForwardTSN(c)
 
@@ -1868,7 +1862,7 @@ func (a *Association) handleChunk(p *packet, c chunk) error {
 		return err
 	}
 
-	if packets != nil && len(packets) > 0 {
+	if len(packets) > 0 {
 		a.controlQueue.pushAll(packets)
 		a.awakeWriteLoop()
 	}

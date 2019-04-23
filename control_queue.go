@@ -19,15 +19,6 @@ func (q *controlQueue) pushAll(packets []*packet) {
 	q.queue = append(q.queue, packets...)
 }
 
-func (q *controlQueue) pop() *packet {
-	if len(q.queue) == 0 {
-		return nil
-	}
-	c := q.queue[0]
-	q.queue = q.queue[1:]
-	return c
-}
-
 func (q *controlQueue) popAll() []*packet {
 	packets := q.queue
 	q.queue = []*packet{}
