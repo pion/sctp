@@ -390,14 +390,23 @@ func establishSessionPair(br *test.Bridge, a0, a1 *Association, si uint16) (*Str
 }
 
 func TestAssocReliable(t *testing.T) {
-	// sbuf - large enogh to be fragmented into two chunks and each chunks are
+	// sbuf - small enogh not to be fragmented
 	//        large enobh not to be bundled
-	sbuf := make([]byte, 2000)
+	sbuf := make([]byte, 1000)
 	for i := 0; i < len(sbuf); i++ {
 		sbuf[i] = byte(i & 0xff)
 	}
 	rand.Seed(time.Now().UnixNano())
 	rand.Shuffle(len(sbuf), func(i, j int) { sbuf[i], sbuf[j] = sbuf[j], sbuf[i] })
+
+	// sbufL - large enogh to be fragmented into two chunks and each chunks are
+	//        large enobh not to be bundled
+	sbufL := make([]byte, 2000)
+	for i := 0; i < len(sbufL); i++ {
+		sbufL[i] = byte(i & 0xff)
+	}
+	rand.Seed(time.Now().UnixNano())
+	rand.Shuffle(len(sbufL), func(i, j int) { sbufL[i], sbufL[j] = sbufL[j], sbufL[i] })
 
 	t.Run("Simple", func(t *testing.T) {
 		const si uint16 = 1
@@ -439,8 +448,6 @@ func TestAssocReliable(t *testing.T) {
 
 	t.Run("ordered reordered", func(t *testing.T) {
 		const si uint16 = 2
-		const msg1 = "ABC"
-		const msg2 = "DEFG"
 		var n int
 		var ppi PayloadProtocolIdentifier
 		br := test.NewBridge()
@@ -453,33 +460,39 @@ func TestAssocReliable(t *testing.T) {
 		s0, s1, err := establishSessionPair(br, a0, a1, si)
 		assert.Nil(t, err, "failed to establish session pair")
 
-		n, err = s0.WriteSCTP([]byte(msg1), PayloadTypeWebRTCBinary)
+		binary.BigEndian.PutUint32(sbuf, 0)
+		n, err = s0.WriteSCTP(sbuf, PayloadTypeWebRTCBinary)
 		assert.Nil(t, err, "WriteSCTP failed")
-		assert.Equal(t, n, len(msg1), "unexpected length of received data")
-		n, err = s0.WriteSCTP([]byte(msg2), PayloadTypeWebRTCBinary)
-		assert.Nil(t, err, "WriteSCTP failed")
-		assert.Equal(t, n, len(msg2), "unexpected length of received data")
+		assert.Equal(t, n, len(sbuf), "unexpected length of received data")
 
+		binary.BigEndian.PutUint32(sbuf, 1)
+		n, err = s0.WriteSCTP(sbuf, PayloadTypeWebRTCBinary)
+		assert.Nil(t, err, "WriteSCTP failed")
+		assert.Equal(t, n, len(sbuf), "unexpected length of received data")
+
+		time.Sleep(10 * time.Millisecond)
 		err = br.Reorder(0)
 		assert.Nil(t, err, "reorder failed")
 		br.Process()
 
-		buf := make([]byte, 32)
+		buf := make([]byte, 2000)
 
 		n, ppi, err = s1.ReadSCTP(buf)
 		if !assert.Nil(t, err, "ReadSCTP failed") {
 			assert.FailNow(t, "failed due to earlier error")
 		}
-		assert.Equal(t, n, len(msg1), "unexpected length of received data")
-		assert.Equal(t, msg1, string(buf[:n]), "unexpected received data")
+		assert.Equal(t, n, len(sbuf), "unexpected length of received data")
+		assert.Equal(t, uint32(0), binary.BigEndian.Uint32(buf[:n]),
+			"unexpected received data")
 		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
 
 		n, ppi, err = s1.ReadSCTP(buf)
 		if !assert.Nil(t, err, "ReadSCTP failed") {
 			assert.FailNow(t, "failed due to earlier error")
 		}
-		assert.Equal(t, n, len(msg2), "unexpected length of received data")
-		assert.Equal(t, msg2, string(buf[:n]), "unexpected received data")
+		assert.Equal(t, n, len(sbuf), "unexpected length of received data")
+		assert.Equal(t, uint32(1), binary.BigEndian.Uint32(buf[:n]),
+			"unexpected received data")
 		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
 
 		br.Process()
@@ -504,12 +517,10 @@ func TestAssocReliable(t *testing.T) {
 		s0.SetReliabilityParams(false, ReliabilityTypeReliable, 0)
 		s1.SetReliabilityParams(false, ReliabilityTypeReliable, 0)
 
-		n, err = s0.WriteSCTP(sbuf, PayloadTypeWebRTCBinary)
+		n, err = s0.WriteSCTP(sbufL, PayloadTypeWebRTCBinary)
 		assert.Nil(t, err, "WriteSCTP failed")
-		assert.Equal(t, n, len(sbuf), "unexpected length of received data")
+		assert.Equal(t, n, len(sbufL), "unexpected length of received data")
 
-		err = br.Reorder(0)
-		assert.Nil(t, err, "reorder failed")
 		br.Process()
 
 		rbuf := make([]byte, 2000)
@@ -521,8 +532,8 @@ func TestAssocReliable(t *testing.T) {
 			assert.FailNow(t, "failed due to earlier error")
 		}
 
-		assert.Equal(t, n, len(sbuf), "unexpected length of received data")
-		assert.Equal(t, sbuf, rbuf[:n], "unexpected received data")
+		assert.Equal(t, n, len(sbufL), "unexpected length of received data")
+		assert.Equal(t, sbufL, rbuf[:n], "unexpected received data")
 		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
 
 		br.Process()
@@ -547,12 +558,10 @@ func TestAssocReliable(t *testing.T) {
 		s0.SetReliabilityParams(true, ReliabilityTypeReliable, 0)
 		s1.SetReliabilityParams(true, ReliabilityTypeReliable, 0)
 
-		n, err = s0.WriteSCTP(sbuf, PayloadTypeWebRTCBinary)
+		n, err = s0.WriteSCTP(sbufL, PayloadTypeWebRTCBinary)
 		assert.Nil(t, err, "WriteSCTP failed")
-		assert.Equal(t, n, len(sbuf), "unexpected length of received data")
+		assert.Equal(t, n, len(sbufL), "unexpected length of received data")
 
-		err = br.Reorder(0)
-		assert.Nil(t, err, "reorder failed")
 		br.Process()
 
 		rbuf := make([]byte, 2000)
@@ -564,8 +573,8 @@ func TestAssocReliable(t *testing.T) {
 			assert.FailNow(t, "failed due to earlier error")
 		}
 
-		assert.Equal(t, n, len(sbuf), "unexpected length of received data")
-		assert.Equal(t, sbuf, rbuf[:n], "unexpected received data")
+		assert.Equal(t, n, len(sbufL), "unexpected length of received data")
+		assert.Equal(t, sbufL, rbuf[:n], "unexpected received data")
 		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
 
 		br.Process()
@@ -573,10 +582,8 @@ func TestAssocReliable(t *testing.T) {
 		closeAssociationPair(br, a0, a1)
 	})
 
-	t.Run("unordered", func(t *testing.T) {
+	t.Run("unordered reordered", func(t *testing.T) {
 		const si uint16 = 5
-		const msg1 = "ABC"
-		const msg2 = "DEFG"
 		var n int
 		var ppi PayloadProtocolIdentifier
 		br := test.NewBridge()
@@ -592,25 +599,28 @@ func TestAssocReliable(t *testing.T) {
 		s0.SetReliabilityParams(true, ReliabilityTypeReliable, 0)
 		s1.SetReliabilityParams(true, ReliabilityTypeReliable, 0)
 
-		n, err = s0.WriteSCTP([]byte(msg1), PayloadTypeWebRTCBinary)
-		assert.Nil(t, err, "WriteSCTP failed")
-		assert.Equal(t, n, len(msg1), "unexpected length of received data")
-		n, err = s0.WriteSCTP([]byte(msg2), PayloadTypeWebRTCBinary)
-		assert.Nil(t, err, "WriteSCTP failed")
-		assert.Equal(t, n, len(msg2), "unexpected length of received data")
+		br.ReorderNextNWrites(0, 2)
 
-		err = br.Reorder(0)
-		assert.Nil(t, err, "reorder failed")
+		binary.BigEndian.PutUint32(sbuf, 0)
+		n, err = s0.WriteSCTP(sbuf, PayloadTypeWebRTCBinary)
+		assert.Nil(t, err, "WriteSCTP failed")
+		assert.Equal(t, n, len(sbuf), "unexpected length of received data")
+
+		binary.BigEndian.PutUint32(sbuf, 1)
+		n, err = s0.WriteSCTP(sbuf, PayloadTypeWebRTCBinary)
+		assert.Nil(t, err, "WriteSCTP failed")
+		assert.Equal(t, n, len(sbuf), "unexpected length of received data")
+
 		br.Process()
 
-		buf := make([]byte, 32)
+		buf := make([]byte, 2000)
 
 		n, ppi, err = s1.ReadSCTP(buf)
 		if !assert.Nil(t, err, "ReadSCTP failed") {
 			assert.FailNow(t, "failed due to earlier error")
 		}
-		assert.Equal(t, n, len(msg2), "unexpected length of received data")
-		assert.Equal(t, msg2, string(buf[:n]), "unexpected received data")
+		assert.Equal(t, n, len(sbuf), "unexpected length of received data")
+		assert.Equal(t, uint32(1), binary.BigEndian.Uint32(buf[:n]), "unexpected received data")
 		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
 
 		br.Process()
@@ -620,8 +630,8 @@ func TestAssocReliable(t *testing.T) {
 			assert.FailNow(t, "failed due to earlier error")
 		}
 
-		assert.Equal(t, n, len(msg1), "unexpected length of received data")
-		assert.Equal(t, msg1, string(buf[:n]), "unexpected received data")
+		assert.Equal(t, n, len(sbuf), "unexpected length of received data")
+		assert.Equal(t, uint32(0), binary.BigEndian.Uint32(buf[:n]), "unexpected received data")
 		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
 
 		br.Process()
@@ -688,9 +698,6 @@ func TestAssocReliable(t *testing.T) {
 }
 
 func TestAssocUnreliable(t *testing.T) {
-	const msg1 = "ABCDEFGHIJ"
-	const msg2 = "KLMNOPQRST"
-
 	// sbuf1, sbuf2:
 	//    large enogh to be fragmented into two chunks and each chunks are
 	//    large enobh not to be bundled
@@ -706,6 +713,15 @@ func TestAssocUnreliable(t *testing.T) {
 	}
 	rand.Seed(time.Now().UnixNano())
 	rand.Shuffle(len(sbuf2), func(i, j int) { sbuf2[i], sbuf2[j] = sbuf2[j], sbuf2[i] })
+
+	// sbuf - small enogh not to be fragmented
+	//        large enobh not to be bundled
+	sbuf := make([]byte, 1000)
+	for i := 0; i < len(sbuf); i++ {
+		sbuf[i] = byte(i & 0xff)
+	}
+	rand.Seed(time.Now().UnixNano())
+	rand.Shuffle(len(sbuf), func(i, j int) { sbuf[i], sbuf[j] = sbuf[j], sbuf[i] })
 
 	t.Run("Rexmit ordered no fragment", func(t *testing.T) {
 		const si uint16 = 1
@@ -724,29 +740,33 @@ func TestAssocUnreliable(t *testing.T) {
 		s0.SetReliabilityParams(false, ReliabilityTypeRexmit, 0)
 		s1.SetReliabilityParams(false, ReliabilityTypeRexmit, 0) // doesn't matter
 
+		br.DropNextNWrites(0, 1) // drop the first packet (second one should be sacked)
+
 		var n int
-		n, err = s0.WriteSCTP([]byte(msg1), PayloadTypeWebRTCBinary)
+		binary.BigEndian.PutUint32(sbuf, uint32(0))
+		n, err = s0.WriteSCTP(sbuf, PayloadTypeWebRTCBinary)
 		if err != nil {
 			assert.FailNow(t, "failed due to earlier error")
 		}
-		assert.Equal(t, len(msg1), n, "unexpected length of written data")
+		assert.Equal(t, len(sbuf), n, "unexpected length of written data")
 
-		n, err = s0.WriteSCTP([]byte(msg2), PayloadTypeWebRTCBinary)
+		binary.BigEndian.PutUint32(sbuf, uint32(1))
+		n, err = s0.WriteSCTP(sbuf, PayloadTypeWebRTCBinary)
 		if err != nil {
 			assert.FailNow(t, "failed due to earlier error")
 		}
-		assert.Equal(t, len(msg2), n, "unexpected length of written data")
+		assert.Equal(t, len(sbuf), n, "unexpected length of written data")
 
-		br.Drop(0, 0, 1) // drop the first packet (second one should be sacked)
 		br.Process()
 
-		buf := make([]byte, 32)
+		buf := make([]byte, 2000)
 		n, ppi, err := s1.ReadSCTP(buf)
 		if !assert.Nil(t, err, "ReadSCTP failed") {
 			assert.FailNow(t, "failed due to earlier error")
 		}
 		// should receive the second one only
-		assert.Equal(t, msg2, string(buf[:n]), "unexpected received data")
+		assert.Equal(t, len(sbuf), n, "unexpected length of written data")
+		assert.Equal(t, uint32(1), binary.BigEndian.Uint32(buf[:n]), "unexpected received data")
 		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
 
 		br.Process()
@@ -774,6 +794,8 @@ func TestAssocUnreliable(t *testing.T) {
 		s0.SetReliabilityParams(false, ReliabilityTypeRexmit, 0)
 		s1.SetReliabilityParams(false, ReliabilityTypeRexmit, 0) // doesn't matter
 
+		br.DropNextNWrites(0, 1) // drop the first fragment of the first chunk (second chunk should be sacked)
+
 		var n int
 		n, err = s0.WriteSCTP(sbuf1, PayloadTypeWebRTCBinary)
 		if err != nil {
@@ -787,7 +809,6 @@ func TestAssocUnreliable(t *testing.T) {
 		}
 		assert.Equal(t, len(sbuf2), n, "unexpected length of written data")
 
-		br.Drop(0, 0, 2) // drop the second fragment of the first chunk (second chunk should be sacked)
 		br.Process()
 
 		rbuf := make([]byte, 2000)
@@ -823,29 +844,33 @@ func TestAssocUnreliable(t *testing.T) {
 		s0.SetReliabilityParams(true, ReliabilityTypeRexmit, 0)
 		s1.SetReliabilityParams(true, ReliabilityTypeRexmit, 0) // doesn't matter
 
+		br.DropNextNWrites(0, 1) // drop the first packet (second one should be sacked)
+
 		var n int
-		n, err = s0.WriteSCTP([]byte(msg1), PayloadTypeWebRTCBinary)
+		binary.BigEndian.PutUint32(sbuf, uint32(0))
+		n, err = s0.WriteSCTP(sbuf, PayloadTypeWebRTCBinary)
 		if err != nil {
 			assert.FailNow(t, "failed due to earlier error")
 		}
-		assert.Equal(t, len(msg1), n, "unexpected length of written data")
+		assert.Equal(t, len(sbuf), n, "unexpected length of written data")
 
-		n, err = s0.WriteSCTP([]byte(msg2), PayloadTypeWebRTCBinary)
+		binary.BigEndian.PutUint32(sbuf, uint32(1))
+		n, err = s0.WriteSCTP(sbuf, PayloadTypeWebRTCBinary)
 		if err != nil {
 			assert.FailNow(t, "failed due to earlier error")
 		}
-		assert.Equal(t, len(msg2), n, "unexpected length of written data")
+		assert.Equal(t, len(sbuf), n, "unexpected length of written data")
 
-		br.Drop(0, 0, 1) // drop the first packet (second one should be sacked)
 		br.Process()
 
-		buf := make([]byte, 32)
+		buf := make([]byte, 2000)
 		n, ppi, err := s1.ReadSCTP(buf)
 		if !assert.Nil(t, err, "ReadSCTP failed") {
 			assert.FailNow(t, "failed due to earlier error")
 		}
 		// should receive the second one only
-		assert.Equal(t, msg2, string(buf[:n]), "unexpected received data")
+		assert.Equal(t, len(sbuf), n, "unexpected length of written data")
+		assert.Equal(t, uint32(1), binary.BigEndian.Uint32(buf[:n]), "unexpected received data")
 		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
 
 		br.Process()
@@ -883,6 +908,7 @@ func TestAssocUnreliable(t *testing.T) {
 		}
 		assert.Equal(t, len(sbuf2), n, "unexpected length of written data")
 
+		time.Sleep(10 * time.Millisecond)
 		br.Drop(0, 0, 2) // drop the second fragment of the first chunk (second chunk should be sacked)
 		br.Process()
 
@@ -920,29 +946,34 @@ func TestAssocUnreliable(t *testing.T) {
 		s0.SetReliabilityParams(false, ReliabilityTypeTimed, 0)
 		s1.SetReliabilityParams(false, ReliabilityTypeTimed, 0) // doesn't matter
 
+		br.DropNextNWrites(0, 1) // drop the first packet (second one should be sacked)
+
 		var n int
-		n, err = s0.WriteSCTP([]byte(msg1), PayloadTypeWebRTCBinary)
+		binary.BigEndian.PutUint32(sbuf, uint32(0))
+		n, err = s0.WriteSCTP(sbuf, PayloadTypeWebRTCBinary)
 		if err != nil {
 			assert.FailNow(t, "failed due to earlier error")
 		}
-		assert.Equal(t, len(msg1), n, "unexpected length of written data")
+		assert.Equal(t, len(sbuf), n, "unexpected length of written data")
 
-		n, err = s0.WriteSCTP([]byte(msg2), PayloadTypeWebRTCBinary)
+		binary.BigEndian.PutUint32(sbuf, uint32(1))
+		n, err = s0.WriteSCTP(sbuf, PayloadTypeWebRTCBinary)
 		if err != nil {
 			assert.FailNow(t, "failed due to earlier error")
 		}
-		assert.Equal(t, len(msg2), n, "unexpected length of written data")
+		assert.Equal(t, len(sbuf), n, "unexpected length of written data")
 
-		br.Drop(0, 0, 1) // drop the first packet (second one should be sacked)
+		//br.Drop(0, 0, 1) // drop the first packet (second one should be sacked)
 		br.Process()
 
-		buf := make([]byte, 32)
+		buf := make([]byte, 2000)
 		n, ppi, err := s1.ReadSCTP(buf)
 		if !assert.Nil(t, err, "ReadSCTP failed") {
 			assert.FailNow(t, "failed due to earlier error")
 		}
 		// should receive the second one only
-		assert.Equal(t, msg2, string(buf[:n]), "unexpected received data")
+		assert.Equal(t, len(sbuf), n, "unexpected length of written data")
+		assert.Equal(t, uint32(1), binary.BigEndian.Uint32(buf[:n]), "unexpected received data")
 		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
 
 		br.Process()
@@ -967,29 +998,33 @@ func TestAssocUnreliable(t *testing.T) {
 		s0.SetReliabilityParams(true, ReliabilityTypeTimed, 0)
 		s1.SetReliabilityParams(true, ReliabilityTypeTimed, 0) // doesn't matter
 
+		br.DropNextNWrites(0, 1) // drop the first packet (second one should be sacked)
+
 		var n int
-		n, err = s0.WriteSCTP([]byte(msg1), PayloadTypeWebRTCBinary)
+		binary.BigEndian.PutUint32(sbuf, uint32(0))
+		n, err = s0.WriteSCTP(sbuf, PayloadTypeWebRTCBinary)
 		if err != nil {
 			assert.FailNow(t, "failed due to earlier error")
 		}
-		assert.Equal(t, len(msg1), n, "unexpected length of written data")
+		assert.Equal(t, len(sbuf), n, "unexpected length of written data")
 
-		n, err = s0.WriteSCTP([]byte(msg2), PayloadTypeWebRTCBinary)
+		binary.BigEndian.PutUint32(sbuf, uint32(1))
+		n, err = s0.WriteSCTP(sbuf, PayloadTypeWebRTCBinary)
 		if err != nil {
 			assert.FailNow(t, "failed due to earlier error")
 		}
-		assert.Equal(t, len(msg2), n, "unexpected length of written data")
+		assert.Equal(t, len(sbuf), n, "unexpected length of written data")
 
-		br.Drop(0, 0, 1) // drop the first packet (second one should be sacked)
 		br.Process()
 
-		buf := make([]byte, 32)
+		buf := make([]byte, 2000)
 		n, ppi, err := s1.ReadSCTP(buf)
 		if !assert.Nil(t, err, "ReadSCTP failed") {
 			assert.FailNow(t, "failed due to earlier error")
 		}
 		// should receive the second one only
-		assert.Equal(t, msg2, string(buf[:n]), "unexpected received data")
+		assert.Equal(t, len(sbuf), n, "unexpected length of written data")
+		assert.Equal(t, uint32(1), binary.BigEndian.Uint32(buf[:n]), "unexpected received data")
 		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
 
 		br.Process()
@@ -1111,7 +1146,8 @@ func TestHandleForwardTSN(t *testing.T) {
 		p := a.handleForwardTSN(fwdtsn)
 
 		assert.Equal(t, a.peerLastTSN, prevTSN+3, "peerLastTSN should advance by 3 ")
-		assert.Nil(t, p, "no sack should be generated")
+		assert.Equal(t, ackStateIdle, a.ackState, "sack should not be requested")
+		assert.Nil(t, p, "should return nil")
 	})
 
 	t.Run("forward 1 then one more for received chunk", func(t *testing.T) {
@@ -1142,7 +1178,8 @@ func TestHandleForwardTSN(t *testing.T) {
 		p := a.handleForwardTSN(fwdtsn)
 
 		assert.Equal(t, a.peerLastTSN, prevTSN+2, "peerLastTSN should advance by 3 ")
-		assert.Nil(t, p, "no sack should be generated")
+		assert.Equal(t, ackStateIdle, a.ackState, "sack should not be requested")
+		assert.Nil(t, p, "should return nil")
 	})
 
 	t.Run("dup forward TSN chunk should generate sack", func(t *testing.T) {
@@ -1163,7 +1200,8 @@ func TestHandleForwardTSN(t *testing.T) {
 		p := a.handleForwardTSN(fwdtsn)
 
 		assert.Equal(t, a.peerLastTSN, prevTSN, "peerLastTSN should not advance")
-		assert.NotNil(t, p, "sack should be generated")
+		assert.Equal(t, ackStateImmediate, a.ackState, "sack should be requested")
+		assert.Nil(t, p, "should return nil")
 	})
 }
 
@@ -1176,12 +1214,10 @@ func TestAssocT1InitTimer(t *testing.T) {
 			NetConn:       br.GetConn0(),
 			LoggerFactory: loggerFactory,
 		})
-		go a0.readLoop()
 		a1 := createAssociation(Config{
 			NetConn:       br.GetConn1(),
 			LoggerFactory: loggerFactory,
 		})
-		go a1.readLoop()
 
 		var err0, err1 error
 		a0ReadyCh := make(chan bool)
@@ -1207,7 +1243,8 @@ func TestAssocT1InitTimer(t *testing.T) {
 		br.DropNextNWrites(0, 1)
 
 		// Start the handlshake
-		a0.init()
+		a0.init(true)
+		a1.init(true)
 
 		a0Ready := false
 		a1Ready := false
@@ -1234,12 +1271,10 @@ func TestAssocT1InitTimer(t *testing.T) {
 			NetConn:       br.GetConn0(),
 			LoggerFactory: loggerFactory,
 		})
-		go a0.readLoop()
 		a1 := createAssociation(Config{
 			NetConn:       br.GetConn1(),
 			LoggerFactory: loggerFactory,
 		})
-		go a1.readLoop()
 
 		var err0, err1 error
 		a0ReadyCh := make(chan bool)
@@ -1271,8 +1306,8 @@ func TestAssocT1InitTimer(t *testing.T) {
 		br.DropNextNWrites(1, 99)
 
 		// Start the handlshake
-		a0.init()
-		a1.init()
+		a0.init(true)
+		a1.init(true)
 
 		a0Ready := false
 		a1Ready := false
@@ -1303,12 +1338,10 @@ func TestAssocT1CookieTimer(t *testing.T) {
 			NetConn:       br.GetConn0(),
 			LoggerFactory: loggerFactory,
 		})
-		go a0.readLoop()
 		a1 := createAssociation(Config{
 			NetConn:       br.GetConn1(),
 			LoggerFactory: loggerFactory,
 		})
-		go a1.readLoop()
 
 		var err0, err1 error
 		a0ReadyCh := make(chan bool)
@@ -1331,7 +1364,8 @@ func TestAssocT1CookieTimer(t *testing.T) {
 		}()
 
 		// Start the handlshake
-		a0.init()
+		a0.init(true)
+		a1.init(true)
 
 		// Let the INIT go.
 		br.Tick()
@@ -1364,12 +1398,10 @@ func TestAssocT1CookieTimer(t *testing.T) {
 			NetConn:       br.GetConn0(),
 			LoggerFactory: loggerFactory,
 		})
-		go a0.readLoop()
 		a1 := createAssociation(Config{
 			NetConn:       br.GetConn1(),
 			LoggerFactory: loggerFactory,
 		})
-		go a1.readLoop()
 
 		var err0 error
 		a0ReadyCh := make(chan bool)
@@ -1387,14 +1419,25 @@ func TestAssocT1CookieTimer(t *testing.T) {
 			a0ReadyCh <- true
 		}()
 
+		// Drop all COOKIE-ECHO
+		br.Filter(0, func(raw []byte) bool {
+			p := &packet{}
+			err := p.unmarshal(raw)
+			if !assert.Nil(t, err, "failed to parse packet") {
+				return false // drop
+			}
+			for _, c := range p.chunks {
+				switch c.(type) {
+				case *chunkCookieEcho:
+					return false // drop
+				}
+			}
+			return true
+		})
+
 		// Start the handlshake
-		a0.init()
-
-		// Let the INIT go.
-		br.Tick()
-
-		// Drop COOKIE-ECHO
-		br.DropNextNWrites(0, 99)
+		a0.init(true)
+		a1.init(false)
 
 		a0Ready := false
 		for !a0Ready {
@@ -1406,7 +1449,10 @@ func TestAssocT1CookieTimer(t *testing.T) {
 			}
 		}
 
-		assert.NotNil(t, err0, "should an error")
+		assert.NotNil(t, err0, "should be an error")
+
+		time.Sleep(1000 * time.Millisecond)
+		br.Process()
 
 		_ = a0.Close() // #nosec
 		_ = a1.Close() // #nosec
