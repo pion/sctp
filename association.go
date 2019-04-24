@@ -463,29 +463,49 @@ func (a *Association) handleInbound(raw []byte) error {
 func (a *Association) handleOutbound() error {
 	a.lock.Lock()
 
-	packets := []*packet{}
+	rawPackets := [][]byte{}
+
 	if a.controlQueue.size() > 0 {
-		packets = append(packets, a.controlQueue.popAll()...)
+		for _, p := range a.controlQueue.popAll() {
+			raw, err := p.marshal()
+			if err != nil {
+				a.log.Warn("failed to serialize a control packet")
+				continue
+			}
+			rawPackets = append(rawPackets, raw)
+		}
 	}
 
 	state := a.getState()
 
 	if state == established {
-		if !a.willRetransmitDataChunks {
-			// Pop unsent data chunks from the pending queue to send as much as
-			// cwnd and rwnd allow.
-			chunks := a.popPendingDataChunksToSend()
-			if len(chunks) > 0 {
-				// Start timer. (noop if already started)
-				a.log.Tracef("[%s] T3-rtx timer start (pt1)", a.name())
-				a.t3RTX.start(a.rtoMgr.getRTO())
-
-				packets = append(packets, a.bundleDataChunksIntoPackets(chunks)...)
-			}
-		} else {
+		if a.willRetransmitDataChunks {
 			a.willRetransmitDataChunks = false
+			for _, p := range a.getDataPacketsToRetransmit() {
+				raw, err := p.marshal()
+				if err != nil {
+					a.log.Warn("failed to serialize a DATA packet to be retransmitted")
+					continue
+				}
+				rawPackets = append(rawPackets, raw)
+			}
+		}
 
-			packets = append(packets, a.getDataPacketsToRetransmit()...)
+		// Pop unsent data chunks from the pending queue to send as much as
+		// cwnd and rwnd allow.
+		chunks := a.popPendingDataChunksToSend()
+		if len(chunks) > 0 {
+			// Start timer. (noop if already started)
+			a.log.Tracef("[%s] T3-rtx timer start (pt1)", a.name())
+			a.t3RTX.start(a.rtoMgr.getRTO())
+			for _, p := range a.bundleDataChunksIntoPackets(chunks) {
+				raw, err := p.marshal()
+				if err != nil {
+					a.log.Warn("failed to serialize a DATA packet")
+					continue
+				}
+				rawPackets = append(rawPackets, raw)
+			}
 		}
 
 		if a.willRetransmitFast {
@@ -517,46 +537,59 @@ func (a *Association) handleOutbound() error {
 				//      Retransmit is being performed, the sender SHOULD ignore the value
 				//      of cwnd and SHOULD NOT delay retransmission for this single
 				//		packet.
+
 				dataChunkSize := dataChunkHeaderSize + uint32(len(c.userData))
-				if a.mtu-fastRetransSize >= dataChunkSize {
-					fastRetransSize += dataChunkSize
-					a.stats.incFastRetrans()
-					c.nSent++
-					a.checkPartialReliabilityStatus(c)
-					toFastRetrans = append(toFastRetrans, c)
-					a.log.Tracef("fast-retransmit: tsn=%d sent=%d htna=%d", c.tsn, c.nSent, a.fastRecoverExitPoint)
+				if a.mtu < fastRetransSize+dataChunkSize {
+					break
 				}
+
+				fastRetransSize += dataChunkSize
+				a.stats.incFastRetrans()
+				c.nSent++
+				a.checkPartialReliabilityStatus(c)
+				toFastRetrans = append(toFastRetrans, c)
+				a.log.Tracef("fast-retransmit: tsn=%d sent=%d htna=%d", c.tsn, c.nSent, a.fastRecoverExitPoint)
 			}
 
 			if len(toFastRetrans) > 0 {
-				packets = append(packets, a.createPacket(toFastRetrans))
+				raw, err := a.createPacket(toFastRetrans).marshal()
+				if err != nil {
+					a.log.Warn("failed to serialize a DATA packet to be fast-retransmitted")
+				} else {
+					rawPackets = append(rawPackets, raw)
+				}
 			}
 		}
 
 		if a.ackState == ackStateImmediate {
 			a.ackState = ackStateIdle
-			p := &packet{}
-			p.verificationTag = a.peerVerificationTag
-			p.sourcePort = a.sourcePort
-			p.destinationPort = a.destinationPort
 			sack := a.createSelectiveAckChunk()
-			p.chunks = []chunk{sack}
-			packets = append(packets, p)
+			raw, err := a.createPacket([]chunk{sack}).marshal()
+			if err != nil {
+				a.log.Warn("failed to serialize a SACK packet")
+			} else {
+				rawPackets = append(rawPackets, raw)
+			}
 		}
 
 		if a.willSendForwardTSN {
 			a.willSendForwardTSN = false
 			if sna32GT(a.advancedPeerTSNAckPoint, a.cumulativeTSNAckPoint) {
 				fwdtsn := a.createForwardTSN()
-				packets = append(packets, a.createPacket([]chunk{fwdtsn}))
+				raw, err := a.createPacket([]chunk{fwdtsn}).marshal()
+				if err != nil {
+					a.log.Warn("failed to serialize a Forward TSN packet")
+				} else {
+					rawPackets = append(rawPackets, raw)
+				}
 			}
 		}
 	}
 
 	a.lock.Unlock()
 
-	for _, p := range packets {
-		err := a.send(p)
+	for _, raw := range rawPackets {
+		_, err := a.netConn.Write(raw)
 		if err != nil {
 			return errors.Wrap(err, "failed sending on netConn")
 		}
@@ -1206,11 +1239,11 @@ func (a *Association) processFastRetransmission(cumTSNAckPoint, htna uint32, cum
 }
 
 // The caller should hold the lock.
-func (a *Association) handleSack(d *chunkSelectiveAck) ([]*packet, error) {
+func (a *Association) handleSack(d *chunkSelectiveAck) error {
 	a.log.Tracef("SACK: cumTSN=%d a_rwnd=%d", d.cumulativeTSNAck, d.advertisedReceiverWindowCredit)
 	state := a.getState()
 	if state != established {
-		return nil, nil
+		return nil
 	}
 
 	a.stats.incSACKs()
@@ -1228,13 +1261,13 @@ func (a *Association) handleSack(d *chunkSelectiveAck) ([]*packet, error) {
 			d.cumulativeTSNAck,
 			a.cumulativeTSNAckPoint)
 
-		return nil, nil
+		return nil
 	}
 
 	// Process selective ack
 	totalBytesAcked, htna, err := a.processSelectiveAck(d)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	// New rwnd value
@@ -1266,10 +1299,8 @@ func (a *Association) handleSack(d *chunkSelectiveAck) ([]*packet, error) {
 
 	err = a.processFastRetransmission(d.cumulativeTSNAck, htna, cumTSNAckPointAdvanced)
 	if err != nil {
-		return nil, err
+		return err
 	}
-
-	packets := []*packet{}
 
 	if a.useForwardTSN {
 		// RFC 3758 Sec 3.5 C1
@@ -1294,18 +1325,17 @@ func (a *Association) handleSack(d *chunkSelectiveAck) ([]*packet, error) {
 		a.awakeWriteLoop()
 	}
 
-	chunks := a.popPendingDataChunksToSend()
-	if len(chunks) > 0 {
-		packets = append(packets, a.bundleDataChunksIntoPackets(chunks)...)
-	}
-
 	if a.inflightQueue.size() > 0 {
 		// Start timer. (noop if already started)
 		a.log.Tracef("[%s] T3-rtx timer start (pt3)", a.name())
 		a.t3RTX.start(a.rtoMgr.getRTO())
 	}
 
-	return packets, nil
+	if cumTSNAckPointAdvanced {
+		a.awakeWriteLoop()
+	}
+
+	return nil
 }
 
 // createForwardTSN generates ForwardTSN chunk.
@@ -1776,18 +1806,13 @@ func (a *Association) generateNextRSN() uint32 {
 	return rsn
 }
 
+/*
 // send sends a packet over netConn.
 func (a *Association) send(p *packet) error {
-	a.lock.Lock()
-	raw, err := p.marshal()
-	a.lock.Unlock()
-	if err != nil {
-		return errors.Wrap(err, "failed to send packet to outbound handler")
-	}
-
 	_, err = a.netConn.Write(raw)
 	return err
 }
+*/
 
 func (a *Association) createSelectiveAckChunk() *chunkSelectiveAck {
 	sack := &chunkSelectiveAck{}
@@ -1846,7 +1871,7 @@ func (a *Association) handleChunk(p *packet, c chunk) error {
 		packets = a.handleData(c)
 
 	case *chunkSelectiveAck:
-		packets, err = a.handleSack(c)
+		err = a.handleSack(c)
 
 	case *chunkReconfig:
 		packets, err = a.handleReconfig(c)

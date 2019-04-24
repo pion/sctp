@@ -6,7 +6,7 @@ import (
 )
 
 const (
-	ackInterval float64 = 200 // msec
+	ackInterval time.Duration = 200 * time.Millisecond
 )
 
 // ackTimerObserver is the inteface to an ack timer observer.
@@ -17,7 +17,7 @@ type ackTimerObserver interface {
 // ackTimer provides the retnransmission timer conforms with RFC 4960 Sec 6.3.1
 type ackTimer struct {
 	observer ackTimerObserver
-	interval float64
+	interval time.Duration
 	stopFunc stopAckTimerLoop
 	closed   bool
 	mutex    sync.RWMutex
@@ -54,7 +54,7 @@ func (t *ackTimer) start() bool {
 		closing := false
 
 		for !closing {
-			timer := time.NewTimer(time.Duration(t.interval) * time.Millisecond)
+			timer := time.NewTimer(t.interval)
 
 			select {
 			case <-timer.C:
