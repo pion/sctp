@@ -35,12 +35,12 @@ func newRTOManager() *rtoManager {
 }
 
 // setNewRTT takes a newly measured RTT then adjust the RTO in msec.
-func (m *rtoManager) setNewRTT(rtt float64) {
+func (m *rtoManager) setNewRTT(rtt float64) float64 {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
 	if m.noUpdate {
-		return
+		return m.srtt
 	}
 
 	if m.srtt == 0 {
@@ -53,6 +53,7 @@ func (m *rtoManager) setNewRTT(rtt float64) {
 		m.srtt = (1-rtoAlpha)*m.srtt + rtoAlpha*rtt
 	}
 	m.rto = math.Min(math.Max(m.srtt+4*m.rttvar, rtoMin), rtoMax)
+	return m.srtt
 }
 
 // getRTO simply returns the current RTO in msec.
