@@ -487,6 +487,7 @@ func (a *Association) handleOutbound() error {
 					a.log.Warn("failed to serialize a DATA packet to be retransmitted")
 					continue
 				}
+				a.log.Debugf("retransmitting %d bytes", len(raw))
 				rawPackets = append(rawPackets, raw)
 			}
 		}
@@ -891,7 +892,7 @@ func (a *Association) handleCookieAck() []*packet {
 
 // The caller should hold the lock.
 func (a *Association) handleData(d *chunkPayloadData) []*packet {
-	a.log.Tracef("DATA: tsn=%d immediateSack=%v", d.tsn, d.immediateSack)
+	a.log.Tracef("[%s] DATA: tsn=%d immediateSack=%v", a.name(), d.tsn, d.immediateSack)
 	a.stats.incDATAs()
 
 	canPush := a.payloadQueue.canPush(d, a.peerLastTSN)
@@ -1072,8 +1073,8 @@ func (a *Association) processSelectiveAck(d *chunkSelectiveAck) (int, uint32, er
 			if c.nSent == 1 && sna32GTE(c.tsn, a.minTSN2MeasureRTT) {
 				a.minTSN2MeasureRTT = a.myNextTSN
 				rtt := time.Since(c.since).Seconds() * 1000.0
-				a.rtoMgr.setNewRTT(rtt)
-				a.log.Tracef("SACK: measured-rtt=%f new-rto=%f", rtt, a.rtoMgr.getRTO())
+				srtt := a.rtoMgr.setNewRTT(rtt)
+				a.log.Tracef("SACK: measured-rtt=%f srtt=%f new-rto=%f", rtt, srtt, a.rtoMgr.getRTO())
 			}
 		}
 
@@ -1112,8 +1113,8 @@ func (a *Association) processSelectiveAck(d *chunkSelectiveAck) (int, uint32, er
 				if c.nSent == 1 {
 					a.minTSN2MeasureRTT = a.myNextTSN
 					rtt := time.Since(c.since).Seconds() * 1000.0
-					a.rtoMgr.setNewRTT(rtt)
-					a.log.Tracef("SACK: measured-rtt=%f new-rto=%f", rtt, a.rtoMgr.getRTO())
+					srtt := a.rtoMgr.setNewRTT(rtt)
+					a.log.Tracef("SACK: measured-rtt=%f srtt=%f new-rto=%f", rtt, srtt, a.rtoMgr.getRTO())
 				}
 
 				if sna32LT(htna, tsn) {
@@ -1240,7 +1241,7 @@ func (a *Association) processFastRetransmission(cumTSNAckPoint, htna uint32, cum
 
 // The caller should hold the lock.
 func (a *Association) handleSack(d *chunkSelectiveAck) error {
-	a.log.Tracef("SACK: cumTSN=%d a_rwnd=%d", d.cumulativeTSNAck, d.advertisedReceiverWindowCredit)
+	a.log.Tracef("[%s] SACK: cumTSN=%d a_rwnd=%d", a.name(), d.cumulativeTSNAck, d.advertisedReceiverWindowCredit)
 	state := a.getState()
 	if state != established {
 		return nil
@@ -1420,7 +1421,7 @@ func (a *Association) handleReconfig(c *chunkReconfig) ([]*packet, error) {
 
 // The caller should hold the lock.
 func (a *Association) handleForwardTSN(c *chunkForwardTSN) []*packet {
-	a.log.Tracef("FwdTSN: %s", c.String())
+	a.log.Tracef("[%s] FwdTSN: %s", a.name(), c.String())
 
 	if !a.useForwardTSN {
 		// Return an error chunk
@@ -1486,6 +1487,19 @@ func (a *Association) handleForwardTSN(c *chunkForwardTSN) []*packet {
 		if s, ok := a.streams[forwarded.identifier]; ok {
 			s.handleForwardTSN(c.newCumulativeTSN, forwarded.sequence)
 		}
+	}
+
+	hasPacketLoss := (a.payloadQueue.size() > 0)
+
+	if a.ackState != ackStateImmediate && !hasPacketLoss {
+		// Will send delayed ack in the next ack timeout
+		a.ackState = ackStateDelay
+		a.ackTimer.start()
+	} else {
+		// Send SACK now!
+		a.ackState = ackStateImmediate
+		a.ackTimer.stop()
+		a.awakeWriteLoop()
 	}
 
 	return nil

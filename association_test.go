@@ -1146,11 +1146,11 @@ func TestHandleForwardTSN(t *testing.T) {
 		p := a.handleForwardTSN(fwdtsn)
 
 		assert.Equal(t, a.peerLastTSN, prevTSN+3, "peerLastTSN should advance by 3 ")
-		assert.Equal(t, ackStateIdle, a.ackState, "sack should not be requested")
+		assert.Equal(t, ackStateDelay, a.ackState, "delayed sack should be requested")
 		assert.Nil(t, p, "should return nil")
 	})
 
-	t.Run("forward 1 then one more for received chunk", func(t *testing.T) {
+	t.Run("forward 1 for 1 missing", func(t *testing.T) {
 		a := createAssociation(Config{
 			NetConn:       &dumbConn{},
 			LoggerFactory: loggerFactory,
@@ -1177,8 +1177,40 @@ func TestHandleForwardTSN(t *testing.T) {
 
 		p := a.handleForwardTSN(fwdtsn)
 
-		assert.Equal(t, a.peerLastTSN, prevTSN+2, "peerLastTSN should advance by 3 ")
-		assert.Equal(t, ackStateIdle, a.ackState, "sack should not be requested")
+		assert.Equal(t, a.peerLastTSN, prevTSN+2, "peerLastTSN should advance by 3")
+		assert.Equal(t, ackStateDelay, a.ackState, "delayed sack should be requested")
+		assert.Nil(t, p, "should return nil")
+	})
+
+	t.Run("forward 1 for 2 missing", func(t *testing.T) {
+		a := createAssociation(Config{
+			NetConn:       &dumbConn{},
+			LoggerFactory: loggerFactory,
+		})
+		a.useForwardTSN = true
+		prevTSN := a.peerLastTSN
+
+		// this chunk is blocked by the missing chunk at tsn=1
+		a.payloadQueue.push(&chunkPayloadData{
+			beginningFragment:    true,
+			endingFragment:       true,
+			tsn:                  a.peerLastTSN + 3,
+			streamIdentifier:     0,
+			streamSequenceNumber: 1,
+			userData:             []byte("ABC"),
+		}, a.peerLastTSN)
+
+		fwdtsn := &chunkForwardTSN{
+			newCumulativeTSN: a.peerLastTSN + 1,
+			streams: []chunkForwardTSNStream{
+				{identifier: 0, sequence: 1},
+			},
+		}
+
+		p := a.handleForwardTSN(fwdtsn)
+
+		assert.Equal(t, a.peerLastTSN, prevTSN+1, "peerLastTSN should advance by 1")
+		assert.Equal(t, ackStateImmediate, a.ackState, "immediate sack should be requested")
 		assert.Nil(t, p, "should return nil")
 	})
 

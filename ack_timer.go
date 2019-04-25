@@ -51,18 +51,14 @@ func (t *ackTimer) start() bool {
 	cancelCh := make(chan struct{})
 
 	go func() {
-		closing := false
+		timer := time.NewTimer(t.interval)
 
-		for !closing {
-			timer := time.NewTimer(t.interval)
-
-			select {
-			case <-timer.C:
-				t.observer.onAckTimeout()
-			case <-cancelCh:
-				closing = true
-				timer.Stop()
-			}
+		select {
+		case <-timer.C:
+			t.stop()
+			t.observer.onAckTimeout()
+		case <-cancelCh:
+			timer.Stop()
 		}
 	}()
 
