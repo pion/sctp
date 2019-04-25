@@ -376,7 +376,7 @@ func (a *Association) readLoop() {
 		}
 		a.lock.Unlock()
 		close(a.acceptCh)
-		a.readLoopCloseCh <- struct{}{}
+		close(a.readLoopCloseCh)
 	}()
 
 	a.log.Debugf("[%s] readLoop entered", a.name())
@@ -405,8 +405,17 @@ func (a *Association) writeLoop() {
 
 loop:
 	for {
-		if err := a.handleOutbound(); err != nil {
-			a.log.Warn(errors.Wrap(err, "failed to write packets to DTLS").Error())
+		rawPackets := a.gatherOutbound()
+
+		for _, raw := range rawPackets {
+			_, err := a.netConn.Write(raw)
+			if err != nil {
+				if err != io.EOF {
+					a.log.Warnf("[%s] failed to write packets on netConn: %v", a.name(), err)
+				}
+				a.log.Debugf("[%s] writeLoop ended", a.name())
+				return
+			}
 		}
 
 		select {
@@ -460,7 +469,7 @@ func (a *Association) handleInbound(raw []byte) error {
 }
 
 // handleOutbound handles outgoing processes
-func (a *Association) handleOutbound() error {
+func (a *Association) gatherOutbound() [][]byte {
 	a.lock.Lock()
 
 	rawPackets := [][]byte{}
@@ -589,14 +598,7 @@ func (a *Association) handleOutbound() error {
 
 	a.lock.Unlock()
 
-	for _, raw := range rawPackets {
-		_, err := a.netConn.Write(raw)
-		if err != nil {
-			return errors.Wrap(err, "failed sending on netConn")
-		}
-	}
-
-	return nil
+	return rawPackets
 }
 
 func checkPacket(p *packet) error {
@@ -1819,14 +1821,6 @@ func (a *Association) generateNextRSN() uint32 {
 	a.myNextRSN++
 	return rsn
 }
-
-/*
-// send sends a packet over netConn.
-func (a *Association) send(p *packet) error {
-	_, err = a.netConn.Write(raw)
-	return err
-}
-*/
 
 func (a *Association) createSelectiveAckChunk() *chunkSelectiveAck {
 	sack := &chunkSelectiveAck{}
