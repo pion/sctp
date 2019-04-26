@@ -347,11 +347,7 @@ func (a *Association) Close() error {
 		return err
 	}
 
-	// Close all retransmission & ack timers
-	a.t1Init.close()
-	a.t1Cookie.close()
-	a.t3RTX.close()
-	a.ackTimer.close()
+	a.closeAllTimers()
 
 	// awake writeLoop to exit
 	close(a.closeWriteLoopCh)
@@ -366,6 +362,14 @@ func (a *Association) Close() error {
 	a.log.Debugf("[%s] stats nAckTimeouts: %d", a.name(), a.stats.getNumAckTimeouts())
 	a.log.Debugf("[%s] stats nFastRetrans: %d", a.name(), a.stats.getNumFastRetrans())
 	return nil
+}
+
+func (a *Association) closeAllTimers() {
+	// Close all retransmission & ack timers
+	a.t1Init.close()
+	a.t1Cookie.close()
+	a.t3RTX.close()
+	a.ackTimer.close()
 }
 
 func (a *Association) readLoop() {
@@ -415,7 +419,7 @@ loop:
 					a.log.Warnf("[%s] failed to write packets on netConn: %v", a.name(), err)
 				}
 				a.log.Debugf("[%s] writeLoop ended", a.name())
-				return
+				break loop
 			}
 		}
 
@@ -425,6 +429,9 @@ loop:
 			break loop
 		}
 	}
+
+	a.setState(closed)
+	a.closeAllTimers()
 
 	a.log.Debugf("[%s] writeLoop exited", a.name())
 }
