@@ -4,6 +4,7 @@ import (
 	cryptoRand "crypto/rand"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"math"
 	"math/rand"
 	"net"
@@ -1898,6 +1899,149 @@ func TestAssocDelayedAck(t *testing.T) {
 		assert.Equal(t, uint64(1), a0.stats.getNumSACKs(), "sack count should be one")
 		assert.Equal(t, uint64(1), a1.stats.getNumAckTimeouts(), "ackTimeout count mismatch")
 		assert.Equal(t, uint64(0), a0.stats.getNumT3Timeouts(), "should be no retransmit")
+
+		closeAssociationPair(br, a0, a1)
+	})
+}
+
+func TestAssocReset(t *testing.T) {
+	t.Run("Close one way", func(t *testing.T) {
+		const si uint16 = 1
+		const msg = "ABC"
+		br := test.NewBridge()
+
+		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay)
+		if !assert.Nil(t, err, "failed to create associations") {
+			assert.FailNow(t, "failed due to earlier error")
+		}
+
+		s0, s1, err := establishSessionPair(br, a0, a1, si)
+		assert.Nil(t, err, "failed to establish session pair")
+
+		assert.Equal(t, 0, a0.bufferedAmount(), "incorrect bufferedAmount")
+
+		n, err := s0.WriteSCTP([]byte(msg), PayloadTypeWebRTCBinary)
+		if err != nil {
+			assert.FailNow(t, "failed due to earlier error")
+		}
+		assert.Equal(t, len(msg), n, "unexpected length of received data")
+		assert.Equal(t, len(msg), a0.bufferedAmount(), "incorrect bufferedAmount")
+
+		err = s0.Close() // send reset
+		if err != nil {
+			t.Error(err)
+		}
+
+		doneCh := make(chan error)
+		buf := make([]byte, 32)
+
+		go func() {
+			for {
+				var ppi PayloadProtocolIdentifier
+				n, ppi, err = s1.ReadSCTP(buf)
+				if err != nil {
+					doneCh <- err
+					return
+				}
+
+				assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
+				assert.Equal(t, n, len(msg), "unexpected length of received data")
+			}
+		}()
+
+	loop:
+		for {
+			br.Process()
+			select {
+			case err = <-doneCh:
+				assert.Equal(t, io.EOF, err, "should end with EOF")
+				break loop
+			default:
+			}
+		}
+
+		closeAssociationPair(br, a0, a1)
+	})
+
+	t.Run("Close both ways", func(t *testing.T) {
+		const si uint16 = 1
+		const msg = "ABC"
+		br := test.NewBridge()
+
+		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay)
+		if !assert.Nil(t, err, "failed to create associations") {
+			assert.FailNow(t, "failed due to earlier error")
+		}
+
+		s0, s1, err := establishSessionPair(br, a0, a1, si)
+		assert.Nil(t, err, "failed to establish session pair")
+
+		assert.Equal(t, 0, a0.bufferedAmount(), "incorrect bufferedAmount")
+
+		n, err := s0.WriteSCTP([]byte(msg), PayloadTypeWebRTCBinary)
+		if err != nil {
+			assert.FailNow(t, "failed due to earlier error")
+		}
+		assert.Equal(t, len(msg), n, "unexpected length of received data")
+		assert.Equal(t, len(msg), a0.bufferedAmount(), "incorrect bufferedAmount")
+
+		err = s0.Close() // send reset
+		if err != nil {
+			t.Error(err)
+		}
+
+		doneCh := make(chan error)
+		buf := make([]byte, 32)
+
+		go func() {
+			for {
+				var ppi PayloadProtocolIdentifier
+				n, ppi, err = s1.ReadSCTP(buf)
+				if err != nil {
+					doneCh <- err
+					return
+				}
+
+				assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
+				assert.Equal(t, n, len(msg), "unexpected length of received data")
+			}
+		}()
+
+	loop0:
+		for {
+			br.Process()
+			select {
+			case err = <-doneCh:
+				assert.Equal(t, io.EOF, err, "should end with EOF")
+				break loop0
+			default:
+			}
+		}
+
+		err = s1.Close() // send reset
+		if err != nil {
+			t.Error(err)
+		}
+
+		go func() {
+			for {
+				_, _, err = s0.ReadSCTP(buf)
+				assert.Equal(t, io.EOF, err, "should be EOF")
+				doneCh <- err
+			}
+		}()
+
+	loop1:
+		for {
+			br.Process()
+			select {
+			case <-doneCh:
+				break loop1
+			default:
+			}
+		}
+
+		time.Sleep(2 * time.Second)
 
 		closeAssociationPair(br, a0, a1)
 	})

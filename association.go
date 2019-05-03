@@ -119,9 +119,9 @@ type Association struct {
 	willRetransmitFast       bool
 
 	// Reconfig
-	ongoingReconfigOutgoing *chunkReconfig // TODO: Re-transmission
-	ongoingResetRequest     *paramOutgoingResetRequest
-	myNextRSN               uint32
+	myNextRSN        uint32
+	reconfigs        map[uint32]*chunkReconfig
+	reconfigRequests map[uint32]*paramOutgoingResetRequest
 
 	// Non-RFC internal data
 	sourcePort              uint16
@@ -237,7 +237,9 @@ func createAssociation(config Config) *Association {
 		minTSN2MeasureRTT:       tsn,
 		state:                   closed,
 		rtoMgr:                  newRTOManager(),
-		streams:                 make(map[uint16]*Stream),
+		streams:                 map[uint16]*Stream{},
+		reconfigs:               map[uint32]*chunkReconfig{},
+		reconfigRequests:        map[uint32]*paramOutgoingResetRequest{},
 		acceptCh:                make(chan *Stream, acceptChSize),
 		readLoopCloseCh:         make(chan struct{}),
 		awakeWriteLoopCh:        make(chan struct{}, 1),
@@ -447,12 +449,11 @@ func (a *Association) awakeWriteLoop() {
 // The caller should hold the association write lock.
 func (a *Association) unregisterStream(s *Stream, err error) {
 	s.lock.Lock()
+	defer s.lock.Unlock()
+
 	delete(a.streams, s.streamIdentifier)
 	s.readErr = err
-	n := s.readNotifier
-	s.readNotifier = nil
-	s.lock.Unlock()
-	n.Broadcast()
+	s.readNotifier.Broadcast()
 }
 
 // handleInbound parses incoming raw packets
@@ -512,7 +513,7 @@ func (a *Association) gatherOutbound() [][]byte {
 
 		// Pop unsent data chunks from the pending queue to send as much as
 		// cwnd and rwnd allow.
-		chunks := a.popPendingDataChunksToSend()
+		chunks, sisToReset := a.popPendingDataChunksToSend()
 		if len(chunks) > 0 {
 			// Start timer. (noop if already started)
 			a.log.Tracef("[%s] T3-rtx timer start (pt1)", a.name())
@@ -523,6 +524,29 @@ func (a *Association) gatherOutbound() [][]byte {
 					a.log.Warnf("[%s] failed to serialize a DATA packet", a.name())
 					continue
 				}
+				rawPackets = append(rawPackets, raw)
+			}
+		}
+
+		if len(sisToReset) > 0 {
+			rsn := a.generateNextRSN()
+			tsn := a.myNextTSN - 1
+			c := &chunkReconfig{
+				paramA: &paramOutgoingResetRequest{
+					reconfigRequestSequenceNumber: rsn,
+					senderLastTSN:                 tsn,
+					streamIdentifiers:             sisToReset,
+				},
+			}
+			a.reconfigs[rsn] = c // store in the map for retransmission
+			a.log.Debugf("[%s] sending RECONFIG: rsn=%d tsn=%d streams=%v",
+				a.name(), rsn, a.myNextTSN-1, sisToReset)
+
+			p := a.createPacket([]chunk{c})
+			raw, err := p.marshal()
+			if err != nil {
+				a.log.Warnf("[%s] failed to serialize a RECONFIG packet to be retransmitted", a.name())
+			} else {
 				rawPackets = append(rawPackets, raw)
 			}
 		}
@@ -903,7 +927,8 @@ func (a *Association) handleCookieAck() []*packet {
 
 // The caller should hold the lock.
 func (a *Association) handleData(d *chunkPayloadData) []*packet {
-	a.log.Tracef("[%s] DATA: tsn=%d immediateSack=%v", a.name(), d.tsn, d.immediateSack)
+	a.log.Tracef("[%s] DATA: tsn=%d immediateSack=%v len=%d",
+		a.name(), d.tsn, d.immediateSack, len(d.userData))
 	a.stats.incDATAs()
 
 	canPush := a.payloadQueue.canPush(d, a.peerLastTSN)
@@ -927,20 +952,19 @@ func (a *Association) handleData(d *chunkPayloadData) []*packet {
 	reply := []*packet{}
 
 	// Try to advance peerLastTSN
-	_, popOk := a.payloadQueue.pop(a.peerLastTSN + 1)
-	for popOk {
-		if a.ongoingResetRequest != nil &&
-			sna32LT(a.ongoingResetRequest.senderLastTSN, a.peerLastTSN) {
-			resp := a.resetStreams()
+	for {
+		if _, popOk := a.payloadQueue.pop(a.peerLastTSN + 1); !popOk {
+			break
+		}
+		a.peerLastTSN++
+
+		for _, rstReq := range a.reconfigRequests {
+			resp := a.resetStreams(rstReq)
 			if resp != nil {
 				a.log.Debugf("[%s] RESET RESPONSE: %+v", a.name(), resp)
 				reply = append(reply, resp)
 			}
-			break
 		}
-
-		a.peerLastTSN++
-		_, popOk = a.payloadQueue.pop(a.peerLastTSN + 1)
 	}
 
 	hasPacketLoss := (a.payloadQueue.size() > 0)
@@ -1005,9 +1029,9 @@ func (a *Association) createStream(streamIdentifier uint16, accept bool) *Stream
 		association:      a,
 		streamIdentifier: streamIdentifier,
 		reassemblyQueue:  newReassemblyQueue(streamIdentifier),
-		readNotifier:     sync.NewCond(&sync.Mutex{}),
 		log:              a.log,
 	}
+	s.readNotifier = sync.NewCond(&s.lock)
 
 	if accept {
 		select {
@@ -1534,26 +1558,16 @@ func (a *Association) sendResetRequest(streamIdentifier uint16) error {
 			getAssociationStateString(state))
 	}
 
-	p := a.createResetPacket(streamIdentifier)
-	a.controlQueue.push(p)
+	// Create DATA chunk which only contains valid stream identifier with
+	// nil userData and use it as a EOS from the stream.
+	c := &chunkPayloadData{
+		streamIdentifier: streamIdentifier,
+		userData:         nil,
+	}
+
+	a.pendingQueue.push(c)
 	a.awakeWriteLoop()
 	return nil
-}
-
-// The caller should hold the lock.
-func (a *Association) createResetPacket(streamIdentifier uint16) *packet {
-	lastTSN := a.myNextTSN - 1
-
-	// TODO: Re-transmission
-	a.ongoingReconfigOutgoing = &chunkReconfig{
-		paramA: &paramOutgoingResetRequest{
-			reconfigRequestSequenceNumber: a.generateNextRSN(),
-			senderLastTSN:                 lastTSN,
-			streamIdentifiers:             []uint16{streamIdentifier},
-		},
-	}
-	return a.createPacket([]chunk{a.ongoingReconfigOutgoing})
-
 }
 
 // The caller should hold the lock.
@@ -1561,17 +1575,15 @@ func (a *Association) handleReconfigParam(raw param) (*packet, error) {
 	// TODO: Check RSN
 	switch p := raw.(type) {
 	case *paramOutgoingResetRequest:
-		a.ongoingResetRequest = p
-		resp := a.resetStreams()
+		a.reconfigRequests[p.reconfigRequestSequenceNumber] = p
+		resp := a.resetStreams(p)
 		if resp != nil {
 			return resp, nil
 		}
 		return nil, nil
 
 	case *paramReconfigResponse:
-		// Reset the ongoing config
-		// TODO: Stop re-transmission
-		a.ongoingReconfigOutgoing = nil
+		delete(a.reconfigs, p.reconfigResponseSequenceNumber)
 
 		return nil, nil
 	default:
@@ -1580,10 +1592,11 @@ func (a *Association) handleReconfigParam(raw param) (*packet, error) {
 }
 
 // The caller should hold the lock.
-func (a *Association) resetStreams() *packet {
+func (a *Association) resetStreams(p *paramOutgoingResetRequest) *packet {
 	result := reconfigResultSuccessPerformed
-	p := a.ongoingResetRequest
 	if sna32LTE(p.senderLastTSN, a.peerLastTSN) {
+		a.log.Debugf("[%s] resetStream(): senderLastTSN=%d <= peerLastTSN=%d",
+			a.name(), p.senderLastTSN, a.peerLastTSN)
 		for _, id := range p.streamIdentifiers {
 			s, ok := a.streams[id]
 			if !ok {
@@ -1591,8 +1604,10 @@ func (a *Association) resetStreams() *packet {
 			}
 			a.unregisterStream(s, io.EOF)
 		}
-		a.ongoingResetRequest = nil
+		delete(a.reconfigRequests, p.reconfigRequestSequenceNumber)
 	} else {
+		a.log.Debugf("[%s] resetStream(): senderLastTSN=%d > peerLastTSN=%d",
+			a.name(), p.senderLastTSN, a.peerLastTSN)
 		result = reconfigResultInProgress
 	}
 
@@ -1624,7 +1639,8 @@ func (a *Association) movePendingDataChunkToInflightQueue(c *chunkPayloadData) {
 
 	a.checkPartialReliabilityStatus(c)
 
-	a.log.Tracef("[%s] sending tsn=%d ssn=%d sent=%d", a.name(), c.tsn, c.streamSequenceNumber, c.nSent)
+	a.log.Tracef("[%s] sending tsn=%d ssn=%d sent=%d len=%d",
+		a.name(), c.tsn, c.streamSequenceNumber, c.nSent, len(c.userData))
 
 	// Push it into the inflightQueue
 	a.inflightQueue.pushNoCheck(c)
@@ -1633,8 +1649,9 @@ func (a *Association) movePendingDataChunkToInflightQueue(c *chunkPayloadData) {
 // popPendingDataChunksToSend pops chunks from the pending queues as many as
 // the cwnd and rwnd allows to send.
 // The caller should hold the lock.
-func (a *Association) popPendingDataChunksToSend() []*chunkPayloadData {
+func (a *Association) popPendingDataChunksToSend() ([]*chunkPayloadData, []uint16) {
 	chunks := []*chunkPayloadData{}
+	var sisToReset []uint16 // stream identifieres to reset
 
 	if a.pendingQueue.size() > 0 {
 
@@ -1656,6 +1673,14 @@ func (a *Association) popPendingDataChunksToSend() []*chunkPayloadData {
 			}
 
 			dataLen := uint32(len(c.userData))
+			if dataLen == 0 {
+				sisToReset = append(sisToReset, c.streamIdentifier)
+				err := a.pendingQueue.pop(c)
+				if err != nil {
+					a.log.Errorf("failed to pop from pending queue: %s", err.Error())
+				}
+				continue
+			}
 
 			if uint32(a.inflightQueue.getNumBytes())+dataLen > a.cwnd {
 				break // would exceeds cwnd
@@ -1675,8 +1700,10 @@ func (a *Association) popPendingDataChunksToSend() []*chunkPayloadData {
 		if len(chunks) == 0 && a.inflightQueue.size() == 0 {
 			// Send zero window probe
 			c := a.peekNextPendingData()
-			a.movePendingDataChunkToInflightQueue(c)
-			chunks = append(chunks, c)
+			if c != nil {
+				a.movePendingDataChunkToInflightQueue(c)
+				chunks = append(chunks, c)
+			}
 		}
 
 		// Controlling DATA chunk's I-bit (SACK-IMMEDIATELY flag)
@@ -1703,7 +1730,7 @@ func (a *Association) popPendingDataChunksToSend() []*chunkPayloadData {
 		}
 	}
 
-	return chunks
+	return chunks, sisToReset
 }
 
 // bundleDataChunksIntoPackets packs DATA chunks into packets. It tries to bundle
