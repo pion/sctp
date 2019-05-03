@@ -106,16 +106,18 @@ func (s *Stream) ReadSCTP(p []byte) (int, PayloadProtocolIdentifier, error) {
 }
 
 func (s *Stream) handleData(pd *chunkPayloadData) {
-	var readable bool
 	s.lock.Lock()
+	defer s.lock.Unlock()
+
+	var readable bool
 	if s.reassemblyQueue.push(pd) {
 		readable = s.reassemblyQueue.isReadable()
-	}
-	s.lock.Unlock()
-
-	// Notify the reader asynchronously if there's a data chunk to read.
-	if readable {
-		s.readNotifier.Signal()
+		s.log.Debugf("[%s] reassemblyQueue readable=%v", s.name(), readable)
+		if readable {
+			s.log.Debugf("[%s] readNotifier.signal()", s.name())
+			s.readNotifier.Signal()
+			s.log.Debugf("[%s] readNotifier.signal() done", s.name())
+		}
 	}
 }
 
