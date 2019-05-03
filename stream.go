@@ -1,6 +1,7 @@
 package sctp
 
 import (
+	"fmt"
 	"math"
 	"sync"
 
@@ -81,33 +82,26 @@ func (s *Stream) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// ReadSCTP reads a packet of len(p) bytes and returns the associated Payload Protocol Identifier.
+// ReadSCTP reads a packet of len(p) bytes and returns the associated Payload
+// Protocol Identifier.
 // Returns EOF when the stream is reset or an error if the stream is closed
 // otherwise.
 func (s *Stream) ReadSCTP(p []byte) (int, PayloadProtocolIdentifier, error) {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+
 	for {
-		s.lock.Lock()
 		n, ppi, err := s.reassemblyQueue.read(p)
-		s.lock.Unlock()
 		if err == nil {
 			return n, ppi, nil
 		}
 
-		s.lock.RLock()
 		err = s.readErr
 		if err != nil {
-			s.lock.RUnlock()
 			return 0, PayloadProtocolIdentifier(0), err
 		}
 
-		notifier := s.readNotifier
-		s.lock.RUnlock()
-		// Wait for read notification
-		if notifier != nil {
-			notifier.L.Lock()
-			notifier.Wait()
-			notifier.L.Unlock()
-		}
+		s.readNotifier.Wait()
 	}
 }
 
@@ -210,7 +204,7 @@ func (s *Stream) packetize(raw []byte, ppi PayloadProtocolIdentifier) []*chunkPa
 	}
 
 	s.bufferedAmount += uint64(len(raw))
-	s.log.Tracef("sctp/stream: bufferedAmount = %d", s.bufferedAmount)
+	s.log.Tracef("[%s] bufferedAmount = %d", s.name(), s.bufferedAmount)
 
 	return chunks
 }
@@ -276,12 +270,13 @@ func (s *Stream) onBufferReleased(nBytesReleased int) {
 
 	if s.bufferedAmount < uint64(nBytesReleased) {
 		s.bufferedAmount = 0
-		s.log.Errorf("released buffer size %d should be <= %d", nBytesReleased, s.bufferedAmount)
+		s.log.Errorf("[%s] released buffer size %d should be <= %d",
+			s.name(), nBytesReleased, s.bufferedAmount)
 	} else {
 		s.bufferedAmount -= uint64(nBytesReleased)
 	}
 
-	s.log.Tracef("sctp/stream: bufferedAmount = %d", s.bufferedAmount)
+	s.log.Tracef("[%s] bufferedAmount = %d", s.name(), s.bufferedAmount)
 
 	if s.onBufferedAmountLow != nil && s.bufferedAmount < s.bufferedAmountLow {
 		f := s.onBufferedAmountLow
@@ -296,4 +291,8 @@ func (s *Stream) onBufferReleased(nBytesReleased int) {
 func (s *Stream) getNumBytesInReassemblyQueue() int {
 	// No lock is required as it reads the size with atomic load function.
 	return s.reassemblyQueue.getNumBytes()
+}
+
+func (s *Stream) name() string {
+	return fmt.Sprintf("%d:%p", s.streamIdentifier, s.association)
 }
