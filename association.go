@@ -1552,6 +1552,17 @@ func (a *Association) handleForwardTSN(c *chunkForwardTSN) []*packet {
 		a.peerLastTSN++
 	}
 
+	// Report new peerLastTSN value and abandoned largest SSN value to
+	// corresponding streams so that the abandoned chunks can be removed
+	// from the reassemblyQueue.
+	for _, forwarded := range c.streams {
+		if s, ok := a.streams[forwarded.identifier]; ok {
+			s.handleForwardTSN(c.newCumulativeTSN, forwarded.sequence)
+		}
+	}
+
+	var reply []*packet
+
 	// From RFC 3758 Sec 3.6:
 	//   .. and then MUST further advance its cumulative TSN point locally
 	//   if possible
@@ -1562,14 +1573,13 @@ func (a *Association) handleForwardTSN(c *chunkForwardTSN) []*packet {
 			break
 		}
 		a.peerLastTSN++
-	}
 
-	// Report new peerLastTSN value and abandoned largest SSN value to
-	// corresponding streams so that the abandoned chunks can be removed
-	// from the reassemblyQueue.
-	for _, forwarded := range c.streams {
-		if s, ok := a.streams[forwarded.identifier]; ok {
-			s.handleForwardTSN(c.newCumulativeTSN, forwarded.sequence)
+		for _, rstReq := range a.reconfigRequests {
+			resp := a.resetStreams(rstReq)
+			if resp != nil {
+				a.log.Debugf("[%s] RESET RESPONSE: %+v", a.name, resp)
+				reply = append(reply, resp)
+			}
 		}
 	}
 
@@ -1586,7 +1596,7 @@ func (a *Association) handleForwardTSN(c *chunkForwardTSN) []*packet {
 		a.awakeWriteLoop()
 	}
 
-	return nil
+	return reply
 }
 
 func (a *Association) sendResetRequest(streamIdentifier uint16) error {
