@@ -23,7 +23,8 @@ const (
 	dataChunkHeaderSize  uint32 = 16
 )
 
-var errAssociationClosed = errors.Errorf("The association is closed")
+// ErrClosedAssociation indicates that the underlying association is closed.
+var ErrClosedAssociation = errors.Errorf("association is closed")
 
 // association state enums
 const (
@@ -1018,7 +1019,7 @@ func (a *Association) OpenStream(streamIdentifier uint16, defaultPayloadType Pay
 func (a *Association) AcceptStream() (*Stream, error) {
 	s, ok := <-a.acceptCh
 	if !ok {
-		return nil, errAssociationClosed
+		return nil, ErrClosedAssociation
 	}
 	return s, nil
 }
