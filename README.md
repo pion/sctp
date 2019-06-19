@@ -42,6 +42,7 @@ Check out the **[contributing wiki](https://github.com/pion/webrtc/wiki/Contribu
 * [Michael MacDonald](https://github.com/mjmac) - *Fix races*
 * [Yutaka Takeda](https://github.com/enobufs) - *PR-SCTP, Retransmissions, Congestion Control*
 * [Antoine Baché](https://github.com/Antonito) - *SCTP Profiling*
+* [Cecylia Bocovich](https://github.com/cohosh) - *Fix SCTP reads*
 
 ### License
 MIT License - see [LICENSE](LICENSE) for full text
