@@ -1,7 +1,6 @@
 package sctp
 
 import (
-	"fmt"
 	"io"
 	"math"
 	"sync"
@@ -37,6 +36,7 @@ type Stream struct {
 	bufferedAmountLow   uint64
 	onBufferedAmountLow func()
 	log                 logging.LeveledLogger
+	name                string
 }
 
 // StreamIdentifier returns the Stream identifier associated to the stream.
@@ -115,11 +115,11 @@ func (s *Stream) handleData(pd *chunkPayloadData) {
 	var readable bool
 	if s.reassemblyQueue.push(pd) {
 		readable = s.reassemblyQueue.isReadable()
-		s.log.Debugf("[%s] reassemblyQueue readable=%v", s.name(), readable)
+		s.log.Debugf("[%s] reassemblyQueue readable=%v", s.name, readable)
 		if readable {
-			s.log.Debugf("[%s] readNotifier.signal()", s.name())
+			s.log.Debugf("[%s] readNotifier.signal()", s.name)
 			s.readNotifier.Signal()
-			s.log.Debugf("[%s] readNotifier.signal() done", s.name())
+			s.log.Debugf("[%s] readNotifier.signal() done", s.name)
 		}
 	}
 }
@@ -209,7 +209,7 @@ func (s *Stream) packetize(raw []byte, ppi PayloadProtocolIdentifier) []*chunkPa
 	}
 
 	s.bufferedAmount += uint64(len(raw))
-	s.log.Tracef("[%s] bufferedAmount = %d", s.name(), s.bufferedAmount)
+	s.log.Tracef("[%s] bufferedAmount = %d", s.name, s.bufferedAmount)
 
 	return chunks
 }
@@ -276,12 +276,12 @@ func (s *Stream) onBufferReleased(nBytesReleased int) {
 	if s.bufferedAmount < uint64(nBytesReleased) {
 		s.bufferedAmount = 0
 		s.log.Errorf("[%s] released buffer size %d should be <= %d",
-			s.name(), nBytesReleased, s.bufferedAmount)
+			s.name, nBytesReleased, s.bufferedAmount)
 	} else {
 		s.bufferedAmount -= uint64(nBytesReleased)
 	}
 
-	s.log.Tracef("[%s] bufferedAmount = %d", s.name(), s.bufferedAmount)
+	s.log.Tracef("[%s] bufferedAmount = %d", s.name, s.bufferedAmount)
 
 	if s.onBufferedAmountLow != nil && s.bufferedAmount < s.bufferedAmountLow {
 		f := s.onBufferedAmountLow
@@ -296,8 +296,4 @@ func (s *Stream) onBufferReleased(nBytesReleased int) {
 func (s *Stream) getNumBytesInReassemblyQueue() int {
 	// No lock is required as it reads the size with atomic load function.
 	return s.reassemblyQueue.getNumBytes()
-}
-
-func (s *Stream) name() string {
-	return fmt.Sprintf("%d:%p", s.streamIdentifier, s.association)
 }

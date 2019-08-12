@@ -1031,7 +1031,9 @@ func (a *Association) createStream(streamIdentifier uint16, accept bool) *Stream
 		streamIdentifier: streamIdentifier,
 		reassemblyQueue:  newReassemblyQueue(streamIdentifier),
 		log:              a.log,
+		name:             fmt.Sprintf("%d:%s", streamIdentifier, a.name),
 	}
+
 	s.readNotifier = sync.NewCond(&s.lock)
 
 	if accept {
