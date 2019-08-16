@@ -163,6 +163,8 @@ type Association struct {
 	closeWriteLoopCh     chan struct{}
 	handshakeCompletedCh chan error
 
+	closeWriteLoopOnce sync.Once
+
 	// local error
 	silentError error
 
@@ -346,14 +348,11 @@ func (a *Association) Close() error {
 	a.setState(closed)
 
 	err := a.netConn.Close()
-	if err != nil {
-		return err
-	}
 
 	a.closeAllTimers()
 
 	// awake writeLoop to exit
-	close(a.closeWriteLoopCh)
+	a.closeWriteLoopOnce.Do(func() { close(a.closeWriteLoopCh) })
 
 	// Wait for readLoop to end
 	<-a.readLoopCloseCh
@@ -364,7 +363,7 @@ func (a *Association) Close() error {
 	a.log.Debugf("[%s] stats nT3Timeouts : %d", a.name, a.stats.getNumT3Timeouts())
 	a.log.Debugf("[%s] stats nAckTimeouts: %d", a.name, a.stats.getNumAckTimeouts())
 	a.log.Debugf("[%s] stats nFastRetrans: %d", a.name, a.stats.getNumFastRetrans())
-	return nil
+	return err
 }
 
 func (a *Association) closeAllTimers() {
@@ -406,6 +405,10 @@ func (a *Association) readLoop() {
 	}
 
 	a.log.Debugf("[%s] readLoop exited", a.name)
+
+	// also stop writeLoop, otherwise writeLoop can be leaked
+	// if connection is lost when there is no writing packet.
+	a.closeWriteLoopOnce.Do(func() { close(a.closeWriteLoopCh) })
 }
 
 func (a *Association) writeLoop() {

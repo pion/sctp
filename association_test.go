@@ -8,6 +8,7 @@ import (
 	"math"
 	"math/rand"
 	"net"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -2080,5 +2081,110 @@ func TestAssocReset(t *testing.T) {
 		time.Sleep(2 * time.Second)
 
 		closeAssociationPair(br, a0, a1)
+	})
+}
+
+type fakeEchoConn struct {
+	echo     chan []byte
+	done     chan struct{}
+	closed   chan struct{}
+	once     sync.Once
+	errClose error
+	mu       sync.Mutex
+}
+
+func newFakeEchoConn(errClose error) *fakeEchoConn {
+	return &fakeEchoConn{
+		echo:     make(chan []byte, 1),
+		done:     make(chan struct{}),
+		closed:   make(chan struct{}),
+		errClose: errClose,
+	}
+}
+func (c *fakeEchoConn) Read(b []byte) (int, error) {
+	r, ok := <-c.echo
+	if ok {
+		copy(b, r)
+		c.once.Do(func() { close(c.done) })
+		return len(r), nil
+	}
+	return 0, io.EOF
+}
+func (c *fakeEchoConn) Write(b []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	select {
+	case <-c.closed:
+		return 0, io.EOF
+	default:
+	}
+	c.echo <- b
+	return len(b), nil
+}
+func (c *fakeEchoConn) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	close(c.echo)
+	close(c.closed)
+	return c.errClose
+}
+func (c *fakeEchoConn) LocalAddr() net.Addr                { return nil }
+func (c *fakeEchoConn) RemoteAddr() net.Addr               { return nil }
+func (c *fakeEchoConn) SetDeadline(t time.Time) error      { return nil }
+func (c *fakeEchoConn) SetReadDeadline(t time.Time) error  { return nil }
+func (c *fakeEchoConn) SetWriteDeadline(t time.Time) error { return nil }
+
+func TestRoutineLeak(t *testing.T) {
+	loggerFactory := logging.NewDefaultLoggerFactory()
+	t.Run("Close failed", func(t *testing.T) {
+		runtime.GC()
+		n0 := runtime.NumGoroutine()
+
+		conn := newFakeEchoConn(io.EOF)
+		a, err := Client(Config{NetConn: conn, LoggerFactory: loggerFactory})
+		assert.Equal(t, nil, err, "errored to initialize Client")
+
+		<-conn.done
+
+		err = a.Close()
+		assert.Equal(t, io.EOF, err, "Close() should fail with EOF")
+
+		select {
+		case _, ok := <-a.closeWriteLoopCh:
+			if ok {
+				t.Errorf("closeWriteLoopCh is expected to be closed, but received signal")
+			}
+		default:
+			t.Errorf("closeWriteLoopCh is expected to be closed, but not")
+		}
+		_ = a
+		runtime.GC()
+		assert.Equal(t, n0, runtime.NumGoroutine(), "goroutine is leaked")
+	})
+	t.Run("Connection closed by remote host", func(t *testing.T) {
+		runtime.GC()
+		n0 := runtime.NumGoroutine()
+
+		conn := newFakeEchoConn(nil)
+		a, err := Client(Config{NetConn: conn, LoggerFactory: loggerFactory})
+		assert.Equal(t, nil, err, "errored to initialize Client")
+
+		<-conn.done
+
+		err = conn.Close() // close connection
+		assert.Equal(t, nil, err, "fake connection returned unexpected error")
+		<-conn.closed
+		<-time.After(10 * time.Millisecond) // switch context to make read/write loops finished
+
+		select {
+		case _, ok := <-a.closeWriteLoopCh:
+			if ok {
+				t.Errorf("closeWriteLoopCh is expected to be closed, but received signal")
+			}
+		default:
+			t.Errorf("closeWriteLoopCh is expected to be closed, but not")
+		}
+		runtime.GC()
+		assert.Equal(t, n0, runtime.NumGoroutine(), "goroutine is leaked")
 	})
 }
