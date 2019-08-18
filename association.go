@@ -377,6 +377,10 @@ func (a *Association) closeAllTimers() {
 func (a *Association) readLoop() {
 	var closeErr error
 	defer func() {
+		// also stop writeLoop, otherwise writeLoop can be leaked
+		// if connection is lost when there is no writing packet.
+		a.closeWriteLoopOnce.Do(func() { close(a.closeWriteLoopCh) })
+
 		a.lock.Lock()
 		for _, s := range a.streams {
 			a.unregisterStream(s, closeErr)
@@ -405,10 +409,6 @@ func (a *Association) readLoop() {
 	}
 
 	a.log.Debugf("[%s] readLoop exited", a.name)
-
-	// also stop writeLoop, otherwise writeLoop can be leaked
-	// if connection is lost when there is no writing packet.
-	a.closeWriteLoopOnce.Do(func() { close(a.closeWriteLoopCh) })
 }
 
 func (a *Association) writeLoop() {
