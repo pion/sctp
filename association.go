@@ -176,6 +176,9 @@ type Association struct {
 
 	name string
 	log  logging.LeveledLogger
+
+	bytesReceived uint64
+	bytesSent     uint64
 }
 
 // Config collects the arguments to createAssociation construction into
@@ -403,6 +406,7 @@ func (a *Association) readLoop() {
 			break
 		}
 
+		atomic.AddUint64(&a.bytesReceived, uint64(n))
 		if err = a.handleInbound(buffer[:n]); err != nil {
 			a.log.Warnf("[%s] %s]", a.name, errors.Wrap(err, "failed to push SCTP packet").Error())
 		}
@@ -427,6 +431,7 @@ loop:
 				a.log.Debugf("[%s] writeLoop ended", a.name)
 				break loop
 			}
+			atomic.AddUint64(&a.bytesSent, uint64(len(raw)))
 		}
 
 		select {
@@ -715,6 +720,16 @@ func (a *Association) setState(newState uint32) {
 // getState atomically returns the state of the Association.
 func (a *Association) getState() uint32 {
 	return atomic.LoadUint32(&a.state)
+}
+
+// BytesSent returns the number of bytes sent
+func (a *Association) BytesSent() uint64 {
+	return atomic.LoadUint64(&a.bytesSent)
+}
+
+// BytesReceived returns the number of bytes received
+func (a *Association) BytesReceived() uint64 {
+	return atomic.LoadUint64(&a.bytesReceived)
 }
 
 func setSupportedExtensions(init *chunkInitCommon) {

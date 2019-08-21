@@ -2091,6 +2091,9 @@ type fakeEchoConn struct {
 	once     sync.Once
 	errClose error
 	mu       sync.Mutex
+
+	bytesSent     uint64
+	bytesReceived uint64
 }
 
 func newFakeEchoConn(errClose error) *fakeEchoConn {
@@ -2106,6 +2109,11 @@ func (c *fakeEchoConn) Read(b []byte) (int, error) {
 	if ok {
 		copy(b, r)
 		c.once.Do(func() { close(c.done) })
+
+		c.mu.Lock()
+		c.bytesReceived += uint64(len(r))
+		c.mu.Unlock()
+
 		return len(r), nil
 	}
 	return 0, io.EOF
@@ -2119,6 +2127,7 @@ func (c *fakeEchoConn) Write(b []byte) (int, error) {
 	default:
 	}
 	c.echo <- b
+	c.bytesSent += uint64(len(b))
 	return len(b), nil
 }
 func (c *fakeEchoConn) Close() error {
@@ -2187,4 +2196,19 @@ func TestRoutineLeak(t *testing.T) {
 		runtime.GC()
 		assert.Equal(t, n0, runtime.NumGoroutine(), "goroutine is leaked")
 	})
+}
+
+func TestStats(t *testing.T) {
+	loggerFactory := logging.NewDefaultLoggerFactory()
+
+	conn := newFakeEchoConn(nil)
+	a, err := Client(Config{NetConn: conn, LoggerFactory: loggerFactory})
+	assert.Equal(t, nil, err, "errored to initialize Client")
+
+	<-conn.done
+
+	assert.NoError(t, conn.Close())
+
+	assert.Equal(t, conn.bytesReceived, a.BytesReceived())
+	assert.Equal(t, conn.bytesSent, a.BytesSent())
 }
