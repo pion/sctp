@@ -102,6 +102,9 @@ func getAssociationStateString(a uint32) string {
 //               Note: No "CLOSED" state is illustrated since if a
 //               association is "CLOSED" its TCB SHOULD be removed.
 type Association struct {
+	bytesReceived uint64
+	bytesSent     uint64
+
 	lock sync.RWMutex
 
 	netConn net.Conn
@@ -176,9 +179,6 @@ type Association struct {
 
 	name string
 	log  logging.LeveledLogger
-
-	bytesReceived uint64
-	bytesSent     uint64
 }
 
 // Config collects the arguments to createAssociation construction into
