@@ -271,7 +271,13 @@ func (s *Stream) OnBufferedAmountLow(f func()) {
 // This method is called by association's readLoop (go-)routine to notify this stream
 // of the specified amount of outgoing data has been delivered to the peer.
 func (s *Stream) onBufferReleased(nBytesReleased int) {
+	if nBytesReleased <= 0 {
+		return
+	}
+
 	s.lock.Lock()
+
+	fromAmount := s.bufferedAmount
 
 	if s.bufferedAmount < uint64(nBytesReleased) {
 		s.bufferedAmount = 0
@@ -283,7 +289,7 @@ func (s *Stream) onBufferReleased(nBytesReleased int) {
 
 	s.log.Tracef("[%s] bufferedAmount = %d", s.name, s.bufferedAmount)
 
-	if s.onBufferedAmountLow != nil && s.bufferedAmount < s.bufferedAmountLow {
+	if s.onBufferedAmountLow != nil && fromAmount > s.bufferedAmountLow && s.bufferedAmount <= s.bufferedAmountLow {
 		f := s.onBufferedAmountLow
 		s.lock.Unlock()
 		f()

@@ -36,24 +36,34 @@ func TestSessionBufferedAmount(t *testing.T) {
 			nCbs++
 		})
 
+		// Negative value should be ignored (by design)
+		s.onBufferReleased(-32) // bufferedAmount = 3072
+		assert.Equal(t, uint64(4096), s.BufferedAmount(), "unexpected bufferedAmount")
+		assert.Equal(t, 0, nCbs, "callback count mismatch")
+
+		// Above to above, no callback
 		s.onBufferReleased(1024) // bufferedAmount = 3072
 		assert.Equal(t, uint64(3072), s.BufferedAmount(), "unexpected bufferedAmount")
 		assert.Equal(t, 0, nCbs, "callback count mismatch")
 
+		// Above to equal, callback should be made
 		s.onBufferReleased(1024) // bufferedAmount = 2048
 		assert.Equal(t, uint64(2048), s.BufferedAmount(), "unexpected bufferedAmount")
-		assert.Equal(t, 0, nCbs, "callback count mismatch")
+		assert.Equal(t, 1, nCbs, "callback count mismatch")
 
+		// Eaual to below, no callback
 		s.onBufferReleased(1024) // bufferedAmount = 1024
 		assert.Equal(t, uint64(1024), s.BufferedAmount(), "unexpected bufferedAmount")
 		assert.Equal(t, 1, nCbs, "callback count mismatch")
 
+		// Blow to below, no callback
 		s.onBufferReleased(1024) // bufferedAmount = 0
 		assert.Equal(t, uint64(0), s.BufferedAmount(), "unexpected bufferedAmount")
-		assert.Equal(t, 2, nCbs, "callback count mismatch")
+		assert.Equal(t, 1, nCbs, "callback count mismatch")
 
+		// Capped at 0, no callback
 		s.onBufferReleased(1024) // bufferedAmount = 0
 		assert.Equal(t, uint64(0), s.BufferedAmount(), "unexpected bufferedAmount")
-		assert.Equal(t, 3, nCbs, "callback count mismatch")
+		assert.Equal(t, 1, nCbs, "callback count mismatch")
 	})
 }
