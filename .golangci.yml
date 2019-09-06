@@ -12,6 +12,7 @@ linters:
     - dupl
     - gocritic
     - gochecknoglobals
+    - unparam
 
 issues:
   exclude-use-default: false

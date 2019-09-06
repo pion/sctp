@@ -53,7 +53,7 @@ func (i *chunkInit) unmarshal(raw []byte) error {
 func (i *chunkInit) marshal() ([]byte, error) {
 	initShared, err := i.chunkInitCommon.marshal()
 	if err != nil {
-		return nil, errors.Wrap(err, "Failed marshalling INIT common data")
+		return nil, errors.Wrap(err, "Failed marshaling INIT common data")
 	}
 
 	i.chunkHeader.typ = ctInit

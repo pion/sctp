@@ -15,7 +15,7 @@ func TestChunkErrorUnrecognizedChunkType(t *testing.T) {
 	t.Run("unmarshal", func(t *testing.T) {
 		c := &chunkError{}
 		err := c.unmarshal(rawIn)
-		assert.Nil(t, err, "unmarshal should suceed")
+		assert.Nil(t, err, "unmarshal should succeed")
 		assert.Equal(t, ctError, c.typ, "chunk type should be ERROR")
 		assert.Equal(t, 1, len(c.errorCauses), "there should be on errorCause")
 
