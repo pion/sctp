@@ -952,20 +952,27 @@ func (a *Association) handleData(d *chunkPayloadData) []*packet {
 
 	canPush := a.payloadQueue.canPush(d, a.peerLastTSN)
 	if canPush {
-		if a.getMyReceiverWindowCredit() > 0 {
-			s := a.getOrCreateStream(d.streamIdentifier)
-			if s == nil {
-				// silentely discard the data. (sender will retry on T3-rtx timeout)
-				// see pion/sctp#30
-				return nil
-			}
+		s := a.getOrCreateStream(d.streamIdentifier)
+		if s == nil {
+			// silentely discard the data. (sender will retry on T3-rtx timeout)
+			// see pion/sctp#30
+			a.log.Debugf("discard %d", d.streamSequenceNumber)
+			return nil
+		}
 
+		if a.getMyReceiverWindowCredit() > 0 {
 			// Pass the new chunk to stream level as soon as it arrives
 			a.payloadQueue.push(d, a.peerLastTSN)
 			s.handleData(d)
+		} else if !d.unordered &&
+			!s.reassemblyQueue.isReadable() {
+			a.log.Warnf("[%s] receive buffer full, but reassemblyQueue is missing a chunk so the chunk will be pushed tsn=%d ssn=%d", a.name, d.tsn, d.streamSequenceNumber)
+			a.payloadQueue.push(d, a.peerLastTSN)
+			s.handleData(d)
 		} else {
-			a.log.Debugf("[%s] receive buffer full. dropping DATA with tsn=%d", a.name, d.tsn)
+			a.log.Debugf("[%s] receive buffer full. dropping DATA with tsn=%d ssn=%d", a.name, d.tsn, d.streamSequenceNumber)
 		}
+
 	}
 
 	reply := []*packet{}
