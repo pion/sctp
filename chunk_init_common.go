@@ -55,7 +55,6 @@ const (
 )
 
 func (i *chunkInitCommon) unmarshal(raw []byte) error {
-
 	i.initiateTag = binary.BigEndian.Uint32(raw[0:])
 	i.advertisedReceiverWindowCredit = binary.BigEndian.Uint32(raw[4:])
 	i.numOutboundStreams = binary.BigEndian.Uint16(raw[8:])
