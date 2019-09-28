@@ -972,7 +972,6 @@ func (a *Association) handleData(d *chunkPayloadData) []*packet {
 		} else {
 			a.log.Debugf("[%s] receive buffer full. dropping DATA with tsn=%d ssn=%d", a.name, d.tsn, d.streamSequenceNumber)
 		}
-
 	}
 
 	reply := []*packet{}
@@ -1220,7 +1219,6 @@ func (a *Association) onCumulativeTSNAckPointAdvanced(totalBytesAcked int) {
 		//      path MTU.
 		if !a.inFastRecovery &&
 			a.pendingQueue.size() > 0 {
-
 			//a.cwnd += min32(uint32(totalBytesAcked), a.cwnd)
 			a.cwnd += min32(uint32(totalBytesAcked), a.mtu)
 			a.log.Tracef("[%s] updated cwnd=%d ssthresh=%d acked=%d (SS)",
@@ -1682,7 +1680,6 @@ func (a *Association) popPendingDataChunksToSend() ([]*chunkPayloadData, []uint1
 	var sisToReset []uint16 // stream identifieres to reset
 
 	if a.pendingQueue.size() > 0 {
-
 		// RFC 4960 sec 6.1.  Transmission of DATA Chunks
 		//   A) At any given time, the data sender MUST NOT transmit new data to
 		//      any destination transport address if its peer's rwnd indicates

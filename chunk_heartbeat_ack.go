@@ -52,7 +52,6 @@ func (h *chunkHeartbeatAck) marshal() ([]byte, error) {
 		// ParamHeartbeatInfo is valid
 	default:
 		return nil, errors.Errorf("Heartbeat Ack must have one param, and it should be a HeartbeatInfo")
-
 	}
 
 	out := make([]byte, 0)

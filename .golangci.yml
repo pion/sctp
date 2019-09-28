@@ -13,6 +13,8 @@ linters:
     - gocritic
     - gochecknoglobals
     - unparam
+    - funlen
+    - godox
 
 issues:
   exclude-use-default: false

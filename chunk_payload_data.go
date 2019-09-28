@@ -125,7 +125,6 @@ func (p *chunkPayloadData) unmarshal(raw []byte) error {
 }
 
 func (p *chunkPayloadData) marshal() ([]byte, error) {
-
 	payRaw := make([]byte, payloadDataHeaderSize+len(p.userData))
 
 	binary.BigEndian.PutUint32(payRaw[0:], p.tsn)

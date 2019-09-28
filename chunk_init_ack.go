@@ -63,7 +63,6 @@ func (i *chunkInitAck) marshal() ([]byte, error) {
 }
 
 func (i *chunkInitAck) check() (abort bool, err error) {
-
 	// The receiver of the INIT ACK records the value of the Initiate Tag
 	// parameter.  This value MUST be placed into the Verification Tag
 	// field of every SCTP packet that the INIT ACK receiver transmits
