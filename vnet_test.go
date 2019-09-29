@@ -49,7 +49,7 @@ func buildVNetEnv(cfg *vNetEnvConfig) (*vNetEnv, error) {
 			var hasDataChunkToDrop bool
 			if venv.numToDrop > 0 {
 				p := &packet{}
-				if err := p.unmarshal(c.UserData()); err != nil {
+				if err2 := p.unmarshal(c.UserData()); err2 != nil {
 					panic(fmt.Errorf("unable to parse SCTP packet"))
 				}
 
