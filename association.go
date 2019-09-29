@@ -964,13 +964,16 @@ func (a *Association) handleData(d *chunkPayloadData) []*packet {
 			// Pass the new chunk to stream level as soon as it arrives
 			a.payloadQueue.push(d, a.peerLastTSN)
 			s.handleData(d)
-		} else if !d.unordered &&
-			!s.reassemblyQueue.isReadable() {
-			a.log.Warnf("[%s] receive buffer full, but reassemblyQueue is missing a chunk so the chunk will be pushed tsn=%d ssn=%d", a.name, d.tsn, d.streamSequenceNumber)
-			a.payloadQueue.push(d, a.peerLastTSN)
-			s.handleData(d)
 		} else {
-			a.log.Debugf("[%s] receive buffer full. dropping DATA with tsn=%d ssn=%d", a.name, d.tsn, d.streamSequenceNumber)
+			// Receive buffer is full
+			lastTSN, ok := a.payloadQueue.getLastTSNReceived()
+			if ok && sna32LT(d.tsn, lastTSN) {
+				a.log.Debugf("[%s] receive buffer full, but accepted as this is a missing chunk with tsn=%d ssn=%d", a.name, d.tsn, d.streamSequenceNumber)
+				a.payloadQueue.push(d, a.peerLastTSN)
+				s.handleData(d)
+			} else {
+				a.log.Debugf("[%s] receive buffer full. dropping DATA with tsn=%d ssn=%d", a.name, d.tsn, d.streamSequenceNumber)
+			}
 		}
 	}
 
@@ -1362,7 +1365,6 @@ func (a *Association) handleSack(d *chunkSelectiveAck) error {
 
 		a.cumulativeTSNAckPoint = d.cumulativeTSNAck
 		cumTSNAckPointAdvanced = true
-
 		a.onCumulativeTSNAckPointAdvanced(totalBytesAcked)
 	}
 
