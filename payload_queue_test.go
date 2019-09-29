@@ -90,12 +90,12 @@ func TestPayloadQueue(t *testing.T) {
 		pq := newPayloadQueue()
 
 		// empty queie should return false
-		tsn, ok := pq.getLastTSNReceived()
+		_, ok := pq.getLastTSNReceived()
 		assert.False(t, ok, "should be false")
 
 		ok = pq.push(makePayload(20, 0), 0)
 		assert.True(t, ok, "should be true")
-		tsn, ok = pq.getLastTSNReceived()
+		tsn, ok := pq.getLastTSNReceived()
 		assert.True(t, ok, "should be false")
 		assert.Equal(t, uint32(20), tsn, "should match")
 
