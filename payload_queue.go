@@ -150,6 +150,16 @@ func (q *payloadQueue) markAsAcked(tsn uint32) int {
 	return nBytesAcked
 }
 
+func (q *payloadQueue) getLastTSNReceived() (uint32, bool) {
+	q.updateSortedKeys()
+
+	qlen := len(q.sorted)
+	if qlen == 0 {
+		return 0, false
+	}
+	return q.sorted[qlen-1], true
+}
+
 func (q *payloadQueue) getNumBytes() int {
 	return q.nBytes
 }

@@ -85,4 +85,32 @@ func TestPayloadQueue(t *testing.T) {
 		assert.Equal(t, gab1[1].start, gab2[1].start)
 		assert.Equal(t, gab1[1].end, gab2[1].end)
 	})
+
+	t.Run("getLastTSNReceived", func(t *testing.T) {
+		pq := newPayloadQueue()
+
+		// empty queie should return false
+		tsn, ok := pq.getLastTSNReceived()
+		assert.False(t, ok, "should be false")
+
+		ok = pq.push(makePayload(20, 0), 0)
+		assert.True(t, ok, "should be true")
+		tsn, ok = pq.getLastTSNReceived()
+		assert.True(t, ok, "should be false")
+		assert.Equal(t, uint32(20), tsn, "should match")
+
+		// append should work
+		ok = pq.push(makePayload(21, 0), 0)
+		assert.True(t, ok, "should be true")
+		tsn, ok = pq.getLastTSNReceived()
+		assert.True(t, ok, "should be false")
+		assert.Equal(t, uint32(21), tsn, "should match")
+
+		// check if sorting applied
+		ok = pq.push(makePayload(19, 0), 0)
+		assert.True(t, ok, "should be true")
+		tsn, ok = pq.getLastTSNReceived()
+		assert.True(t, ok, "should be false")
+		assert.Equal(t, uint32(21), tsn, "should match")
+	})
 }

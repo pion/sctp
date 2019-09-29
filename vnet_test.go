@@ -7,12 +7,14 @@ import (
 	"time"
 
 	"github.com/pion/logging"
+	"github.com/pion/transport/test"
 	"github.com/pion/transport/vnet"
 	"github.com/stretchr/testify/assert"
 )
 
 type vNetEnvConfig struct {
 	loggerFactory logging.LoggerFactory
+	log           logging.LeveledLogger
 }
 
 type vNetEnv struct {
@@ -27,6 +29,8 @@ func (venv *vNetEnv) dropNextDataChunk(numToDrop int) {
 }
 
 func buildVNetEnv(cfg *vNetEnvConfig) (*vNetEnv, error) {
+	log := cfg.log
+
 	var venv *vNetEnv
 	serverIP := "1.1.1.1"
 	clientIP := "2.2.2.2"
@@ -60,10 +64,12 @@ func buildVNetEnv(cfg *vNetEnvConfig) (*vNetEnv, error) {
 						if !lockedOnTSN {
 							tsn = chunk.tsn
 							lockedOnTSN = true
+							log.Infof("Chunk filter: lock on TSN %d", tsn)
 						}
 						if chunk.tsn == tsn {
 							hasDataChunkToDrop = true
 							venv.numToDrop--
+							log.Infof("Chunk filter:  drop TSN %d", tsn)
 							break loop
 						}
 					}
@@ -104,12 +110,13 @@ func buildVNetEnv(cfg *vNetEnvConfig) (*vNetEnv, error) {
 	return venv, nil
 }
 
-func TestRwndFull(t *testing.T) {
+func testRwndFull(t *testing.T, unordered bool) {
 	loggerFactory := logging.NewDefaultLoggerFactory()
 	log := loggerFactory.NewLogger("test")
 
 	venv, err := buildVNetEnv(&vNetEnvConfig{
 		loggerFactory: loggerFactory,
+		log:           log,
 	})
 	if !assert.NoError(t, err, "should succeed") {
 		return
@@ -170,6 +177,8 @@ func TestRwndFull(t *testing.T) {
 			return
 		}
 		assert.Equal(t, "HELLO", string(buf[:n]), "should match")
+
+		stream.SetReliabilityParams(unordered, ReliabilityTypeReliable, 0)
 
 		log.Info("server stream ready")
 		close(serverStreamReady)
@@ -239,6 +248,8 @@ func TestRwndFull(t *testing.T) {
 			return
 		}
 
+		stream.SetReliabilityParams(unordered, ReliabilityTypeReliable, 0)
+
 		log.Info("client stream ready")
 		close(clientStreamReady)
 
@@ -251,7 +262,7 @@ func TestRwndFull(t *testing.T) {
 		assoc.rwnd = 2 * maxReceiveBufferSize
 		assoc.lock.Unlock()
 
-		msgSize := int(float32(maxReceiveBufferSize) * 0.75)
+		msgSize := int(float32(maxReceiveBufferSize)/2) + int(initialMTU)
 		buf := make([]byte, msgSize)
 
 		// Send two large messages so that the second one will
@@ -307,4 +318,22 @@ func TestRwndFull(t *testing.T) {
 	close(shutDownServer)
 	<-serverShutDown
 	log.Info("all done")
+}
+
+func TestRwndFull(t *testing.T) {
+	t.Run("Ordered", func(t *testing.T) {
+		// Limit runtime in case of deadlocks
+		lim := test.TimeOut(time.Second * 10)
+		defer lim.Stop()
+
+		testRwndFull(t, false)
+	})
+
+	t.Run("Unordered", func(t *testing.T) {
+		// Limit runtime in case of deadlocks
+		lim := test.TimeOut(time.Second * 10)
+		defer lim.Stop()
+
+		testRwndFull(t, true)
+	})
 }
