@@ -1183,8 +1183,11 @@ func TestHandleForwardTSN(t *testing.T) {
 
 		p := a.handleForwardTSN(fwdtsn)
 
+		a.lock.Lock()
+		ackState := a.ackState
+		a.lock.Unlock()
 		assert.Equal(t, a.peerLastTSN, prevTSN+3, "peerLastTSN should advance by 3 ")
-		assert.Equal(t, ackStateDelay, a.ackState, "delayed sack should be requested")
+		assert.Equal(t, ackStateDelay, ackState, "delayed sack should be requested")
 		assert.Nil(t, p, "should return nil")
 	})
 
@@ -1215,8 +1218,11 @@ func TestHandleForwardTSN(t *testing.T) {
 
 		p := a.handleForwardTSN(fwdtsn)
 
+		a.lock.Lock()
+		ackState := a.ackState
+		a.lock.Unlock()
 		assert.Equal(t, a.peerLastTSN, prevTSN+2, "peerLastTSN should advance by 3")
-		assert.Equal(t, ackStateDelay, a.ackState, "delayed sack should be requested")
+		assert.Equal(t, ackStateDelay, ackState, "delayed sack should be requested")
 		assert.Nil(t, p, "should return nil")
 	})
 
@@ -1247,8 +1253,12 @@ func TestHandleForwardTSN(t *testing.T) {
 
 		p := a.handleForwardTSN(fwdtsn)
 
+		a.lock.Lock()
+		ackState := a.ackState
+		a.lock.Unlock()
 		assert.Equal(t, a.peerLastTSN, prevTSN+1, "peerLastTSN should advance by 1")
-		assert.Equal(t, ackStateImmediate, a.ackState, "immediate sack should be requested")
+		assert.Equal(t, ackStateImmediate, ackState, "immediate sack should be requested")
+
 		assert.Nil(t, p, "should return nil")
 	})
 
@@ -1269,8 +1279,11 @@ func TestHandleForwardTSN(t *testing.T) {
 
 		p := a.handleForwardTSN(fwdtsn)
 
+		a.lock.Lock()
+		ackState := a.ackState
+		a.lock.Unlock()
 		assert.Equal(t, a.peerLastTSN, prevTSN, "peerLastTSN should not advance")
-		assert.Equal(t, ackStateImmediate, a.ackState, "sack should be requested")
+		assert.Equal(t, ackStateImmediate, ackState, "sack should be requested")
 		assert.Nil(t, p, "should return nil")
 	})
 }
