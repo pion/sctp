@@ -43,9 +43,11 @@ func (q *pendingBaseQueue) size() int {
 // pendingQueue
 
 type pendingQueue struct {
-	unorderedQueue *pendingBaseQueue
-	orderedQueue   *pendingBaseQueue
-	nBytes         int
+	unorderedQueue      *pendingBaseQueue
+	orderedQueue        *pendingBaseQueue
+	nBytes              int
+	selected            bool
+	unorderedIsSelected bool
 }
 
 func newPendingQueue() *pendingQueue {
@@ -65,6 +67,13 @@ func (q *pendingQueue) push(c *chunkPayloadData) {
 }
 
 func (q *pendingQueue) peek() *chunkPayloadData {
+	if q.selected {
+		if q.unorderedIsSelected {
+			return q.unorderedQueue.get(0)
+		}
+		return q.orderedQueue.get(0)
+	}
+
 	if c := q.unorderedQueue.get(0); c != nil {
 		return c
 	}
@@ -72,15 +81,44 @@ func (q *pendingQueue) peek() *chunkPayloadData {
 }
 
 func (q *pendingQueue) pop(c *chunkPayloadData) error {
-	if c.unordered {
-		popped := q.unorderedQueue.pop()
-		if popped != c {
-			return fmt.Errorf("unexped chunk popped (unordered)")
+	if q.selected {
+		var popped *chunkPayloadData
+		if q.unorderedIsSelected {
+			popped = q.unorderedQueue.pop()
+			if popped != c {
+				return fmt.Errorf("unexped chunk popped (unordered)")
+			}
+		} else {
+			popped = q.orderedQueue.pop()
+			if popped != c {
+				return fmt.Errorf("unexped chunk popped (ordered)")
+			}
+		}
+		if popped.endingFragment {
+			q.selected = false
 		}
 	} else {
-		popped := q.orderedQueue.pop()
-		if popped != c {
-			return fmt.Errorf("unexped chunk popped (ordered)")
+		if !c.beginningFragment {
+			return fmt.Errorf("unexpected q state (should've been selected)")
+		}
+		if c.unordered {
+			popped := q.unorderedQueue.pop()
+			if popped != c {
+				return fmt.Errorf("unexped chunk popped (unordered)")
+			}
+			if !popped.endingFragment {
+				q.selected = true
+				q.unorderedIsSelected = true
+			}
+		} else {
+			popped := q.orderedQueue.pop()
+			if popped != c {
+				return fmt.Errorf("unexped chunk popped (ordered)")
+			}
+			if !popped.endingFragment {
+				q.selected = true
+				q.unorderedIsSelected = false
+			}
 		}
 	}
 	q.nBytes -= len(c.userData)

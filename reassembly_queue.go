@@ -216,15 +216,15 @@ func (r *reassemblyQueue) findCompleteUnorderedChunkSet() *chunkSet {
 	}
 
 	// Extract the range of chunks
-	chunks := r.unorderedChunks[startIdx : startIdx+nChunks]
+	var chunks []*chunkPayloadData
+	chunks = append(chunks, r.unorderedChunks[startIdx:startIdx+nChunks]...)
+
 	r.unorderedChunks = append(
 		r.unorderedChunks[:startIdx],
 		r.unorderedChunks[startIdx+nChunks:]...)
 
 	chunkSet := newChunkSet(0, chunks[0].payloadType)
-	for _, c := range chunks {
-		chunkSet.push(c)
-	}
+	chunkSet.chunks = chunks
 
 	return chunkSet
 }
