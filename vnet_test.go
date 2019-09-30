@@ -2,7 +2,9 @@ package sctp
 
 import (
 	"fmt"
+	"math/rand"
 	"net"
+	"reflect"
 	"testing"
 	"time"
 
@@ -139,6 +141,10 @@ func testRwndFull(t *testing.T, unordered bool) {
 	shutDownClient := make(chan struct{})
 	shutDownServer := make(chan struct{})
 
+	msgSize := int(float32(maxReceiveBufferSize)/2) + int(initialMTU)
+	msg := make([]byte, msgSize)
+	rand.Read(msg) // nolint:errcheck,gosec
+
 	go func() {
 		defer close(serverShutDown)
 		// connected UDP conn for server
@@ -205,6 +211,7 @@ func testRwndFull(t *testing.T, unordered bool) {
 				return
 			}
 			log.Infof("server read %d bytes", n)
+			assert.True(t, reflect.DeepEqual(msg, buf[:n]), "msg %d should match", i)
 		}
 
 		close(serverReadAll)
@@ -262,13 +269,10 @@ func testRwndFull(t *testing.T, unordered bool) {
 		assoc.rwnd = 2 * maxReceiveBufferSize
 		assoc.lock.Unlock()
 
-		msgSize := int(float32(maxReceiveBufferSize)/2) + int(initialMTU)
-		buf := make([]byte, msgSize)
-
 		// Send two large messages so that the second one will
 		// cause receiver side buffer full
 		for i := 0; i < 2; i++ {
-			_, err = stream.Write(buf)
+			_, err = stream.Write(msg)
 			if !assert.NoError(t, err, "should succeed") {
 				return
 			}

@@ -1589,8 +1589,10 @@ func (a *Association) sendResetRequest(streamIdentifier uint16) error {
 	// Create DATA chunk which only contains valid stream identifier with
 	// nil userData and use it as a EOS from the stream.
 	c := &chunkPayloadData{
-		streamIdentifier: streamIdentifier,
-		userData:         nil,
+		streamIdentifier:  streamIdentifier,
+		beginningFragment: true,
+		endingFragment:    true,
+		userData:          nil,
 	}
 
 	a.pendingQueue.push(c)
@@ -1647,12 +1649,7 @@ func (a *Association) resetStreams(p *paramOutgoingResetRequest) *packet {
 	}})
 }
 
-// The caller should hold the lock.
-func (a *Association) peekNextPendingData() *chunkPayloadData {
-	return a.pendingQueue.peek()
-}
-
-// Move the chunk peeked with peekNextPendingData() to the inflightQueue.
+// Move the chunk peeked with a.pendingQueue.peek() to the inflightQueue.
 // The caller should hold the lock.
 func (a *Association) movePendingDataChunkToInflightQueue(c *chunkPayloadData) {
 	if err := a.pendingQueue.pop(c); err != nil {
@@ -1693,7 +1690,7 @@ func (a *Association) popPendingDataChunksToSend() ([]*chunkPayloadData, []uint1
 		usingFullWindow := (a.inflightQueue.getNumBytes() == 0)
 
 		for {
-			c := a.peekNextPendingData()
+			c := a.pendingQueue.peek()
 			if c == nil {
 				usingFullWindow = false
 				break // no more pending data
@@ -1726,7 +1723,7 @@ func (a *Association) popPendingDataChunksToSend() ([]*chunkPayloadData, []uint1
 		// the data sender can always have one DATA chunk in flight to the receiver
 		if len(chunks) == 0 && a.inflightQueue.size() == 0 {
 			// Send zero window probe
-			c := a.peekNextPendingData()
+			c := a.pendingQueue.peek()
 			if c != nil {
 				a.movePendingDataChunkToInflightQueue(c)
 				chunks = append(chunks, c)

@@ -38,10 +38,9 @@ func stressDuplex(t *testing.T) {
 
 	defer stop(t)
 
-	// TODO: Increase once SCTP is more reliable in case of slow reader
 	opt := test.Options{
-		MsgSize:  2048, // 65535,
-		MsgCount: 10,   // 1000,
+		MsgSize:  65535,
+		MsgCount: 1000,
 	}
 
 	err = test.StressDuplex(ca, cb, opt)
