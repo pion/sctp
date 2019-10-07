@@ -113,4 +113,23 @@ func TestPayloadQueue(t *testing.T) {
 		assert.True(t, ok, "should be false")
 		assert.Equal(t, uint32(21), tsn, "should match")
 	})
+
+	t.Run("markAllToRetrasmit", func(t *testing.T) {
+		pq := newPayloadQueue()
+		for i := 0; i < 3; i++ {
+			pq.push(makePayload(uint32(i+1), 10), 0)
+		}
+		pq.markAsAcked(2)
+		pq.markAllToRetrasmit()
+
+		c, ok := pq.get(1)
+		assert.True(t, ok, "should be true")
+		assert.True(t, c.retransmit, "should be marked as retransmit")
+		c, ok = pq.get(2)
+		assert.True(t, ok, "should be true")
+		assert.False(t, c.retransmit, "should NOT be marked as retransmit")
+		c, ok = pq.get(3)
+		assert.True(t, ok, "should be true")
+		assert.True(t, c.retransmit, "should be marked as retransmit")
+	})
 }

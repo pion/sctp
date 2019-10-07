@@ -230,7 +230,7 @@ func (c *dumbConn) SetWriteDeadline(t time.Time) error {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-func createNewAssociationPair(br *test.Bridge, ackMode int) (*Association, *Association, error) {
+func createNewAssociationPair(br *test.Bridge, ackMode int, recvBufSize uint32) (*Association, *Association, error) {
 	var a0, a1 *Association
 	var err0, err1 error
 	loggerFactory := logging.NewDefaultLoggerFactory()
@@ -240,15 +240,17 @@ func createNewAssociationPair(br *test.Bridge, ackMode int) (*Association, *Asso
 
 	go func() {
 		a0, err0 = Client(Config{
-			NetConn:       br.GetConn0(),
-			LoggerFactory: loggerFactory,
+			NetConn:              br.GetConn0(),
+			MaxReceiveBufferSize: recvBufSize,
+			LoggerFactory:        loggerFactory,
 		})
 		handshake0Ch <- true
 	}()
 	go func() {
 		a1, err1 = Client(Config{
-			NetConn:       br.GetConn1(),
-			LoggerFactory: loggerFactory,
+			NetConn:              br.GetConn1(),
+			MaxReceiveBufferSize: recvBufSize,
+			LoggerFactory:        loggerFactory,
 		})
 		handshake1Ch <- true
 	}()
@@ -415,7 +417,7 @@ func TestAssocReliable(t *testing.T) {
 		const msg = "ABC"
 		br := test.NewBridge()
 
-		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay)
+		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, 0)
 		if !assert.Nil(t, err, "failed to create associations") {
 			assert.FailNow(t, "failed due to earlier error")
 		}
@@ -454,7 +456,7 @@ func TestAssocReliable(t *testing.T) {
 		var ppi PayloadProtocolIdentifier
 		br := test.NewBridge()
 
-		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay)
+		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, 0)
 		if !assert.Nil(t, err, "failed to create associations") {
 			assert.FailNow(t, "failed due to earlier error")
 		}
@@ -508,7 +510,7 @@ func TestAssocReliable(t *testing.T) {
 		var ppi PayloadProtocolIdentifier
 		br := test.NewBridge()
 
-		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay)
+		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, 0)
 		if !assert.Nil(t, err, "failed to create associations") {
 			assert.FailNow(t, "failed due to earlier error")
 		}
@@ -549,7 +551,7 @@ func TestAssocReliable(t *testing.T) {
 		var ppi PayloadProtocolIdentifier
 		br := test.NewBridge()
 
-		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay)
+		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, 0)
 		if !assert.Nil(t, err, "failed to create associations") {
 			assert.FailNow(t, "failed due to earlier error")
 		}
@@ -590,7 +592,7 @@ func TestAssocReliable(t *testing.T) {
 		var ppi PayloadProtocolIdentifier
 		br := test.NewBridge()
 
-		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay)
+		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, 0)
 		if !assert.Nil(t, err, "failed to create associations") {
 			assert.FailNow(t, "failed due to earlier error")
 		}
@@ -649,7 +651,7 @@ func TestAssocReliable(t *testing.T) {
 		var ppi PayloadProtocolIdentifier
 		br := test.NewBridge()
 
-		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay)
+		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, 0)
 		if !assert.Nil(t, err, "failed to create associations") {
 			assert.FailNow(t, "failed due to earlier error")
 		}
@@ -703,7 +705,7 @@ func TestAssocReliable(t *testing.T) {
 		const msg = "Hello"
 		br := test.NewBridge()
 
-		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay)
+		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, 0)
 		if !assert.Nil(t, err, "failed to create associations") {
 			assert.FailNow(t, "failed due to earlier error")
 		}
@@ -765,7 +767,7 @@ func TestAssocUnreliable(t *testing.T) {
 		const si uint16 = 1
 		br := test.NewBridge()
 
-		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay)
+		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, 0)
 		if !assert.Nil(t, err, "failed to create associations") {
 			assert.FailNow(t, "failed due to earlier error")
 		}
@@ -816,7 +818,7 @@ func TestAssocUnreliable(t *testing.T) {
 		const si uint16 = 1
 		br := test.NewBridge()
 
-		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay)
+		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, 0)
 		if !assert.Nil(t, err, "failed to create associations") {
 			assert.FailNow(t, "failed due to earlier error")
 		}
@@ -869,7 +871,7 @@ func TestAssocUnreliable(t *testing.T) {
 		const si uint16 = 2
 		br := test.NewBridge()
 
-		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay)
+		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, 0)
 		if !assert.Nil(t, err, "failed to create associations") {
 			assert.FailNow(t, "failed due to earlier error")
 		}
@@ -920,7 +922,7 @@ func TestAssocUnreliable(t *testing.T) {
 		const si uint16 = 1
 		br := test.NewBridge()
 
-		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay)
+		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, 0)
 		if !assert.Nil(t, err, "failed to create associations") {
 			assert.FailNow(t, "failed due to earlier error")
 		}
@@ -971,7 +973,7 @@ func TestAssocUnreliable(t *testing.T) {
 		const si uint16 = 3
 		br := test.NewBridge()
 
-		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay)
+		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, 0)
 		if !assert.Nil(t, err, "failed to create associations") {
 			assert.FailNow(t, "failed due to earlier error")
 		}
@@ -1023,7 +1025,7 @@ func TestAssocUnreliable(t *testing.T) {
 		const si uint16 = 3
 		br := test.NewBridge()
 
-		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay)
+		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, 0)
 		if !assert.Nil(t, err, "failed to create associations") {
 			assert.FailNow(t, "failed due to earlier error")
 		}
@@ -1585,7 +1587,7 @@ func TestAssocT3RtxTimer(t *testing.T) {
 		var ppi PayloadProtocolIdentifier
 		br := test.NewBridge()
 
-		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay)
+		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, 0)
 		if !assert.Nil(t, err, "failed to create associations") {
 			assert.FailNow(t, "failed due to earlier error")
 		}
@@ -1647,7 +1649,7 @@ func TestAssocCongestionControl(t *testing.T) {
 		var ppi PayloadProtocolIdentifier
 		br := test.NewBridge()
 
-		a0, a1, err := createNewAssociationPair(br, ackModeNormal)
+		a0, a1, err := createNewAssociationPair(br, ackModeNormal, 0)
 		if !assert.Nil(t, err, "failed to create associations") {
 			assert.FailNow(t, "failed due to earlier error")
 		}
@@ -1709,6 +1711,7 @@ func TestAssocCongestionControl(t *testing.T) {
 	})
 
 	t.Run("Congestion Avoidance", func(t *testing.T) {
+		const maxReceiveBufferSize uint32 = 64 * 1024
 		const si uint16 = 6
 		const nPacketsToSend = 2000
 		var n int
@@ -1718,7 +1721,7 @@ func TestAssocCongestionControl(t *testing.T) {
 
 		br := test.NewBridge()
 
-		a0, a1, err := createNewAssociationPair(br, ackModeNormal)
+		a0, a1, err := createNewAssociationPair(br, ackModeNormal, maxReceiveBufferSize)
 		if !assert.Nil(t, err, "failed to create associations") {
 			assert.FailNow(t, "failed due to earlier error")
 		}
@@ -1792,6 +1795,7 @@ func TestAssocCongestionControl(t *testing.T) {
 	// This is to test even rwnd becomes 0, sender should be able to send a zero window probe
 	// on T3-rtx retramission timeout to complete receiving all the packets.
 	t.Run("Slow reader", func(t *testing.T) {
+		const maxReceiveBufferSize uint32 = 64 * 1024
 		const si uint16 = 6
 		nPacketsToSend := int(math.Floor(float64(maxReceiveBufferSize)/1000.0)) * 2
 		var n int
@@ -1801,7 +1805,7 @@ func TestAssocCongestionControl(t *testing.T) {
 
 		br := test.NewBridge()
 
-		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay)
+		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, maxReceiveBufferSize)
 		if !assert.Nil(t, err, "failed to create associations") {
 			assert.FailNow(t, "failed due to earlier error")
 		}
@@ -1893,7 +1897,7 @@ func TestAssocDelayedAck(t *testing.T) {
 
 		br := test.NewBridge()
 
-		a0, a1, err := createNewAssociationPair(br, ackModeAlwaysDelay)
+		a0, a1, err := createNewAssociationPair(br, ackModeAlwaysDelay, 0)
 		if !assert.Nil(t, err, "failed to create associations") {
 			assert.FailNow(t, "failed due to earlier error")
 		}
@@ -1960,7 +1964,7 @@ func TestAssocReset(t *testing.T) {
 		const msg = "ABC"
 		br := test.NewBridge()
 
-		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay)
+		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, 0)
 		if !assert.Nil(t, err, "failed to create associations") {
 			assert.FailNow(t, "failed due to earlier error")
 		}
@@ -2018,7 +2022,7 @@ func TestAssocReset(t *testing.T) {
 		const msg = "ABC"
 		br := test.NewBridge()
 
-		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay)
+		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, 0)
 		if !assert.Nil(t, err, "failed to create associations") {
 			assert.FailNow(t, "failed due to earlier error")
 		}
