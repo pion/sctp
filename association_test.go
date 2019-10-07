@@ -1786,7 +1786,7 @@ func TestAssocCongestionControl(t *testing.T) {
 		t.Logf("nT3Timeouts : %d\n", a0.stats.getNumT3Timeouts())
 
 		assert.Equal(t, uint64(nPacketsToSend), a1.stats.getNumDATAs(), "packet count mismatch")
-		assert.True(t, a0.stats.getNumSACKs() < nPacketsToSend/20, "too many sacks")
+		assert.True(t, a0.stats.getNumSACKs() < nPacketsToSend/10, "too many sacks")
 		assert.Equal(t, uint64(0), a0.stats.getNumT3Timeouts(), "should be no retransmit")
 
 		closeAssociationPair(br, a0, a1)
