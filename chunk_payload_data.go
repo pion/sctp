@@ -64,6 +64,10 @@ type chunkPayloadData struct {
 	since     time.Time
 	nSent     uint32 // number of transmission made for this chunk
 	abandoned bool
+
+	// Retransmission flag set when T1-RTX timeout occurred and this
+	// chunk is still in the inflight queue
+	retransmit bool
 }
 
 const (

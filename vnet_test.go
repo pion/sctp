@@ -141,6 +141,7 @@ func testRwndFull(t *testing.T, unordered bool) {
 	shutDownClient := make(chan struct{})
 	shutDownServer := make(chan struct{})
 
+	maxReceiveBufferSize := uint32(64 * 1024)
 	msgSize := int(float32(maxReceiveBufferSize)/2) + int(initialMTU)
 	msg := make([]byte, msgSize)
 	rand.Read(msg) // nolint:errcheck,gosec
@@ -159,8 +160,9 @@ func testRwndFull(t *testing.T, unordered bool) {
 
 		// server association
 		assoc, err := Server(Config{
-			NetConn:       conn,
-			LoggerFactory: loggerFactory,
+			NetConn:              conn,
+			MaxReceiveBufferSize: maxReceiveBufferSize,
+			LoggerFactory:        loggerFactory,
 		})
 		if !assert.NoError(t, err, "should succeed") {
 			return
@@ -232,8 +234,9 @@ func testRwndFull(t *testing.T, unordered bool) {
 
 		// client association
 		assoc, err := Client(Config{
-			NetConn:       conn,
-			LoggerFactory: loggerFactory,
+			NetConn:              conn,
+			MaxReceiveBufferSize: maxReceiveBufferSize,
+			LoggerFactory:        loggerFactory,
 		})
 		if !assert.NoError(t, err, "should succeed") {
 			return

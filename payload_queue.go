@@ -160,6 +160,15 @@ func (q *payloadQueue) getLastTSNReceived() (uint32, bool) {
 	return q.sorted[qlen-1], true
 }
 
+func (q *payloadQueue) markAllToRetrasmit() {
+	for _, c := range q.chunkMap {
+		if c.acked || c.abandoned {
+			continue
+		}
+		c.retransmit = true
+	}
+}
+
 func (q *payloadQueue) getNumBytes() int {
 	return q.nBytes
 }
