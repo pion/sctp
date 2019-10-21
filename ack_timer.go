@@ -43,7 +43,7 @@ func (t *ackTimer) start() bool {
 		return false
 	}
 
-	// this is a noop if the timer is always running
+	// this is a noop if the timer is already running
 	if t.stopFunc != nil {
 		return false
 	}

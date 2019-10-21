@@ -1786,7 +1786,7 @@ func TestAssocCongestionControl(t *testing.T) {
 		t.Logf("nT3Timeouts : %d\n", a0.stats.getNumT3Timeouts())
 
 		assert.Equal(t, uint64(nPacketsToSend), a1.stats.getNumDATAs(), "packet count mismatch")
-		assert.True(t, a0.stats.getNumSACKs() < nPacketsToSend/10, "too many sacks")
+		assert.True(t, a0.stats.getNumSACKs() <= nPacketsToSend/2, "too many sacks")
 		assert.Equal(t, uint64(0), a0.stats.getNumT3Timeouts(), "should be no retransmit")
 
 		closeAssociationPair(br, a0, a1)
@@ -1882,7 +1882,86 @@ func TestAssocCongestionControl(t *testing.T) {
 }
 
 func TestAssocDelayedAck(t *testing.T) {
-	t.Run("Ack all DATA chunks with one SACK", func(t *testing.T) {
+	t.Run("First DATA chunk gets acked with delay", func(t *testing.T) {
+		const si uint16 = 6
+		var n int
+		var nPacketsReceived int
+		var ppi PayloadProtocolIdentifier
+		sbuf := make([]byte, 1000) // size should be less than initial cwnd (4380)
+		rbuf := make([]byte, 1500)
+
+		_, err := cryptoRand.Read(sbuf)
+		if !assert.Nil(t, err, "failed to create associations") {
+			return
+		}
+
+		br := test.NewBridge()
+
+		a0, a1, err := createNewAssociationPair(br, ackModeAlwaysDelay, 0)
+		if !assert.Nil(t, err, "failed to create associations") {
+			assert.FailNow(t, "failed due to earlier error")
+		}
+
+		s0, s1, err := establishSessionPair(br, a0, a1, si)
+		assert.Nil(t, err, "failed to establish session pair")
+
+		a0.stats.reset()
+		a1.stats.reset()
+
+		// Writes data (will fragmented)
+		n, err = s0.WriteSCTP(sbuf, PayloadTypeWebRTCBinary)
+		assert.Nil(t, err, "WriteSCTP failed")
+		assert.Equal(t, n, len(sbuf), "unexpected length of received data")
+
+		// Repeat calling br.Tick() until the buffered amount becomes 0
+		since := time.Now()
+		for s0.BufferedAmount() > 0 {
+			for {
+				n = br.Tick()
+				if n == 0 {
+					break
+				}
+			}
+
+			for {
+				s1.lock.RLock()
+				readable := s1.reassemblyQueue.isReadable()
+				s1.lock.RUnlock()
+				if !readable {
+					break
+				}
+				n, ppi, err = s1.ReadSCTP(rbuf)
+				if !assert.Nil(t, err, "ReadSCTP failed") {
+					return
+				}
+				assert.Equal(t, len(sbuf), n, "unexpected length of received data")
+				assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
+
+				nPacketsReceived++
+			}
+		}
+		delay := time.Since(since).Seconds()
+		t.Logf("received in %.03f seconds", delay)
+		assert.True(t, delay >= 0.2, "should be >= 200msec")
+
+		br.Process()
+
+		assert.Equal(t, 1, nPacketsReceived, "should be one packet received")
+		assert.Equal(t, 0, s1.getNumBytesInReassemblyQueue(), "reassembly queue should be empty")
+
+		t.Logf("nDATAs      : %d\n", a1.stats.getNumDATAs())
+		t.Logf("nSACKs      : %d\n", a0.stats.getNumSACKs())
+		t.Logf("nAckTimeouts: %d\n", a1.stats.getNumAckTimeouts())
+
+		assert.Equal(t, uint64(1), a1.stats.getNumDATAs(), "DATA chunk count mismatch")
+		assert.Equal(t, a0.stats.getNumSACKs(), a1.stats.getNumDATAs(), "sack count should be equal to the number of data chunks")
+		assert.Equal(t, uint64(1), a1.stats.getNumAckTimeouts(), "ackTimeout count mismatch")
+		assert.Equal(t, uint64(0), a0.stats.getNumT3Timeouts(), "should be no retransmit")
+
+		closeAssociationPair(br, a0, a1)
+	})
+
+	t.Run("Second DATA chunk to generate SACK immedidately", func(t *testing.T) {
 		const si uint16 = 6
 		var n int
 		var nPacketsReceived int
@@ -1950,8 +2029,8 @@ func TestAssocDelayedAck(t *testing.T) {
 		t.Logf("nAckTimeouts: %d\n", a1.stats.getNumAckTimeouts())
 
 		assert.Equal(t, uint64(4), a1.stats.getNumDATAs(), "DATA chunk count mismatch")
-		assert.Equal(t, uint64(1), a0.stats.getNumSACKs(), "sack count should be one")
-		assert.Equal(t, uint64(1), a1.stats.getNumAckTimeouts(), "ackTimeout count mismatch")
+		assert.True(t, a0.stats.getNumSACKs() < a1.stats.getNumDATAs(), "sack count should less than data")
+		assert.Equal(t, uint64(0), a1.stats.getNumAckTimeouts(), "ackTimeout count mismatch")
 		assert.Equal(t, uint64(0), a0.stats.getNumT3Timeouts(), "should be no retransmit")
 
 		closeAssociationPair(br, a0, a1)
