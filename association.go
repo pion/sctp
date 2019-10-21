@@ -51,9 +51,9 @@ const (
 
 // ack transmission state
 const (
-	ackStateIdle int = iota
-	ackStateImmediate
-	ackStateDelay
+	ackStateIdle      int = iota // ack timer is off
+	ackStateImmediate            // ack timer is on (ack is being delayed)
+	ackStateDelay                // will send ack immediately
 )
 
 // other constants
@@ -176,6 +176,10 @@ type Association struct {
 
 	// stats
 	stats *associationStats
+
+	// per inbound packet context
+	delayedAckTriggered   bool
+	immediateAckTriggered bool
 
 	name string
 	log  logging.LeveledLogger
@@ -485,12 +489,16 @@ func (a *Association) handleInbound(raw []byte) error {
 		return errors.Wrap(err, "failed validating packet")
 	}
 
+	a.handleChunkStart(p)
+
 	for _, c := range p.chunks {
 		err := a.handleChunk(p, c)
 		if err != nil {
-			return errors.Wrap(err, "failed handling chunk")
+			a.log.Warnf("[%s] %s", a.name, errors.Wrap(err, "failed handling chunk").Error())
 		}
 	}
+
+	a.handleChunkEnd(p)
 
 	return nil
 }
@@ -622,6 +630,7 @@ func (a *Association) gatherOutbound() [][]byte {
 		if a.ackState == ackStateImmediate {
 			a.ackState = ackStateIdle
 			sack := a.createSelectiveAckChunk()
+			a.log.Debugf("[%s] sending SACK: %s", a.name, sack.String())
 			raw, err := a.createPacket([]chunk{sack}).marshal()
 			if err != nil {
 				a.log.Warnf("[%s] failed to serialize a SACK packet", a.name)
@@ -1006,14 +1015,13 @@ func (a *Association) handleData(d *chunkPayloadData) []*packet {
 	}
 
 	if (a.ackState != ackStateImmediate && !d.immediateSack && !hasPacketLoss && a.ackMode == ackModeNormal) || a.ackMode == ackModeAlwaysDelay {
-		// Will send delayed ack in the next ack timeout
-		a.ackState = ackStateDelay
-		a.ackTimer.start()
+		if a.ackState == ackStateIdle {
+			a.delayedAckTriggered = true
+		} else {
+			a.immediateAckTriggered = true
+		}
 	} else {
-		// Send SACK now!
-		a.ackState = ackStateImmediate
-		a.ackTimer.stop()
-		a.awakeWriteLoop()
+		a.immediateAckTriggered = true
 	}
 
 	return reply
@@ -1731,24 +1739,6 @@ func (a *Association) popPendingDataChunksToSend() ([]*chunkPayloadData, []uint1
 				chunks = append(chunks, c)
 			}
 		}
-
-		// Controlling DATA chunk's I-bit (SACK-IMMEDIATELY flag)
-		// RFC 7053 sec 4.2.  Triggering at the SCTP Level
-		//    Another case is where the sending of a DATA chunk fills the
-		//    congestion or receiver window.  Setting the I bit in these cases
-		//    improves the throughput of the transfer.
-
-		if len(chunks) > 0 {
-			// IMPLETEMATION NOTE:
-			// It was learned that setting I-bit to the every last chunk that fills
-			// min(cwnd,rnwd) would end up with generating SACK, on the remote, for
-			// every single DATA chunks when sending large amount of data at once.
-			// In order to overcome this situation, here we set I-bit to true for
-			// the last chunk only.
-
-			lastChunk := chunks[len(chunks)-1]
-			lastChunk.immediateSack = true
-		}
 	}
 
 	return chunks, sisToReset
@@ -1901,6 +1891,30 @@ func (a *Association) createSelectiveAckChunk() *chunkSelectiveAck {
 
 func pack(p *packet) []*packet {
 	return []*packet{p}
+}
+
+func (a *Association) handleChunkStart(p *packet) {
+	a.lock.Lock()
+	defer a.lock.Unlock()
+
+	a.delayedAckTriggered = false
+	a.immediateAckTriggered = false
+}
+
+func (a *Association) handleChunkEnd(p *packet) {
+	a.lock.Lock()
+	defer a.lock.Unlock()
+
+	if a.immediateAckTriggered {
+		// Send SACK now!
+		a.ackState = ackStateImmediate
+		a.ackTimer.stop()
+		a.awakeWriteLoop()
+	} else if a.delayedAckTriggered {
+		// Will send delayed ack in the next ack timeout
+		a.ackState = ackStateDelay
+		a.ackTimer.start()
+	}
 }
 
 func (a *Association) handleChunk(p *packet, c chunk) error {

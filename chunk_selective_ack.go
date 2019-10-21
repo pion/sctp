@@ -129,10 +129,13 @@ func (s *chunkSelectiveAck) check() (abort bool, err error) {
 
 // String makes chunkSelectiveAck printable
 func (s *chunkSelectiveAck) String() string {
-	res := fmt.Sprintf("%s\n%d", s.chunkHeader, s.cumulativeTSNAck)
+	res := fmt.Sprintf("SACK cumTsnAck=%d arwnd=%d dupTsn=%d",
+		s.cumulativeTSNAck,
+		s.advertisedReceiverWindowCredit,
+		s.duplicateTSN)
 
 	for _, gap := range s.gapAckBlocks {
-		res = fmt.Sprintf("\n gap ack: %s", gap)
+		res = fmt.Sprintf("%s\n gap ack: %s", res, gap)
 	}
 
 	return res
