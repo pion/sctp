@@ -2,6 +2,7 @@ package sctp
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 
 	"github.com/pkg/errors"
@@ -58,5 +59,5 @@ func (p *paramHeader) length() int {
 
 // String makes paramHeader printable
 func (p paramHeader) String() string {
-	return fmt.Sprintf("%s (%d): %s", p.typ, p.len, p.raw)
+	return fmt.Sprintf("%s (%d): %s", p.typ, p.len, hex.Dump(p.raw))
 }

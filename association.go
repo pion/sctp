@@ -40,6 +40,7 @@ const (
 	timerT1Init int = iota
 	timerT1Cookie
 	timerT3RTX
+	timerReconfig
 )
 
 // ack mode (for testing)
@@ -109,14 +110,15 @@ type Association struct {
 
 	netConn net.Conn
 
-	peerVerificationTag uint32
-	myVerificationTag   uint32
-	state               uint32
-	myNextTSN           uint32 // nextTSN
-	peerLastTSN         uint32 // lastRcvdTSN
-	minTSN2MeasureRTT   uint32 // for RTT measurement
-	willSendForwardTSN  bool
-	willRetransmitFast  bool
+	peerVerificationTag    uint32
+	myVerificationTag      uint32
+	state                  uint32
+	myNextTSN              uint32 // nextTSN
+	peerLastTSN            uint32 // lastRcvdTSN
+	minTSN2MeasureRTT      uint32 // for RTT measurement
+	willSendForwardTSN     bool
+	willRetransmitFast     bool
+	willRetransmitReconfig bool
 
 	// Reconfig
 	myNextRSN        uint32
@@ -149,11 +151,12 @@ type Association struct {
 	fastRecoverExitPoint uint32
 
 	// RTX & Ack timer
-	rtoMgr   *rtoManager
-	t1Init   *rtxTimer
-	t1Cookie *rtxTimer
-	t3RTX    *rtxTimer
-	ackTimer *ackTimer
+	rtoMgr    *rtoManager
+	t1Init    *rtxTimer
+	t1Cookie  *rtxTimer
+	t3RTX     *rtxTimer
+	tReconfig *rtxTimer
+	ackTimer  *ackTimer
 
 	// Chunks stored for retransmission
 	storedInit       *chunkInit
@@ -281,7 +284,8 @@ func createAssociation(config Config) *Association {
 
 	a.t1Init = newRTXTimer(timerT1Init, a, maxInitRetrans)
 	a.t1Cookie = newRTXTimer(timerT1Cookie, a, maxInitRetrans)
-	a.t3RTX = newRTXTimer(timerT3RTX, a, noMaxRetrans) // retransmit forever
+	a.t3RTX = newRTXTimer(timerT3RTX, a, noMaxRetrans)        // retransmit forever
+	a.tReconfig = newRTXTimer(timerReconfig, a, noMaxRetrans) // retransmit forever
 	a.ackTimer = newAckTimer(a)
 
 	return a
@@ -387,6 +391,7 @@ func (a *Association) closeAllTimers() {
 	a.t1Init.close()
 	a.t1Cookie.close()
 	a.t3RTX.close()
+	a.tReconfig.close()
 	a.ackTimer.close()
 }
 
@@ -503,7 +508,174 @@ func (a *Association) handleInbound(raw []byte) error {
 	return nil
 }
 
-// handleOutbound handles outgoing processes
+// The caller should hold the lock
+func (a *Association) gatherOutboundDataAndReconfigPackets(rawPackets [][]byte) [][]byte {
+	for _, p := range a.getDataPacketsToRetransmit() {
+		raw, err := p.marshal()
+		if err != nil {
+			a.log.Warnf("[%s] failed to serialize a DATA packet to be retransmitted", a.name)
+			continue
+		}
+		rawPackets = append(rawPackets, raw)
+	}
+
+	// Pop unsent data chunks from the pending queue to send as much as
+	// cwnd and rwnd allow.
+	chunks, sisToReset := a.popPendingDataChunksToSend()
+	if len(chunks) > 0 {
+		// Start timer. (noop if already started)
+		a.log.Tracef("[%s] T3-rtx timer start (pt1)", a.name)
+		a.t3RTX.start(a.rtoMgr.getRTO())
+		for _, p := range a.bundleDataChunksIntoPackets(chunks) {
+			raw, err := p.marshal()
+			if err != nil {
+				a.log.Warnf("[%s] failed to serialize a DATA packet", a.name)
+				continue
+			}
+			rawPackets = append(rawPackets, raw)
+		}
+	}
+
+	if len(sisToReset) > 0 || a.willRetransmitReconfig {
+		if a.willRetransmitReconfig {
+			a.willRetransmitReconfig = false
+			a.log.Debugf("[%s] retransmit %d RECONFIG chunk(s)", a.name, len(a.reconfigs))
+			for _, c := range a.reconfigs {
+				p := a.createPacket([]chunk{c})
+				raw, err := p.marshal()
+				if err != nil {
+					a.log.Warnf("[%s] failed to serialize a RECONFIG packet to be retransmitted", a.name)
+				} else {
+					rawPackets = append(rawPackets, raw)
+				}
+			}
+		}
+
+		if len(sisToReset) > 0 {
+			rsn := a.generateNextRSN()
+			tsn := a.myNextTSN - 1
+			c := &chunkReconfig{
+				paramA: &paramOutgoingResetRequest{
+					reconfigRequestSequenceNumber: rsn,
+					senderLastTSN:                 tsn,
+					streamIdentifiers:             sisToReset,
+				},
+			}
+			a.reconfigs[rsn] = c // store in the map for retransmission
+			a.log.Debugf("[%s] sending RECONFIG: rsn=%d tsn=%d streams=%v",
+				a.name, rsn, a.myNextTSN-1, sisToReset)
+			p := a.createPacket([]chunk{c})
+			raw, err := p.marshal()
+			if err != nil {
+				a.log.Warnf("[%s] failed to serialize a RECONFIG packet to be transmitted", a.name)
+			} else {
+				rawPackets = append(rawPackets, raw)
+			}
+		}
+
+		if len(a.reconfigs) > 0 {
+			a.tReconfig.start(a.rtoMgr.getRTO())
+		}
+	}
+
+	return rawPackets
+}
+
+// The caller should hold the lock
+func (a *Association) gatherOutboundFrastRetransmissionPackets(rawPackets [][]byte) [][]byte {
+	if a.willRetransmitFast {
+		a.willRetransmitFast = false
+
+		toFastRetrans := []chunk{}
+		fastRetransSize := commonHeaderSize
+
+		for i := 0; ; i++ {
+			c, ok := a.inflightQueue.get(a.cumulativeTSNAckPoint + uint32(i) + 1)
+			if !ok {
+				break // end of pending data
+			}
+
+			if c.acked || c.abandoned {
+				continue
+			}
+
+			if c.nSent > 1 || c.missIndicator < 3 {
+				continue
+			}
+
+			// RFC 4960 Sec 7.2.4 Fast Retransmit on Gap Reports
+			//  3)  Determine how many of the earliest (i.e., lowest TSN) DATA chunks
+			//      marked for retransmission will fit into a single packet, subject
+			//      to constraint of the path MTU of the destination transport
+			//      address to which the packet is being sent.  Call this value K.
+			//      Retransmit those K DATA chunks in a single packet.  When a Fast
+			//      Retransmit is being performed, the sender SHOULD ignore the value
+			//      of cwnd and SHOULD NOT delay retransmission for this single
+			//		packet.
+
+			dataChunkSize := dataChunkHeaderSize + uint32(len(c.userData))
+			if a.mtu < fastRetransSize+dataChunkSize {
+				break
+			}
+
+			fastRetransSize += dataChunkSize
+			a.stats.incFastRetrans()
+			c.nSent++
+			a.checkPartialReliabilityStatus(c)
+			toFastRetrans = append(toFastRetrans, c)
+			a.log.Tracef("[%s] fast-retransmit: tsn=%d sent=%d htna=%d",
+				a.name, c.tsn, c.nSent, a.fastRecoverExitPoint)
+		}
+
+		if len(toFastRetrans) > 0 {
+			raw, err := a.createPacket(toFastRetrans).marshal()
+			if err != nil {
+				a.log.Warnf("[%s] failed to serialize a DATA packet to be fast-retransmitted", a.name)
+			} else {
+				rawPackets = append(rawPackets, raw)
+			}
+		}
+	}
+
+	return rawPackets
+}
+
+// The caller should hold the lock
+func (a *Association) gatherOutboundSackPackets(rawPackets [][]byte) [][]byte {
+	if a.ackState == ackStateImmediate {
+		a.ackState = ackStateIdle
+		sack := a.createSelectiveAckChunk()
+		a.log.Debugf("[%s] sending SACK: %s", a.name, sack.String())
+		raw, err := a.createPacket([]chunk{sack}).marshal()
+		if err != nil {
+			a.log.Warnf("[%s] failed to serialize a SACK packet", a.name)
+		} else {
+			rawPackets = append(rawPackets, raw)
+		}
+	}
+
+	return rawPackets
+}
+
+// The caller should hold the lock
+func (a *Association) gatherOutboundForwardTSNPackets(rawPackets [][]byte) [][]byte {
+	if a.willSendForwardTSN {
+		a.willSendForwardTSN = false
+		if sna32GT(a.advancedPeerTSNAckPoint, a.cumulativeTSNAckPoint) {
+			fwdtsn := a.createForwardTSN()
+			raw, err := a.createPacket([]chunk{fwdtsn}).marshal()
+			if err != nil {
+				a.log.Warnf("[%s] failed to serialize a Forward TSN packet", a.name)
+			} else {
+				rawPackets = append(rawPackets, raw)
+			}
+		}
+	}
+
+	return rawPackets
+}
+
+// gatherOutbound gathers outgoing packets
 func (a *Association) gatherOutbound() [][]byte {
 	a.lock.Lock()
 	defer a.lock.Unlock()
@@ -524,133 +696,10 @@ func (a *Association) gatherOutbound() [][]byte {
 	state := a.getState()
 
 	if state == established {
-		for _, p := range a.getDataPacketsToRetransmit() {
-			raw, err := p.marshal()
-			if err != nil {
-				a.log.Warnf("[%s] failed to serialize a DATA packet to be retransmitted", a.name)
-				continue
-			}
-			rawPackets = append(rawPackets, raw)
-		}
-
-		// Pop unsent data chunks from the pending queue to send as much as
-		// cwnd and rwnd allow.
-		chunks, sisToReset := a.popPendingDataChunksToSend()
-		if len(chunks) > 0 {
-			// Start timer. (noop if already started)
-			a.log.Tracef("[%s] T3-rtx timer start (pt1)", a.name)
-			a.t3RTX.start(a.rtoMgr.getRTO())
-			for _, p := range a.bundleDataChunksIntoPackets(chunks) {
-				raw, err := p.marshal()
-				if err != nil {
-					a.log.Warnf("[%s] failed to serialize a DATA packet", a.name)
-					continue
-				}
-				rawPackets = append(rawPackets, raw)
-			}
-		}
-
-		if len(sisToReset) > 0 {
-			rsn := a.generateNextRSN()
-			tsn := a.myNextTSN - 1
-			c := &chunkReconfig{
-				paramA: &paramOutgoingResetRequest{
-					reconfigRequestSequenceNumber: rsn,
-					senderLastTSN:                 tsn,
-					streamIdentifiers:             sisToReset,
-				},
-			}
-			a.reconfigs[rsn] = c // store in the map for retransmission
-			a.log.Debugf("[%s] sending RECONFIG: rsn=%d tsn=%d streams=%v",
-				a.name, rsn, a.myNextTSN-1, sisToReset)
-
-			p := a.createPacket([]chunk{c})
-			raw, err := p.marshal()
-			if err != nil {
-				a.log.Warnf("[%s] failed to serialize a RECONFIG packet to be retransmitted", a.name)
-			} else {
-				rawPackets = append(rawPackets, raw)
-			}
-		}
-
-		if a.willRetransmitFast {
-			a.willRetransmitFast = false
-
-			toFastRetrans := []chunk{}
-			fastRetransSize := commonHeaderSize
-
-			for i := 0; ; i++ {
-				c, ok := a.inflightQueue.get(a.cumulativeTSNAckPoint + uint32(i) + 1)
-				if !ok {
-					break // end of pending data
-				}
-
-				if c.acked || c.abandoned {
-					continue
-				}
-
-				if c.nSent > 1 || c.missIndicator < 3 {
-					continue
-				}
-
-				// RFC 4960 Sec 7.2.4 Fast Retransmit on Gap Reports
-				//  3)  Determine how many of the earliest (i.e., lowest TSN) DATA chunks
-				//      marked for retransmission will fit into a single packet, subject
-				//      to constraint of the path MTU of the destination transport
-				//      address to which the packet is being sent.  Call this value K.
-				//      Retransmit those K DATA chunks in a single packet.  When a Fast
-				//      Retransmit is being performed, the sender SHOULD ignore the value
-				//      of cwnd and SHOULD NOT delay retransmission for this single
-				//		packet.
-
-				dataChunkSize := dataChunkHeaderSize + uint32(len(c.userData))
-				if a.mtu < fastRetransSize+dataChunkSize {
-					break
-				}
-
-				fastRetransSize += dataChunkSize
-				a.stats.incFastRetrans()
-				c.nSent++
-				a.checkPartialReliabilityStatus(c)
-				toFastRetrans = append(toFastRetrans, c)
-				a.log.Tracef("[%s] fast-retransmit: tsn=%d sent=%d htna=%d",
-					a.name, c.tsn, c.nSent, a.fastRecoverExitPoint)
-			}
-
-			if len(toFastRetrans) > 0 {
-				raw, err := a.createPacket(toFastRetrans).marshal()
-				if err != nil {
-					a.log.Warnf("[%s] failed to serialize a DATA packet to be fast-retransmitted", a.name)
-				} else {
-					rawPackets = append(rawPackets, raw)
-				}
-			}
-		}
-
-		if a.ackState == ackStateImmediate {
-			a.ackState = ackStateIdle
-			sack := a.createSelectiveAckChunk()
-			a.log.Debugf("[%s] sending SACK: %s", a.name, sack.String())
-			raw, err := a.createPacket([]chunk{sack}).marshal()
-			if err != nil {
-				a.log.Warnf("[%s] failed to serialize a SACK packet", a.name)
-			} else {
-				rawPackets = append(rawPackets, raw)
-			}
-		}
-
-		if a.willSendForwardTSN {
-			a.willSendForwardTSN = false
-			if sna32GT(a.advancedPeerTSNAckPoint, a.cumulativeTSNAckPoint) {
-				fwdtsn := a.createForwardTSN()
-				raw, err := a.createPacket([]chunk{fwdtsn}).marshal()
-				if err != nil {
-					a.log.Warnf("[%s] failed to serialize a Forward TSN packet", a.name)
-				} else {
-					rawPackets = append(rawPackets, raw)
-				}
-			}
-		}
+		rawPackets = a.gatherOutboundDataAndReconfigPackets(rawPackets)
+		rawPackets = a.gatherOutboundFrastRetransmissionPackets(rawPackets)
+		rawPackets = a.gatherOutboundSackPackets(rawPackets)
+		rawPackets = a.gatherOutboundForwardTSNPackets(rawPackets)
 	}
 
 	return rawPackets
@@ -991,9 +1040,21 @@ func (a *Association) handleData(d *chunkPayloadData) []*packet {
 		}
 	}
 
-	reply := []*packet{}
+	return a.handlePeerLastTSNAndAcknowledgement(d.immediateSack)
+}
+
+// A common routine for handleData and handleForwardTSN routines
+// The caller should hold the lock.
+func (a *Association) handlePeerLastTSNAndAcknowledgement(sackImmediately bool) []*packet {
+	var reply []*packet
 
 	// Try to advance peerLastTSN
+
+	// From RFC 3758 Sec 3.6:
+	//   .. and then MUST further advance its cumulative TSN point locally
+	//   if possible
+	// Meaning, if peerLastTSN+1 points to a chunk that is received,
+	// advance peerLastTSN until peerLastTSN+1 points to unreceived chunk.
 	for {
 		if _, popOk := a.payloadQueue.pop(a.peerLastTSN + 1); !popOk {
 			break
@@ -1001,7 +1062,7 @@ func (a *Association) handleData(d *chunkPayloadData) []*packet {
 		a.peerLastTSN++
 
 		for _, rstReq := range a.reconfigRequests {
-			resp := a.resetStreams(rstReq)
+			resp := a.resetStreamsIfAny(rstReq)
 			if resp != nil {
 				a.log.Debugf("[%s] RESET RESPONSE: %+v", a.name, resp)
 				reply = append(reply, resp)
@@ -1014,7 +1075,7 @@ func (a *Association) handleData(d *chunkPayloadData) []*packet {
 		a.log.Tracef("[%s] packetloss: %s", a.name, a.payloadQueue.getGapAckBlocksString(a.peerLastTSN))
 	}
 
-	if (a.ackState != ackStateImmediate && !d.immediateSack && !hasPacketLoss && a.ackMode == ackModeNormal) || a.ackMode == ackModeAlwaysDelay {
+	if (a.ackState != ackStateImmediate && !sackImmediately && !hasPacketLoss && a.ackMode == ackModeNormal) || a.ackMode == ackModeAlwaysDelay {
 		if a.ackState == ackStateIdle {
 			a.delayedAckTriggered = true
 		} else {
@@ -1561,42 +1622,7 @@ func (a *Association) handleForwardTSN(c *chunkForwardTSN) []*packet {
 		}
 	}
 
-	var reply []*packet
-
-	// From RFC 3758 Sec 3.6:
-	//   .. and then MUST further advance its cumulative TSN point locally
-	//   if possible
-	// Meaning, if peerLastTSN+1 points to a chunk that is received,
-	// advance peerLastTSN until peerLastTSN+1 points to unreceived chunk.
-	for {
-		if _, popOk := a.payloadQueue.pop(a.peerLastTSN + 1); !popOk {
-			break
-		}
-		a.peerLastTSN++
-
-		for _, rstReq := range a.reconfigRequests {
-			resp := a.resetStreams(rstReq)
-			if resp != nil {
-				a.log.Debugf("[%s] RESET RESPONSE: %+v", a.name, resp)
-				reply = append(reply, resp)
-			}
-		}
-	}
-
-	hasPacketLoss := (a.payloadQueue.size() > 0)
-
-	if a.ackState != ackStateImmediate && !hasPacketLoss {
-		// Will send delayed ack in the next ack timeout
-		a.ackState = ackStateDelay
-		a.ackTimer.start()
-	} else {
-		// Send SACK now!
-		a.ackState = ackStateImmediate
-		a.ackTimer.stop()
-		a.awakeWriteLoop()
-	}
-
-	return reply
+	return a.handlePeerLastTSNAndAcknowledgement(false)
 }
 
 func (a *Association) sendResetRequest(streamIdentifier uint16) error {
@@ -1629,7 +1655,7 @@ func (a *Association) handleReconfigParam(raw param) (*packet, error) {
 	switch p := raw.(type) {
 	case *paramOutgoingResetRequest:
 		a.reconfigRequests[p.reconfigRequestSequenceNumber] = p
-		resp := a.resetStreams(p)
+		resp := a.resetStreamsIfAny(p)
 		if resp != nil {
 			return resp, nil
 		}
@@ -1637,7 +1663,9 @@ func (a *Association) handleReconfigParam(raw param) (*packet, error) {
 
 	case *paramReconfigResponse:
 		delete(a.reconfigs, p.reconfigResponseSequenceNumber)
-
+		if len(a.reconfigs) == 0 {
+			a.tReconfig.stop()
+		}
 		return nil, nil
 	default:
 		return nil, errors.Errorf("unexpected parameter type %T", p)
@@ -1645,7 +1673,7 @@ func (a *Association) handleReconfigParam(raw param) (*packet, error) {
 }
 
 // The caller should hold the lock.
-func (a *Association) resetStreams(p *paramOutgoingResetRequest) *packet {
+func (a *Association) resetStreamsIfAny(p *paramOutgoingResetRequest) *packet {
 	result := reconfigResultSuccessPerformed
 	if sna32LTE(p.senderLastTSN, a.peerLastTSN) {
 		a.log.Debugf("[%s] resetStream(): senderLastTSN=%d <= peerLastTSN=%d",
@@ -2041,6 +2069,11 @@ func (a *Association) onRetransmissionTimeout(id int, nRtos uint) {
 		a.awakeWriteLoop()
 
 		return
+	}
+
+	if id == timerReconfig {
+		a.willRetransmitReconfig = true
+		a.awakeWriteLoop()
 	}
 }
 

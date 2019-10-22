@@ -21,14 +21,19 @@ type vNetEnvConfig struct {
 }
 
 type vNetEnv struct {
-	wan       *vnet.Router
-	net0      *vnet.Net
-	net1      *vnet.Net
-	numToDrop int
+	wan               *vnet.Router
+	net0              *vnet.Net
+	net1              *vnet.Net
+	numToDropData     int
+	numToDropReconfig int
 }
 
 func (venv *vNetEnv) dropNextDataChunk(numToDrop int) {
-	venv.numToDrop = numToDrop
+	venv.numToDropData = numToDrop
+}
+
+func (venv *vNetEnv) dropNextReconfigChunk(numToDrop int) {
+	venv.numToDropReconfig = numToDrop
 }
 
 func buildVNetEnv(cfg *vNetEnvConfig) (*vNetEnv, error) {
@@ -53,32 +58,39 @@ func buildVNetEnv(cfg *vNetEnvConfig) (*vNetEnv, error) {
 		var tsn uint32
 
 		return func(c vnet.Chunk) bool {
-			var hasDataChunkToDrop bool
-			if venv.numToDrop > 0 {
-				p := &packet{}
-				if err2 := p.unmarshal(c.UserData()); err2 != nil {
-					panic(fmt.Errorf("unable to parse SCTP packet"))
-				}
+			var toDrop bool
+			p := &packet{}
+			if err2 := p.unmarshal(c.UserData()); err2 != nil {
+				panic(fmt.Errorf("unable to parse SCTP packet"))
+			}
 
-			loop:
-				for i := 0; i < len(p.chunks); i++ {
-					switch chunk := p.chunks[i].(type) {
-					case *chunkPayloadData:
+		loop:
+			for i := 0; i < len(p.chunks); i++ {
+				switch chunk := p.chunks[i].(type) {
+				case *chunkPayloadData:
+					if venv.numToDropData > 0 {
 						if !lockedOnTSN {
 							tsn = chunk.tsn
 							lockedOnTSN = true
 							log.Infof("Chunk filter: lock on TSN %d", tsn)
 						}
 						if chunk.tsn == tsn {
-							hasDataChunkToDrop = true
-							venv.numToDrop--
+							toDrop = true
+							venv.numToDropData--
 							log.Infof("Chunk filter:  drop TSN %d", tsn)
 							break loop
 						}
 					}
+				case *chunkReconfig:
+					if venv.numToDropReconfig > 0 {
+						toDrop = true
+						venv.numToDropReconfig--
+						log.Infof("Chunk filter:  drop RECONFIG %s", chunk.String())
+						break loop
+					}
 				}
 			}
-			return !hasDataChunkToDrop
+			return !toDrop
 		}
 	}
 	wan.AddChunkFilter(tsnAutoLockOnFilter())
@@ -347,7 +359,7 @@ func TestRwndFull(t *testing.T) {
 	})
 }
 
-func TestStreamClose(t *testing.T) {
+func testStreamClose(t *testing.T, dropReconfig bool) {
 	lim := test.TimeOut(time.Second * 5)
 	defer lim.Stop()
 
@@ -478,6 +490,10 @@ func TestStreamClose(t *testing.T) {
 		close(clientStreamReady)
 
 		<-clientStartClose
+
+		// drop next 1 RECONFIG chunk
+		venv.dropNextReconfigChunk(1)
+
 		err = stream.Close()
 		assert.NoError(t, err, "should succeed")
 
@@ -485,6 +501,16 @@ func TestStreamClose(t *testing.T) {
 		<-done
 
 		<-shutDownClient
+
+		// Check if RECONFIG was actually dropped
+		assert.Equal(t, 0, venv.numToDropReconfig, "should be zero")
+
+		// Sleep enough time for reconfig response to come back
+		time.Sleep(100 * time.Millisecond)
+
+		// Verify there's no more pending reconfig
+		assert.Equal(t, 0, len(assoc.reconfigs), "should be zero")
+
 		log.Info("client closing")
 	}()
 
@@ -504,4 +530,14 @@ func TestStreamClose(t *testing.T) {
 	<-clientShutDown
 	<-serverShutDown
 	log.Info("all done")
+}
+
+func TestStreamClose(t *testing.T) {
+	t.Run("Normal close", func(t *testing.T) {
+		testStreamClose(t, false)
+	})
+
+	t.Run("Drop reconfig packet", func(t *testing.T) {
+		testStreamClose(t, true)
+	})
 }
