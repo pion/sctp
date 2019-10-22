@@ -15,6 +15,7 @@ import (
 )
 
 type vNetEnvConfig struct {
+	minDelay      time.Duration
 	loggerFactory logging.LoggerFactory
 	log           logging.LeveledLogger
 }
@@ -39,7 +40,7 @@ func buildVNetEnv(cfg *vNetEnvConfig) (*vNetEnv, error) {
 
 	wan, err := vnet.NewRouter(&vnet.RouterConfig{
 		CIDR:          "0.0.0.0/0",
-		MinDelay:      200 * time.Millisecond,
+		MinDelay:      cfg.minDelay,
 		MaxJitter:     0 * time.Millisecond,
 		LoggerFactory: cfg.loggerFactory,
 	})
@@ -117,6 +118,7 @@ func testRwndFull(t *testing.T, unordered bool) {
 	log := loggerFactory.NewLogger("test")
 
 	venv, err := buildVNetEnv(&vNetEnvConfig{
+		minDelay:      200 * time.Millisecond,
 		loggerFactory: loggerFactory,
 		log:           log,
 	})
@@ -343,4 +345,163 @@ func TestRwndFull(t *testing.T) {
 
 		testRwndFull(t, true)
 	})
+}
+
+func TestStreamClose(t *testing.T) {
+	lim := test.TimeOut(time.Second * 5)
+	defer lim.Stop()
+
+	loggerFactory := logging.NewDefaultLoggerFactory()
+	log := loggerFactory.NewLogger("test")
+
+	venv, err := buildVNetEnv(&vNetEnvConfig{
+		loggerFactory: loggerFactory,
+		log:           log,
+	})
+	if !assert.NoError(t, err, "should succeed") {
+		return
+	}
+	if !assert.NotNil(t, venv, "should not be nil") {
+		return
+	}
+	defer venv.wan.Stop() // nolint:errcheck
+
+	serverStreamReady := make(chan struct{})
+	clientStreamReady := make(chan struct{})
+	clientStartClose := make(chan struct{})
+	serverStreamClosed := make(chan struct{})
+	shutDownClient := make(chan struct{})
+	clientShutDown := make(chan struct{})
+	serverShutDown := make(chan struct{})
+
+	go func() {
+		defer close(serverShutDown)
+		// connected UDP conn for server
+		conn, err := venv.net0.DialUDP("udp4",
+			&net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 5000},
+			&net.UDPAddr{IP: net.ParseIP("2.2.2.2"), Port: 5000},
+		)
+		if !assert.NoError(t, err, "should succeed") {
+			return
+		}
+		defer conn.Close() // nolint:errcheck
+
+		// server association
+		assoc, err := Server(Config{
+			NetConn:       conn,
+			LoggerFactory: loggerFactory,
+		})
+		if !assert.NoError(t, err, "should succeed") {
+			return
+		}
+		defer assoc.Close() // nolint:errcheck
+
+		log.Info("server handlshake complete")
+
+		stream, err := assoc.AcceptStream()
+		if !assert.NoError(t, err, "should succeed") {
+			return
+		}
+		defer stream.Close() // nolint:errcheck
+
+		buf := make([]byte, 1500)
+		for {
+			n, err := stream.Read(buf)
+			if err != nil {
+				t.Logf("server: Read returned %v", err)
+				break
+			}
+
+			if !assert.Equal(t, "HELLO", string(buf[:n]), "should receive HELLO") {
+				continue
+			}
+
+			log.Info("server stream ready")
+			close(serverStreamReady)
+		}
+
+		close(serverStreamClosed)
+		log.Info("server closing")
+	}()
+
+	go func() {
+		defer close(clientShutDown)
+		// connected UDP conn for client
+		conn, err := venv.net1.DialUDP("udp4",
+			&net.UDPAddr{IP: net.ParseIP("2.2.2.2"), Port: 5000},
+			&net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 5000},
+		)
+		if !assert.NoError(t, err, "should succeed") {
+			return
+		}
+
+		// client association
+		assoc, err := Client(Config{
+			NetConn:       conn,
+			LoggerFactory: loggerFactory,
+		})
+		if !assert.NoError(t, err, "should succeed") {
+			return
+		}
+		defer assoc.Close() // nolint:errcheck
+
+		log.Info("client handlshake complete")
+
+		stream, err := assoc.OpenStream(777, PayloadTypeWebRTCBinary)
+		if !assert.NoError(t, err, "should succeed") {
+			return
+		}
+
+		stream.SetReliabilityParams(false, ReliabilityTypeReliable, 0)
+
+		// Send a message to let server side stream to open
+		_, err = stream.Write([]byte("HELLO"))
+		if !assert.NoError(t, err, "should succeed") {
+			return
+		}
+
+		buf := make([]byte, 1500)
+		done := make(chan struct{})
+		go func() {
+			for {
+				log.Info("client read")
+				_, err2 := stream.Read(buf)
+				if err2 != nil {
+					t.Logf("client: Read returned %v", err2)
+					break
+				}
+			}
+			close(done)
+		}()
+
+		log.Info("client stream ready")
+		close(clientStreamReady)
+
+		<-clientStartClose
+		err = stream.Close()
+		assert.NoError(t, err, "should succeed")
+
+		log.Info("client wait for exit reading..")
+		<-done
+
+		<-shutDownClient
+		log.Info("client closing")
+	}()
+
+	// wait until both establish a stream
+	<-clientStreamReady
+	<-serverStreamReady
+
+	log.Info("stream ready")
+
+	// let client begin writing
+	log.Info("client start closing")
+	close(clientStartClose)
+
+	<-serverStreamClosed
+	close(shutDownClient)
+
+	<-clientShutDown
+	<-serverShutDown
+	log.Info("all done")
 }

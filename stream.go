@@ -217,20 +217,32 @@ func (s *Stream) packetize(raw []byte, ppi PayloadProtocolIdentifier) []*chunkPa
 // Close closes the write-direction of the stream.
 // Future calls to Write are not permitted after calling Close.
 func (s *Stream) Close() error {
-	s.lock.Lock()
-	if s.writeErr != nil {
-		s.lock.Unlock()
-		return nil // already closed
+	if sid, isOpen := func() (uint16, bool) {
+		s.lock.Lock()
+		defer s.lock.Unlock()
+
+		isOpen := true
+		if s.writeErr == nil {
+			s.writeErr = errors.New("Stream closed")
+		} else {
+			isOpen = false
+		}
+
+		if s.readErr == nil {
+			s.readErr = io.EOF
+		} else {
+			isOpen = false
+		}
+		s.readNotifier.Broadcast() // broadcast regardless
+
+		return s.streamIdentifier, isOpen
+	}(); isOpen {
+		// Reset the outgoing stream
+		// https://tools.ietf.org/html/rfc6525
+		return s.association.sendResetRequest(sid)
 	}
-	s.writeErr = errors.New("Stream closed")
 
-	a := s.association
-	sid := s.streamIdentifier
-	s.lock.Unlock()
-
-	// Reset the outgoing stream
-	// https://tools.ietf.org/html/rfc6525
-	return a.sendResetRequest(sid)
+	return nil
 }
 
 // BufferedAmount returns the number of bytes of data currently queued to be sent over this stream.
