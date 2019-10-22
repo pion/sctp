@@ -509,7 +509,10 @@ func testStreamClose(t *testing.T, dropReconfig bool) {
 		time.Sleep(100 * time.Millisecond)
 
 		// Verify there's no more pending reconfig
-		assert.Equal(t, 0, len(assoc.reconfigs), "should be zero")
+		assoc.lock.RLock()
+		pendingReconfigs := len(assoc.reconfigs)
+		assoc.lock.RUnlock()
+		assert.Equal(t, 0, pendingReconfigs, "should be zero")
 
 		log.Info("client closing")
 	}()
