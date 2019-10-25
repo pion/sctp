@@ -45,6 +45,7 @@ Check out the **[contributing wiki](https://github.com/pion/webrtc/wiki/Contribu
 * [Cecylia Bocovich](https://github.com/cohosh) - *Fix SCTP reads*
 * [Hugo Arregui](https://github.com/hugoArregui)
 * [Atsushi Watanabe](https://github.com/at-wat)
+* [Luke Curley](https://github.com/kixelated) - *Performance*
 
 ### License
 MIT License - see [LICENSE](LICENSE) for full text
