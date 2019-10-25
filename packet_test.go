@@ -52,3 +52,11 @@ func TestPacketMarshal(t *testing.T) {
 		t.Error(errors.Errorf("Unmarshal/Marshaled header only packet did not match \nheaderOnly: % 02x \nheaderOnlyMarshaled % 02x", headerOnly, headerOnlyMarshaled))
 	}
 }
+
+func BenchmarkPacketGenerateChecksum(b *testing.B) {
+	var data [1024]byte
+
+	for i := 0; i < b.N; i += 1 {
+		_ = generatePacketChecksum(data[:])
+	}
+}

@@ -8,6 +8,13 @@ import (
 	"github.com/pkg/errors"
 )
 
+// Create the crc32 table we'll use for the checksum
+var castagnoliTable = crc32.MakeTable(crc32.Castagnoli)
+
+// Allocate and zero this data once.
+// We need to use it for the checksum and don't want to allocate/clear each time.
+var fourZeroes [4]byte
+
 /*
 Packet represents an SCTP packet, defined in https://tools.ietf.org/html/rfc4960#section-3
 An SCTP packet is composed of a common header and chunks.  A chunk
@@ -144,16 +151,12 @@ func (p *packet) marshal() ([]byte, error) {
 	return raw, nil
 }
 
-func generatePacketChecksum(raw []byte) uint32 {
-	rawCopy := make([]byte, len(raw))
-	copy(rawCopy, raw)
-
-	// Clear existing checksum
-	for offset := 8; offset <= 11; offset++ {
-		rawCopy[offset] = 0x00
-	}
-
-	return crc32.Checksum(rawCopy, crc32.MakeTable(crc32.Castagnoli))
+func generatePacketChecksum(raw []byte) (sum uint32) {
+	// Fastest way to do a crc32 without allocating.
+	sum = crc32.Update(sum, castagnoliTable, raw[0:8])
+	sum = crc32.Update(sum, castagnoliTable, fourZeroes[:])
+	sum = crc32.Update(sum, castagnoliTable, raw[12:])
+	return sum
 }
 
 // String makes packet printable
