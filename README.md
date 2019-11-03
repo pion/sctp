@@ -46,6 +46,7 @@ Check out the **[contributing wiki](https://github.com/pion/webrtc/wiki/Contribu
 * [Hugo Arregui](https://github.com/hugoArregui)
 * [Atsushi Watanabe](https://github.com/at-wat)
 * [Luke Curley](https://github.com/kixelated) - *Performance*
+* [Lukas Herman](https://github.com/lherman-cs)
 
 ### License
 MIT License - see [LICENSE](LICENSE) for full text
