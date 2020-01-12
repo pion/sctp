@@ -2311,6 +2311,8 @@ func TestStats(t *testing.T) {
 
 	assert.NoError(t, conn.Close())
 
+	conn.mu.Lock()
+	defer conn.mu.Unlock()
 	assert.Equal(t, conn.bytesReceived, a.BytesReceived())
 	assert.Equal(t, conn.bytesSent, a.BytesSent())
 }
