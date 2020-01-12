@@ -56,7 +56,7 @@ func TestPacketMarshal(t *testing.T) {
 func BenchmarkPacketGenerateChecksum(b *testing.B) {
 	var data [1024]byte
 
-	for i := 0; i < b.N; i += 1 {
+	for i := 0; i < b.N; i++ {
 		_ = generatePacketChecksum(data[:])
 	}
 }

@@ -7,13 +7,14 @@ linters-settings:
 linters:
   enable-all: true
   disable:
-    - maligned
-    - lll
     - dupl
-    - gocritic
-    - gochecknoglobals
-    - unparam
     - funlen
+    - gochecknoglobals
+    - gocritic
+    - godox
+    - lll
+    - maligned
+    - unparam
 
 issues:
   exclude-use-default: false
