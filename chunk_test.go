@@ -34,8 +34,8 @@ func TestInitChunk(t *testing.T) {
 		t.Error(errors.Errorf("Unmarshal passed for SCTP packet, but got incorrect numOutboundStreams tag exp: %d act: %d", 1024, i.numOutboundStreams))
 	} else if i.numInboundStreams != 2048 {
 		t.Error(errors.Errorf("Unmarshal passed for SCTP packet, but got incorrect numInboundStreams exp: %d act: %d", 2048, i.numInboundStreams))
-	} else if i.initialTSN != 3899461680 {
-		t.Error(errors.Errorf("Unmarshal passed for SCTP packet, but got incorrect initialTSN exp: %d act: %d", 3899461680, i.initialTSN))
+	} else if i.initialTSN != uint32(3899461680) {
+		t.Error(errors.Errorf("Unmarshal passed for SCTP packet, but got incorrect initialTSN exp: %d act: %d", uint32(3899461680), i.initialTSN))
 	}
 }
 
