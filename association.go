@@ -426,11 +426,12 @@ func (a *Association) readLoop() {
 
 		atomic.AddUint64(&a.bytesReceived, uint64(n))
 		if err = a.handleInbound(buffer[:n]); err != nil {
-			a.log.Warnf("[%s] %s]", a.name, errors.Wrap(err, "failed to push SCTP packet").Error())
+			closeErr = err
+			break
 		}
 	}
 
-	a.log.Debugf("[%s] readLoop exited", a.name)
+	a.log.Debugf("[%s] readLoop exited %s %s", a.name, closeErr)
 }
 
 func (a *Association) writeLoop() {
@@ -487,19 +488,20 @@ func (a *Association) unregisterStream(s *Stream, err error) {
 func (a *Association) handleInbound(raw []byte) error {
 	p := &packet{}
 	if err := p.unmarshal(raw); err != nil {
-		return errors.Wrap(err, "unable to parse SCTP packet")
+		a.log.Warnf("[%s] unable to parse SCTP packet %s", a.name, err)
+		return nil
 	}
 
 	if err := checkPacket(p); err != nil {
-		return errors.Wrap(err, "failed validating packet")
+		a.log.Warnf("[%s] failed validating packet %s", a.name, err)
+		return nil
 	}
 
 	a.handleChunkStart(p)
 
 	for _, c := range p.chunks {
-		err := a.handleChunk(p, c)
-		if err != nil {
-			a.log.Warnf("[%s] %s", a.name, errors.Wrap(err, "failed handling chunk").Error())
+		if err := a.handleChunk(p, c); err != nil {
+			return err
 		}
 	}
 
@@ -1963,8 +1965,8 @@ func (a *Association) handleChunk(p *packet, c chunk) error {
 	var err error
 
 	if _, err = c.check(); err != nil {
-		return errors.Wrap(err, "failed validating chunk")
-		// TODO: Create ABORT
+		a.log.Errorf("[ %s ] failed validating chunk: %s ", a.name, err)
+		return nil
 	}
 
 	switch c := c.(type) {
@@ -1979,7 +1981,7 @@ func (a *Association) handleChunk(p *packet, c chunk) error {
 		for _, e := range c.errorCauses {
 			errStr += fmt.Sprintf("(%s)", e)
 		}
-		a.log.Debugf("[%s] Abort chunk, with following errors: %s", a.name, errStr)
+		return fmt.Errorf("[%s] Abort chunk, with following errors: %s", a.name, errStr)
 
 	case *chunkError:
 		var errStr string
@@ -2013,8 +2015,10 @@ func (a *Association) handleChunk(p *packet, c chunk) error {
 		err = errors.Errorf("unhandled chunk type")
 	}
 
+	// Log and return, the only condition that is fatal is a ABORT chunk
 	if err != nil {
-		return err
+		a.log.Errorf("Failed to handle chunk: %v", err)
+		return nil
 	}
 
 	if len(packets) > 0 {
