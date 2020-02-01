@@ -58,7 +58,17 @@ func (a *chunkAbort) unmarshal(raw []byte) error {
 	return nil
 }
 func (a *chunkAbort) marshal() ([]byte, error) {
-	return nil, errors.Errorf("Unimplemented")
+	a.chunkHeader.typ = ctAbort
+	a.flags = 0x00
+	a.raw = []byte{}
+	for _, ec := range a.errorCauses {
+		raw, err := ec.marshal()
+		if err != nil {
+			return nil, err
+		}
+		a.raw = append(a.raw, raw...)
+	}
+	return a.chunkHeader.marshal()
 }
 
 func (a *chunkAbort) check() (abort bool, err error) {
