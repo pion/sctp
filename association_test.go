@@ -2186,6 +2186,39 @@ func TestAssocReset(t *testing.T) {
 	})
 }
 
+func TestAssocAbort(t *testing.T) {
+	const si uint16 = 1
+	br := test.NewBridge()
+
+	a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, 0)
+	assert.NoError(t, err)
+
+	abort := &chunkAbort{
+		errorCauses: []errorCause{&errorCauseProtocolViolation{
+			errorCauseHeader: errorCauseHeader{code: protocolViolation},
+		}},
+	}
+	packet, err := a0.createPacket([]chunk{abort}).marshal()
+	assert.NoError(t, err)
+
+	_, _, err = establishSessionPair(br, a0, a1, si)
+	assert.NoError(t, err)
+
+	// Both associations are established
+	assert.Equal(t, established, a0.getState())
+	assert.Equal(t, established, a1.getState())
+
+	_, err = a0.netConn.Write(packet)
+	assert.NoError(t, err)
+	br.Process()
+
+	// The receiving association should be closed because it got an ABORT
+	assert.Equal(t, established, a0.getState())
+	assert.Equal(t, closed, a1.getState())
+
+	closeAssociationPair(br, a0, a1)
+}
+
 type fakeEchoConn struct {
 	echo     chan []byte
 	done     chan struct{}
