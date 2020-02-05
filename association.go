@@ -1456,16 +1456,18 @@ func (a *Association) handleSack(d *chunkSelectiveAck) error {
 		}
 
 		// RFC 3758 Sec 3.5 C2
-		for i := a.advancedPeerTSNAckPoint + 1; ; i++ {
+		nextAdvancedPeerTSNAckPoint := a.advancedPeerTSNAckPoint + 1
+		for i := nextAdvancedPeerTSNAckPoint; ; i++ {
 			c, ok := a.inflightQueue.get(i)
-			if !ok {
+			if !ok || !c.abandoned {
 				break
 			}
-			if !c.abandoned {
-				break
+
+			if c.beginningFragment || c.endingFragment {
+				nextAdvancedPeerTSNAckPoint = i
 			}
-			a.advancedPeerTSNAckPoint = i
 		}
+		a.advancedPeerTSNAckPoint = (nextAdvancedPeerTSNAckPoint - 1)
 
 		// RFC 3758 Sec 3.5 C3
 		a.willSendForwardTSN = true
