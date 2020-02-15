@@ -162,7 +162,7 @@ func (q *payloadQueue) getLastTSNReceived() (uint32, bool) {
 
 func (q *payloadQueue) markAllToRetrasmit() {
 	for _, c := range q.chunkMap {
-		if c.acked || c.abandoned {
+		if c.acked || c.abandoned() {
 			continue
 		}
 		c.retransmit = true

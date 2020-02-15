@@ -1096,7 +1096,7 @@ func TestCreateForwardTSN(t *testing.T) {
 			streamSequenceNumber: 2,
 			userData:             []byte("ABC"),
 			nSent:                1,
-			abandoned:            true,
+			_abandoned:           true,
 		})
 
 		fwdtsn := a.createForwardTSN()
@@ -1123,7 +1123,7 @@ func TestCreateForwardTSN(t *testing.T) {
 			streamSequenceNumber: 2,
 			userData:             []byte("ABC"),
 			nSent:                1,
-			abandoned:            true,
+			_abandoned:           true,
 		})
 		a.inflightQueue.pushNoCheck(&chunkPayloadData{
 			beginningFragment:    true,
@@ -1133,7 +1133,7 @@ func TestCreateForwardTSN(t *testing.T) {
 			streamSequenceNumber: 3,
 			userData:             []byte("DEF"),
 			nSent:                1,
-			abandoned:            true,
+			_abandoned:           true,
 		})
 		a.inflightQueue.pushNoCheck(&chunkPayloadData{
 			beginningFragment:    true,
@@ -1143,7 +1143,7 @@ func TestCreateForwardTSN(t *testing.T) {
 			streamSequenceNumber: 1,
 			userData:             []byte("123"),
 			nSent:                1,
-			abandoned:            true,
+			_abandoned:           true,
 		})
 
 		fwdtsn := a.createForwardTSN()

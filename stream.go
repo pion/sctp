@@ -175,6 +175,7 @@ func (s *Stream) packetize(raw []byte, ppi PayloadProtocolIdentifier) []*chunkPa
 	unordered := ppi != PayloadTypeWebRTCDCEP && s.unordered
 
 	var chunks []*chunkPayloadData
+	var head *chunkPayloadData
 	for remaining != 0 {
 		fragmentSize := min32(s.association.maxPayloadSize, remaining)
 
@@ -192,6 +193,11 @@ func (s *Stream) packetize(raw []byte, ppi PayloadProtocolIdentifier) []*chunkPa
 			immediateSack:        false,
 			payloadType:          ppi,
 			streamSequenceNumber: s.sequenceNumber,
+			head:                 head,
+		}
+
+		if head == nil {
+			head = chunk
 		}
 
 		chunks = append(chunks, chunk)

@@ -61,13 +61,16 @@ type chunkPayloadData struct {
 	missIndicator uint32
 
 	// Partial-reliability parameters used only by sender
-	since     time.Time
-	nSent     uint32 // number of transmission made for this chunk
-	abandoned bool
+	since        time.Time
+	nSent        uint32 // number of transmission made for this chunk
+	_abandoned   bool
+	_allInflight bool // valid only with the first fragment
 
 	// Retransmission flag set when T1-RTX timeout occurred and this
 	// chunk is still in the inflight queue
 	retransmit bool
+
+	head *chunkPayloadData // link to the head of the fragment
 }
 
 const (
@@ -164,4 +167,29 @@ func (p *chunkPayloadData) check() (abort bool, err error) {
 // String makes chunkPayloadData printable
 func (p *chunkPayloadData) String() string {
 	return fmt.Sprintf("%s\n%d", p.chunkHeader, p.tsn)
+}
+
+func (p *chunkPayloadData) abandoned() bool {
+	if p.head != nil {
+		return p.head._abandoned && p.head._allInflight
+	}
+	return p._abandoned && p._allInflight
+}
+
+func (p *chunkPayloadData) setAbandoned(abandoned bool) {
+	if p.head != nil {
+		p.head._abandoned = abandoned
+		return
+	}
+	p._abandoned = abandoned
+}
+
+func (p *chunkPayloadData) setAllInflight() {
+	if p.endingFragment {
+		if p.head != nil {
+			p.head._allInflight = true
+		} else {
+			p._allInflight = true
+		}
+	}
 }
