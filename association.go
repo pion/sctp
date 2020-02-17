@@ -1626,8 +1626,17 @@ func (a *Association) handleForwardTSN(c *chunkForwardTSN) []*packet {
 	// from the reassemblyQueue.
 	for _, forwarded := range c.streams {
 		if s, ok := a.streams[forwarded.identifier]; ok {
-			s.handleForwardTSN(c.newCumulativeTSN, forwarded.sequence)
+			s.handleForwardTSNForOrdered(c.newCumulativeTSN, forwarded.sequence)
 		}
+	}
+
+	// TSN may be forewared for unordered chunks. ForwardTSN chunk does not
+	// report which stream identifier it skipped for unordered chunks.
+	// Therefore, we need to broadcast this event to all existing streams for
+	// unordered chunks.
+	// See https://github.com/pion/sctp/issues/106
+	for _, s := range a.streams {
+		s.handleForwardTSNForUnordered(c.newCumulativeTSN)
 	}
 
 	return a.handlePeerLastTSNAndAcknowledgement(false)

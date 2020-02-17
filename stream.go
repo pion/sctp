@@ -124,14 +124,46 @@ func (s *Stream) handleData(pd *chunkPayloadData) {
 	}
 }
 
-func (s *Stream) handleForwardTSN(newCumulativeTSN uint32, ssn uint16) {
+func (s *Stream) handleForwardTSNForOrdered(newCumulativeTSN uint32, ssn uint16) {
 	var readable bool
-	s.lock.Lock()
-	// Remove all chunks older than or equal to the new TSN from
-	// the reassemblyQueue.
-	s.reassemblyQueue.forwardTSN(newCumulativeTSN, s.unordered, ssn)
-	readable = s.reassemblyQueue.isReadable()
-	s.lock.Unlock()
+
+	func() {
+		s.lock.Lock()
+		defer s.lock.Unlock()
+
+		if s.unordered {
+			return // unordered chunks are handled by handleForwardUnordered method
+		}
+
+		// Remove all chunks older than or equal to the new TSN from
+		// the reassemblyQueue.
+		s.reassemblyQueue.forwardTSNForOrdered(newCumulativeTSN, ssn)
+		readable = s.reassemblyQueue.isReadable()
+
+	}()
+
+	// Notify the reader asynchronously if there's a data chunk to read.
+	if readable {
+		s.readNotifier.Signal()
+	}
+}
+
+func (s *Stream) handleForwardTSNForUnordered(newCumulativeTSN uint32) {
+	var readable bool
+
+	func() {
+		s.lock.Lock()
+		defer s.lock.Unlock()
+
+		if !s.unordered {
+			return // ordered chunks are handled by handleForwardTSNOrdered method
+		}
+
+		// Remove all chunks older than or equal to the new TSN from
+		// the reassemblyQueue.
+		s.reassemblyQueue.forwardTSNForUnordered(newCumulativeTSN)
+		readable = s.reassemblyQueue.isReadable()
+	}()
 
 	// Notify the reader asynchronously if there's a data chunk to read.
 	if readable {
