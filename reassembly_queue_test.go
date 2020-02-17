@@ -400,7 +400,7 @@ func TestReassemblyQueue(t *testing.T) {
 		assert.False(t, complete, "chunk set should not be complete yet")
 		assert.Equal(t, 9, rq.getNumBytes(), "num bytes mismatch")
 
-		rq.forwardTSN(13, false, ssnDropped)
+		rq.forwardTSNForOrdered(13, ssnDropped)
 
 		assert.Equal(t, 1, len(rq.ordered), "there should be one chunk left")
 		assert.Equal(t, 3, rq.getNumBytes(), "num bytes mismatch")
@@ -456,7 +456,7 @@ func TestReassemblyQueue(t *testing.T) {
 
 		// At this point, there are 3 chunks in the rq.unorderedChunks.
 		// This call should remove chunks with tsn equals to 13 or older.
-		rq.forwardTSN(13, true, ssnDropped)
+		rq.forwardTSNForUnordered(13)
 
 		// As a result, there should be one chunk (tsn=14)
 		assert.Equal(t, 1, len(rq.unorderedChunks), "there should be one chunk kept")
