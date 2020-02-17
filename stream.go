@@ -139,7 +139,6 @@ func (s *Stream) handleForwardTSNForOrdered(newCumulativeTSN uint32, ssn uint16)
 		// the reassemblyQueue.
 		s.reassemblyQueue.forwardTSNForOrdered(newCumulativeTSN, ssn)
 		readable = s.reassemblyQueue.isReadable()
-
 	}()
 
 	// Notify the reader asynchronously if there's a data chunk to read.
