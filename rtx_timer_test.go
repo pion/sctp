@@ -54,6 +54,22 @@ func TestRTOManager(t *testing.T) {
 		}
 	})
 
+	t.Run("calculateNextTimeout", func(t *testing.T) {
+		var rto float64
+		rto = calculateNextTimeout(1.0, 0)
+		assert.Equal(t, float64(1), rto, "should match")
+		rto = calculateNextTimeout(1.0, 1)
+		assert.Equal(t, float64(2), rto, "should match")
+		rto = calculateNextTimeout(1.0, 2)
+		assert.Equal(t, float64(4), rto, "should match")
+		rto = calculateNextTimeout(1.0, 30)
+		assert.Equal(t, float64(60000), rto, "should match")
+		rto = calculateNextTimeout(1.0, 63)
+		assert.Equal(t, float64(60000), rto, "should match")
+		rto = calculateNextTimeout(1.0, 64)
+		assert.Equal(t, float64(60000), rto, "should match")
+	})
+
 	t.Run("reset", func(t *testing.T) {
 		m := newRTOManager()
 		for i := 0; i < 10; i++ {
