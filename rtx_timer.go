@@ -211,6 +211,9 @@ func calculateNextTimeout(rto float64, nRtos uint) float64 {
 	//        <- RTO * 2 ("back off the timer").  The maximum value discussed
 	//        in rule C7 above (RTO.max) may be used to provide an upper bound
 	//        to this doubling operation.
-	m := 1 << nRtos
-	return math.Min(rto*float64(m), rtoMax)
+	if nRtos < 31 {
+		m := 1 << nRtos
+		return math.Min(rto*float64(m), rtoMax)
+	}
+	return rtoMax
 }
