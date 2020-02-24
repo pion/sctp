@@ -431,7 +431,7 @@ func (a *Association) readLoop() {
 		}
 	}
 
-	a.log.Debugf("[%s] readLoop exited %s %s", a.name, closeErr)
+	a.log.Debugf("[%s] readLoop exited %s", a.name, closeErr)
 }
 
 func (a *Association) writeLoop() {
