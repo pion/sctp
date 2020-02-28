@@ -132,4 +132,28 @@ func TestPayloadQueue(t *testing.T) {
 		assert.True(t, ok, "should be true")
 		assert.True(t, c.retransmit, "should be marked as retransmit")
 	})
+
+	t.Run("reset retransmit flag on ack", func(t *testing.T) {
+		pq := newPayloadQueue()
+		for i := 0; i < 4; i++ {
+			pq.push(makePayload(uint32(i+1), 10), 0)
+		}
+
+		pq.markAllToRetrasmit()
+		pq.markAsAcked(2) // should cancel retransmission for TSN 2
+		pq.markAsAcked(4) // should cancel retransmission for TSN 4
+
+		c, ok := pq.get(1)
+		assert.True(t, ok, "should be true")
+		assert.True(t, c.retransmit, "should be marked as retransmit")
+		c, ok = pq.get(2)
+		assert.True(t, ok, "should be true")
+		assert.False(t, c.retransmit, "should NOT be marked as retransmit")
+		c, ok = pq.get(3)
+		assert.True(t, ok, "should be true")
+		assert.True(t, c.retransmit, "should be marked as retransmit")
+		c, ok = pq.get(4)
+		assert.True(t, ok, "should be true")
+		assert.False(t, c.retransmit, "should NOT be marked as retransmit")
+	})
 }
