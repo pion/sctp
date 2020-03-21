@@ -1,6 +1,7 @@
 package sctp
 
 import (
+	"context"
 	"io"
 	"math"
 	"sync"
@@ -83,11 +84,24 @@ func (s *Stream) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// ReadWithContext reads a packet of len(p) bytes with context, dropping the
+// Payload Protocol Identifier.
+// Returns EOF when the stream is reset or an error if the stream is closed
+// or context cancel/deadline is met.
+func (s *Stream) ReadWithContext(ctx context.Context, p []byte) (int, error) {
+	n, _, err := s.readSCTP(ctx, p)
+	return n, err
+}
+
 // ReadSCTP reads a packet of len(p) bytes and returns the associated Payload
 // Protocol Identifier.
 // Returns EOF when the stream is reset or an error if the stream is closed
 // otherwise.
 func (s *Stream) ReadSCTP(p []byte) (int, PayloadProtocolIdentifier, error) {
+	return s.readSCTP(context.TODO(), p)
+}
+
+func (s *Stream) readSCTP(ctx context.Context, p []byte) (int, PayloadProtocolIdentifier, error) {
 	s.lock.Lock()
 	defer s.lock.Unlock()
 
@@ -104,7 +118,17 @@ func (s *Stream) ReadSCTP(p []byte) (int, PayloadProtocolIdentifier, error) {
 			return 0, PayloadProtocolIdentifier(0), err
 		}
 
-		s.readNotifier.Wait()
+		wait := make(chan struct{})
+		go func() {
+			s.readNotifier.Wait()
+			close(wait)
+		}()
+
+		select {
+		case <-wait:
+		case <-ctx.Done():
+			return 0, PayloadProtocolIdentifier(0), ctx.Err()
+		}
 	}
 }
 
