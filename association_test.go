@@ -359,7 +359,7 @@ func establishSessionPair(br *test.Bridge, a0, a1 *Association, si uint16) (*Str
 		return nil, nil, err
 	}
 
-	br.Process()
+	flushBuffers(br, a0, a1)
 
 	s1, err := a1.AcceptStream()
 	if err != nil {
@@ -415,6 +415,9 @@ func TestAssocReliable(t *testing.T) {
 	rand.Shuffle(len(sbufL), func(i, j int) { sbufL[i], sbufL[j] = sbufL[j], sbufL[i] })
 
 	t.Run("Simple", func(t *testing.T) {
+		lim := test.TimeOut(time.Second * 10)
+		defer lim.Stop()
+
 		const si uint16 = 1
 		const msg = "ABC"
 		br := test.NewBridge()
@@ -436,7 +439,7 @@ func TestAssocReliable(t *testing.T) {
 		assert.Equal(t, len(msg), n, "unexpected length of received data")
 		assert.Equal(t, len(msg), a0.bufferedAmount(), "incorrect bufferedAmount")
 
-		br.Process()
+		flushBuffers(br, a0, a1)
 
 		buf := make([]byte, 32)
 		n, ppi, err := s1.ReadSCTP(buf)
@@ -453,6 +456,9 @@ func TestAssocReliable(t *testing.T) {
 	})
 
 	t.Run("ordered reordered", func(t *testing.T) {
+		lim := test.TimeOut(time.Second * 10)
+		defer lim.Stop()
+
 		const si uint16 = 2
 		var n int
 		var ppi PayloadProtocolIdentifier
@@ -507,6 +513,9 @@ func TestAssocReliable(t *testing.T) {
 	})
 
 	t.Run("ordered fragmented then defragmented", func(t *testing.T) {
+		lim := test.TimeOut(time.Second * 10)
+		defer lim.Stop()
+
 		const si uint16 = 3
 		var n int
 		var ppi PayloadProtocolIdentifier
@@ -527,11 +536,8 @@ func TestAssocReliable(t *testing.T) {
 		assert.Nil(t, err, "WriteSCTP failed")
 		assert.Equal(t, n, len(sbufL), "unexpected length of received data")
 
-		br.Process()
-
 		rbuf := make([]byte, 2000)
-
-		br.Process()
+		flushBuffers(br, a0, a1)
 
 		n, ppi, err = s1.ReadSCTP(rbuf)
 		if !assert.Nil(t, err, "ReadSCTP failed") {
@@ -548,6 +554,9 @@ func TestAssocReliable(t *testing.T) {
 	})
 
 	t.Run("unordered fragmented then defragmented", func(t *testing.T) {
+		lim := test.TimeOut(time.Second * 10)
+		defer lim.Stop()
+
 		const si uint16 = 4
 		var n int
 		var ppi PayloadProtocolIdentifier
@@ -568,11 +577,8 @@ func TestAssocReliable(t *testing.T) {
 		assert.Nil(t, err, "WriteSCTP failed")
 		assert.Equal(t, n, len(sbufL), "unexpected length of received data")
 
-		br.Process()
-
 		rbuf := make([]byte, 2000)
-
-		br.Process()
+		flushBuffers(br, a0, a1)
 
 		n, ppi, err = s1.ReadSCTP(rbuf)
 		if !assert.Nil(t, err, "ReadSCTP failed") {
@@ -589,6 +595,9 @@ func TestAssocReliable(t *testing.T) {
 	})
 
 	t.Run("unordered reordered", func(t *testing.T) {
+		lim := test.TimeOut(time.Second * 10)
+		defer lim.Stop()
+
 		const si uint16 = 5
 		var n int
 		var ppi PayloadProtocolIdentifier
@@ -617,9 +626,8 @@ func TestAssocReliable(t *testing.T) {
 		assert.Nil(t, err, "WriteSCTP failed")
 		assert.Equal(t, n, len(sbuf), "unexpected length of received data")
 
-		br.Process()
-
 		buf := make([]byte, 2000)
+		flushBuffers(br, a0, a1)
 
 		n, ppi, err = s1.ReadSCTP(buf)
 		if !assert.Nil(t, err, "ReadSCTP failed") {
@@ -646,6 +654,9 @@ func TestAssocReliable(t *testing.T) {
 	})
 
 	t.Run("retransmission", func(t *testing.T) {
+		lim := test.TimeOut(time.Second * 10)
+		defer lim.Stop()
+
 		const si uint16 = 6
 		const msg1 = "ABC"
 		const msg2 = "DEFG"
@@ -703,6 +714,9 @@ func TestAssocReliable(t *testing.T) {
 	})
 
 	t.Run("short buffer", func(t *testing.T) {
+		lim := test.TimeOut(time.Second * 10)
+		defer lim.Stop()
+
 		const si uint16 = 1
 		const msg = "Hello"
 		br := test.NewBridge()
@@ -724,7 +738,7 @@ func TestAssocReliable(t *testing.T) {
 		assert.Equal(t, len(msg), n, "unexpected length of received data")
 		assert.Equal(t, len(msg), a0.bufferedAmount(), "incorrect bufferedAmount")
 
-		br.Process()
+		flushBuffers(br, a0, a1)
 
 		buf := make([]byte, 3)
 		n, ppi, err := s1.ReadSCTP(buf)
@@ -766,6 +780,9 @@ func TestAssocUnreliable(t *testing.T) {
 	rand.Shuffle(len(sbuf), func(i, j int) { sbuf[i], sbuf[j] = sbuf[j], sbuf[i] })
 
 	t.Run("Rexmit ordered no fragment", func(t *testing.T) {
+		lim := test.TimeOut(time.Second * 10)
+		defer lim.Stop()
+
 		const si uint16 = 1
 		br := test.NewBridge()
 
@@ -799,7 +816,7 @@ func TestAssocUnreliable(t *testing.T) {
 		}
 		assert.Equal(t, len(sbuf), n, "unexpected length of written data")
 
-		br.Process()
+		flushBuffers(br, a0, a1)
 
 		buf := make([]byte, 2000)
 		n, ppi, err := s1.ReadSCTP(buf)
@@ -817,6 +834,9 @@ func TestAssocUnreliable(t *testing.T) {
 	})
 
 	t.Run("Rexmit ordered fragments", func(t *testing.T) {
+		lim := test.TimeOut(time.Second * 10)
+		defer lim.Stop()
+
 		const si uint16 = 1
 		br := test.NewBridge()
 
@@ -851,7 +871,7 @@ func TestAssocUnreliable(t *testing.T) {
 		}
 		assert.Equal(t, len(sbuf2), n, "unexpected length of written data")
 
-		br.Process()
+		flushBuffers(br, a0, a1)
 
 		rbuf := make([]byte, 2000)
 		n, ppi, err := s1.ReadSCTP(rbuf)
@@ -870,6 +890,9 @@ func TestAssocUnreliable(t *testing.T) {
 	})
 
 	t.Run("Rexmit unordered no fragment", func(t *testing.T) {
+		lim := test.TimeOut(time.Second * 10)
+		defer lim.Stop()
+
 		const si uint16 = 2
 		br := test.NewBridge()
 
@@ -903,7 +926,7 @@ func TestAssocUnreliable(t *testing.T) {
 		}
 		assert.Equal(t, len(sbuf), n, "unexpected length of written data")
 
-		br.Process()
+		flushBuffers(br, a0, a1)
 
 		buf := make([]byte, 2000)
 		n, ppi, err := s1.ReadSCTP(buf)
@@ -921,6 +944,9 @@ func TestAssocUnreliable(t *testing.T) {
 	})
 
 	t.Run("Rexmit unordered fragments", func(t *testing.T) {
+		lim := test.TimeOut(time.Second * 10)
+		defer lim.Stop()
+
 		const si uint16 = 1
 		br := test.NewBridge()
 
@@ -952,7 +978,7 @@ func TestAssocUnreliable(t *testing.T) {
 
 		time.Sleep(10 * time.Millisecond)
 		br.Drop(0, 0, 2) // drop the second fragment of the first chunk (second chunk should be sacked)
-		br.Process()
+		flushBuffers(br, a0, a1)
 
 		rbuf := make([]byte, 2000)
 		n, ppi, err := s1.ReadSCTP(rbuf)
@@ -972,6 +998,9 @@ func TestAssocUnreliable(t *testing.T) {
 	})
 
 	t.Run("Timed ordered", func(t *testing.T) {
+		lim := test.TimeOut(time.Second * 10)
+		defer lim.Stop()
+
 		const si uint16 = 3
 		br := test.NewBridge()
 
@@ -1006,7 +1035,7 @@ func TestAssocUnreliable(t *testing.T) {
 		assert.Equal(t, len(sbuf), n, "unexpected length of written data")
 
 		//br.Drop(0, 0, 1) // drop the first packet (second one should be sacked)
-		br.Process()
+		flushBuffers(br, a0, a1)
 
 		buf := make([]byte, 2000)
 		n, ppi, err := s1.ReadSCTP(buf)
@@ -1024,6 +1053,9 @@ func TestAssocUnreliable(t *testing.T) {
 	})
 
 	t.Run("Timed unordered", func(t *testing.T) {
+		lim := test.TimeOut(time.Second * 10)
+		defer lim.Stop()
+
 		const si uint16 = 3
 		br := test.NewBridge()
 
@@ -1057,7 +1089,7 @@ func TestAssocUnreliable(t *testing.T) {
 		}
 		assert.Equal(t, len(sbuf), n, "unexpected length of written data")
 
-		br.Process()
+		flushBuffers(br, a0, a1)
 
 		buf := make([]byte, 2000)
 		n, ppi, err := s1.ReadSCTP(buf)
@@ -1300,6 +1332,9 @@ func TestAssocT1InitTimer(t *testing.T) {
 	loggerFactory := logging.NewDefaultLoggerFactory()
 
 	t.Run("Retransmission success", func(t *testing.T) {
+		lim := test.TimeOut(time.Second * 10)
+		defer lim.Stop()
+
 		br := test.NewBridge()
 		a0 := createAssociation(Config{
 			NetConn:       br.GetConn0(),
@@ -1348,15 +1383,18 @@ func TestAssocT1InitTimer(t *testing.T) {
 			default:
 			}
 		}
+		flushBuffers(br, a0, a1)
 
 		assert.Nil(t, err0, "should be nil")
 		assert.Nil(t, err1, "should be nil")
 
-		_ = a0.Close() // #nosec
-		_ = a1.Close() // #nosec
+		closeAssociationPair(br, a0, a1)
 	})
 
 	t.Run("Retransmission failure", func(t *testing.T) {
+		lim := test.TimeOut(time.Second * 10)
+		defer lim.Stop()
+
 		br := test.NewBridge()
 		a0 := createAssociation(Config{
 			NetConn:       br.GetConn0(),
@@ -1415,8 +1453,7 @@ func TestAssocT1InitTimer(t *testing.T) {
 		assert.NotNil(t, err0, "should NOT be nil")
 		assert.NotNil(t, err1, "should NOT be nil")
 
-		_ = a0.Close() // #nosec
-		_ = a1.Close() // #nosec
+		closeAssociationPair(br, a0, a1)
 	})
 }
 
@@ -1424,6 +1461,9 @@ func TestAssocT1CookieTimer(t *testing.T) {
 	loggerFactory := logging.NewDefaultLoggerFactory()
 
 	t.Run("Retransmission success", func(t *testing.T) {
+		lim := test.TimeOut(time.Second * 10)
+		defer lim.Stop()
+
 		br := test.NewBridge()
 		a0 := createAssociation(Config{
 			NetConn:       br.GetConn0(),
@@ -1479,11 +1519,13 @@ func TestAssocT1CookieTimer(t *testing.T) {
 		assert.Nil(t, err0, "should be nil")
 		assert.Nil(t, err1, "should be nil")
 
-		_ = a0.Close() // #nosec
-		_ = a1.Close() // #nosec
+		closeAssociationPair(br, a0, a1)
 	})
 
 	t.Run("Retransmission failure", func(t *testing.T) {
+		lim := test.TimeOut(time.Second * 10)
+		defer lim.Stop()
+
 		br := test.NewBridge()
 		a0 := createAssociation(Config{
 			NetConn:       br.GetConn0(),
@@ -1545,8 +1587,7 @@ func TestAssocT1CookieTimer(t *testing.T) {
 		time.Sleep(1000 * time.Millisecond)
 		br.Process()
 
-		_ = a0.Close() // #nosec
-		_ = a1.Close() // #nosec
+		closeAssociationPair(br, a0, a1)
 	})
 }
 
@@ -1587,6 +1628,9 @@ func TestAssocCreateNewStream(t *testing.T) {
 func TestAssocT3RtxTimer(t *testing.T) {
 	// Send one packet, drop it, then retransmitted successfully.
 	t.Run("Retransmission success", func(t *testing.T) {
+		lim := test.TimeOut(time.Second * 10)
+		defer lim.Stop()
+
 		const si uint16 = 6
 		const msg1 = "ABC"
 		var n int
@@ -1650,6 +1694,9 @@ func TestAssocCongestionControl(t *testing.T) {
 	// 3) The first one is retransmitted, which makes s1 readable
 	// Above should be done before RTO occurs (fast recovery)
 	t.Run("Fast retransmission", func(t *testing.T) {
+		lim := test.TimeOut(time.Second * 10)
+		defer lim.Stop()
+
 		const si uint16 = 6
 		var n int
 		var ppi PayloadProtocolIdentifier
@@ -1717,6 +1764,9 @@ func TestAssocCongestionControl(t *testing.T) {
 	})
 
 	t.Run("Congestion Avoidance", func(t *testing.T) {
+		lim := test.TimeOut(time.Second * 10)
+		defer lim.Stop()
+
 		const maxReceiveBufferSize uint32 = 64 * 1024
 		const si uint16 = 6
 		const nPacketsToSend = 2000
@@ -1801,6 +1851,9 @@ func TestAssocCongestionControl(t *testing.T) {
 	// This is to test even rwnd becomes 0, sender should be able to send a zero window probe
 	// on T3-rtx retramission timeout to complete receiving all the packets.
 	t.Run("Slow reader", func(t *testing.T) {
+		lim := test.TimeOut(time.Second * 10)
+		defer lim.Stop()
+
 		const maxReceiveBufferSize uint32 = 64 * 1024
 		const si uint16 = 6
 		nPacketsToSend := int(math.Floor(float64(maxReceiveBufferSize)/1000.0)) * 2
@@ -1889,6 +1942,9 @@ func TestAssocCongestionControl(t *testing.T) {
 
 func TestAssocDelayedAck(t *testing.T) {
 	t.Run("First DATA chunk gets acked with delay", func(t *testing.T) {
+		lim := test.TimeOut(time.Second * 10)
+		defer lim.Stop()
+
 		const si uint16 = 6
 		var n int
 		var nPacketsReceived int
@@ -1968,6 +2024,9 @@ func TestAssocDelayedAck(t *testing.T) {
 	})
 
 	t.Run("Second DATA chunk to generate SACK immedidately", func(t *testing.T) {
+		lim := test.TimeOut(time.Second * 10)
+		defer lim.Stop()
+
 		const si uint16 = 6
 		var n int
 		var nPacketsReceived int
@@ -2045,6 +2104,9 @@ func TestAssocDelayedAck(t *testing.T) {
 
 func TestAssocReset(t *testing.T) {
 	t.Run("Close one way", func(t *testing.T) {
+		lim := test.TimeOut(time.Second * 10)
+		defer lim.Stop()
+
 		const si uint16 = 1
 		const msg = "ABC"
 		br := test.NewBridge()
@@ -2103,6 +2165,9 @@ func TestAssocReset(t *testing.T) {
 	})
 
 	t.Run("Close both ways", func(t *testing.T) {
+		lim := test.TimeOut(time.Second * 10)
+		defer lim.Stop()
+
 		const si uint16 = 1
 		const msg = "ABC"
 		br := test.NewBridge()
@@ -2187,6 +2252,9 @@ func TestAssocReset(t *testing.T) {
 }
 
 func TestAssocAbort(t *testing.T) {
+	lim := test.TimeOut(time.Second * 10)
+	defer lim.Stop()
+
 	const si uint16 = 1
 	br := test.NewBridge()
 
@@ -2210,7 +2278,10 @@ func TestAssocAbort(t *testing.T) {
 
 	_, err = a0.netConn.Write(packet)
 	assert.NoError(t, err)
-	br.Process()
+	flushBuffers(br, a0, a1)
+
+	// There is a little delay before changing the state to closed
+	time.Sleep(10 * time.Millisecond)
 
 	// The receiving association should be closed because it got an ABORT
 	assert.Equal(t, established, a0.getState())
