@@ -412,20 +412,22 @@ func (a *Association) readLoop() {
 	}()
 
 	a.log.Debugf("[%s] readLoop entered", a.name)
+	buffer := make([]byte, receiveMTU)
 
 	for {
-		// buffer is recreated because the user data is
-		// passed to the reassembly queue without copying
-		buffer := make([]byte, receiveMTU)
-
 		n, err := a.netConn.Read(buffer)
 		if err != nil {
 			closeErr = err
 			break
 		}
-
+		// Make a buffer sized to what we read, then copy the data we
+		// read from the underlying transport. We do this because the
+		// user data is passed to the reassembly queue without
+		// copying.
+		inbound := make([]byte, n)
+		copy(inbound, buffer[:n])
 		atomic.AddUint64(&a.bytesReceived, uint64(n))
-		if err = a.handleInbound(buffer[:n]); err != nil {
+		if err = a.handleInbound(inbound); err != nil {
 			closeErr = err
 			break
 		}
