@@ -12,18 +12,13 @@ import (
 )
 
 func main() {
-	conn, err := net.Dial("udp", "127.0.0.1:5678")
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer conn.Close()
-	fmt.Println("dialed udp ponger")
+	// Prepare the IP to connect to
+	addr := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 5678}
 
 	config := sctp.Config{
-		NetConn:       conn,
 		LoggerFactory: logging.NewDefaultLoggerFactory(),
 	}
-	a, err := sctp.Client(config)
+	a, err := sctp.DialAssociation("udp", addr, config)
 	if err != nil {
 		log.Fatal(err)
 	}

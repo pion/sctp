@@ -212,6 +212,19 @@ func Server(config Config) (*Association, error) {
 	}
 }
 
+// DialAssociation connects to the given network address and establishes a
+// SCTP association on top. The net.Conn in the config is ignored.
+func DialAssociation(network string, raddr *net.UDPAddr, config Config) (*Association, error) {
+	pConn, err := net.DialUDP(network, nil, raddr)
+	if err != nil {
+		return nil, err
+	}
+
+	config.NetConn = pConn
+
+	return Client(config)
+}
+
 // Client opens a SCTP stream over a conn
 func Client(config Config) (*Association, error) {
 	a := createAssociation(config)

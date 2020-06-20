@@ -13,29 +13,27 @@ import (
 )
 
 func main() {
-	addr := net.UDPAddr{
-		IP:   net.IPv4(127, 0, 0, 1),
-		Port: 5678,
-	}
+	addr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5678}
 
-	conn, err := net.ListenUDP("udp", &addr)
+	config := sctp.Config{
+		LoggerFactory: logging.NewDefaultLoggerFactory(),
+	}
+	l, err := sctp.ListenAssociation("udp", addr, config)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer conn.Close()
-	fmt.Println("created a udp listener")
+	defer l.Close()
+	fmt.Println("created a listener")
 
-	config := sctp.Config{
-		NetConn:       &disconnectedPacketConn{pConn: conn},
-		LoggerFactory: logging.NewDefaultLoggerFactory(),
-	}
-	a, err := sctp.Server(config)
+	// Note: You should accept all incoming associations in a loop.
+	a, err := l.Accept()
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer a.Close()
-	fmt.Println("created a server")
+	fmt.Println("accepted an association")
 
+	// Note: You should accept all incoming streams in a loop.
 	stream, err := a.AcceptStream()
 	if err != nil {
 		log.Fatal(err)
