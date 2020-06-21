@@ -88,6 +88,8 @@ type PayloadProtocolIdentifier uint32
 // PayloadProtocolIdentifier enums
 // https://www.iana.org/assignments/sctp-parameters/sctp-parameters.xhtml#sctp-parameters-25
 const (
+	PayloadTypeUnspecified PayloadProtocolIdentifier = 0
+
 	PayloadTypeWebRTCDCEP        PayloadProtocolIdentifier = 50
 	PayloadTypeWebRTCString      PayloadProtocolIdentifier = 51
 	PayloadTypeWebRTCBinary      PayloadProtocolIdentifier = 53

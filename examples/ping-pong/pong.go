@@ -6,19 +6,14 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"time"
 
-	"github.com/pion/logging"
 	"github.com/pion/sctp"
 )
 
 func main() {
 	addr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5678}
 
-	config := sctp.Config{
-		LoggerFactory: logging.NewDefaultLoggerFactory(),
-	}
-	l, err := sctp.ListenAssociation("udp", addr, config)
+	l, err := sctp.Listen("udp", addr)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -26,23 +21,13 @@ func main() {
 	fmt.Println("created a listener")
 
 	// Note: You should accept all incoming associations in a loop.
-	a, err := l.Accept()
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer a.Close()
-	fmt.Println("accepted an association")
-
-	// Note: You should accept all incoming streams in a loop.
-	stream, err := a.AcceptStream()
+	stream, err := l.Accept()
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer stream.Close()
 	fmt.Println("accepted a stream")
 
-	// set unordered = true and 10ms treshold for dropping packets
-	stream.SetReliabilityParams(true, sctp.ReliabilityTypeTimed, 10)
 	var pongSeqNum int
 	for {
 		buff := make([]byte, 1024)
@@ -60,7 +45,5 @@ func main() {
 			log.Fatal(err)
 		}
 		fmt.Println("sent:", pongMsg)
-
-		time.Sleep(time.Second)
 	}
 }
