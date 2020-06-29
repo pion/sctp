@@ -2420,3 +2420,64 @@ func TestStats(t *testing.T) {
 	assert.Equal(t, conn.bytesReceived, a.BytesReceived())
 	assert.Equal(t, conn.bytesSent, a.BytesSent())
 }
+
+func TestAssocHandleInit(t *testing.T) {
+	loggerFactory := logging.NewDefaultLoggerFactory()
+
+	handleInitTest := func(t *testing.T, initialState uint32, expectErr bool) {
+		a := createAssociation(Config{
+			NetConn:       &dumbConn{},
+			LoggerFactory: loggerFactory,
+		})
+		a.setState(initialState)
+		pkt := &packet{
+			sourcePort:      5001,
+			destinationPort: 5002,
+		}
+		init := &chunkInit{}
+		init.initialTSN = 1234
+		init.numOutboundStreams = 1001
+		init.numInboundStreams = 1002
+		init.initiateTag = 5678
+		init.advertisedReceiverWindowCredit = 512 * 1024
+		setSupportedExtensions(&init.chunkInitCommon)
+
+		_, err := a.handleInit(pkt, init)
+		if expectErr {
+			assert.Error(t, err, "should fail")
+			return
+		}
+		assert.NoError(t, err, "should succeed")
+		assert.Equal(t, init.initialTSN-1, a.peerLastTSN, "should match")
+		assert.Equal(t, uint16(1001), a.myMaxNumOutboundStreams, "should match")
+		assert.Equal(t, uint16(1002), a.myMaxNumInboundStreams, "should match")
+		assert.Equal(t, uint32(5678), a.peerVerificationTag, "should match")
+		assert.Equal(t, pkt.sourcePort, a.destinationPort, "should match")
+		assert.Equal(t, pkt.destinationPort, a.sourcePort, "should match")
+		assert.True(t, a.useForwardTSN, "should be set to true")
+	}
+
+	t.Run("normal", func(t *testing.T) {
+		handleInitTest(t, closed, false)
+	})
+
+	t.Run("unexpected state established", func(t *testing.T) {
+		handleInitTest(t, established, true)
+	})
+
+	t.Run("unexpected state shutdownAckSent", func(t *testing.T) {
+		handleInitTest(t, shutdownAckSent, true)
+	})
+
+	t.Run("unexpected state shutdownPending", func(t *testing.T) {
+		handleInitTest(t, shutdownPending, true)
+	})
+
+	t.Run("unexpected state shutdownReceived", func(t *testing.T) {
+		handleInitTest(t, shutdownReceived, true)
+	})
+
+	t.Run("unexpected state shutdownSent", func(t *testing.T) {
+		handleInitTest(t, shutdownSent, true)
+	})
+}

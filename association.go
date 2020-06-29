@@ -821,11 +821,6 @@ func (a *Association) handleInit(p *packet, i *chunkInit) ([]*packet, error) {
 	// responding, the endpoint MUST send the INIT ACK back to the same
 	// address that the original INIT (sent by this endpoint) was sent.
 
-	// https://tools.ietf.org/html/rfc4960#section-5.2.1
-	// Upon receipt of an INIT in the COOKIE-ECHOED state, an endpoint MUST
-	// respond with an INIT ACK using the same parameters it sent in its
-	// original INIT chunk (including its Initiate Tag, unchanged)
-
 	if state != closed && state != cookieWait && state != cookieEchoed {
 		// 5.2.2.  Unexpected INIT in States Other than CLOSED, COOKIE-ECHOED,
 		//        COOKIE-WAIT, and SHUTDOWN-ACK-SENT
@@ -844,6 +839,21 @@ func (a *Association) handleInit(p *packet, i *chunkInit) ([]*packet, error) {
 	// received in the INIT or INIT ACK chunk, and
 	// subtracting one from it.
 	a.peerLastTSN = i.initialTSN - 1
+
+	for _, param := range i.params {
+		switch v := param.(type) {
+		case *paramSupportedExtensions:
+			for _, t := range v.ChunkTypes {
+				if t == ctForwardTSN {
+					a.log.Debugf("[%s] use ForwardTSN (on init)\n", a.name)
+					a.useForwardTSN = true
+				}
+			}
+		}
+	}
+	if !a.useForwardTSN {
+		a.log.Warnf("[%s] not using ForwardTSN (on init)\n", a.name)
+	}
 
 	outbound := &packet{}
 	outbound.verificationTag = a.peerVerificationTag
@@ -917,10 +927,14 @@ func (a *Association) handleInitAck(p *packet, i *chunkInitAck) error {
 		case *paramSupportedExtensions:
 			for _, t := range v.ChunkTypes {
 				if t == ctForwardTSN {
+					a.log.Debugf("[%s] use ForwardTSN (on initAck)\n", a.name)
 					a.useForwardTSN = true
 				}
 			}
 		}
+	}
+	if !a.useForwardTSN {
+		a.log.Warnf("[%s] not using ForwardTSN (on initAck)\n", a.name)
 	}
 	if cookieParam == nil {
 		return errors.Errorf("no cookie in InitAck")
@@ -1579,6 +1593,7 @@ func (a *Association) handleForwardTSN(c *chunkForwardTSN) []*packet {
 	a.log.Tracef("[%s] FwdTSN: %s", a.name, c.String())
 
 	if !a.useForwardTSN {
+		a.log.Warn("[%s] received FwdTSN but not enabled")
 		// Return an error chunk
 		cerr := &chunkError{
 			errorCauses: []errorCause{&errorCauseUnrecognizedChunkType{}},
@@ -1599,6 +1614,8 @@ func (a *Association) handleForwardTSN(c *chunkForwardTSN) []*packet {
 	//   send a SACK to its peer (the sender of the FORWARD TSN) since such a
 	//   duplicate may indicate the previous SACK was lost in the network.
 
+	a.log.Tracef("[%s] should send ack? newCumTSN=%d peerLastTSN=%d\n",
+		a.name, c.newCumulativeTSN, a.peerLastTSN)
 	if sna32LTE(c.newCumulativeTSN, a.peerLastTSN) {
 		a.log.Tracef("[%s] sending ack on Forward TSN", a.name)
 		a.ackState = ackStateImmediate
@@ -1880,6 +1897,8 @@ func (a *Association) checkPartialReliabilityStatus(c *chunkPayloadData) {
 			}
 		}
 		s.lock.RUnlock()
+	} else {
+		a.log.Errorf("[%s] stream %d not found)", a.name, c.streamIdentifier)
 	}
 }
 
