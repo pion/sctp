@@ -70,6 +70,8 @@ func (s *Stream) SetReliabilityParams(unordered bool, relType byte, relVal uint3
 // setReliabilityParams sets reliability parameters for this stream.
 // The caller should hold the lock.
 func (s *Stream) setReliabilityParams(unordered bool, relType byte, relVal uint32) {
+	s.log.Debugf("[%s] reliability params: ordered=%v type=%d value=%d",
+		s.name, !unordered, relType, relVal)
 	s.unordered = unordered
 	s.reliabilityType = relType
 	s.reliabilityValue = relVal
