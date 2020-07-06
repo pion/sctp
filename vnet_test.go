@@ -384,7 +384,7 @@ func TestRwndFull(t *testing.T) {
 }
 
 func testStreamClose(t *testing.T, dropReconfig bool) {
-	lim := test.TimeOut(time.Second * 5)
+	lim := test.TimeOut(time.Second * 10)
 	defer lim.Stop()
 
 	loggerFactory := logging.NewDefaultLoggerFactory()
