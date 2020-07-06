@@ -982,19 +982,23 @@ func (a *Association) handleHeartbeat(c *chunkHeartbeat) []*packet {
 func (a *Association) handleCookieEcho(c *chunkCookieEcho) []*packet {
 	state := a.getState()
 	a.log.Debugf("[%s] COOKIE-ECHO received in state '%s'", a.name, getAssociationStateString(state))
-	if state != closed && state != cookieWait && state != cookieEchoed {
-		return nil
+	if state != established {
+		if state != closed && state != cookieWait && state != cookieEchoed {
+			return nil
+		}
+		if !bytes.Equal(a.myCookie.cookie, c.cookie) {
+			return nil
+		}
+
+		a.t1Init.stop()
+		a.storedInit = nil
+
+		a.t1Cookie.stop()
+		a.storedCookieEcho = nil
+
+		a.setState(established)
+		a.handshakeCompletedCh <- nil
 	}
-
-	if !bytes.Equal(a.myCookie.cookie, c.cookie) {
-		return nil
-	}
-
-	a.t1Init.stop()
-	a.storedInit = nil
-
-	a.t1Cookie.stop()
-	a.storedCookieEcho = nil
 
 	p := &packet{
 		verificationTag: a.peerVerificationTag,
@@ -1002,9 +1006,6 @@ func (a *Association) handleCookieEcho(c *chunkCookieEcho) []*packet {
 		destinationPort: a.destinationPort,
 		chunks:          []chunk{&chunkCookieAck{}},
 	}
-
-	a.setState(established)
-	a.handshakeCompletedCh <- nil
 	return pack(p)
 }
 
