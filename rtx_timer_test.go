@@ -127,6 +127,7 @@ func TestRtxTimer(t *testing.T) {
 		rt.stop()
 		assert.False(t, rt.isRunning(), "should not be running")
 
+		rt.close() // ensure all timer callbacks ended
 		assert.Equal(t, int32(4), atomic.LoadInt32(&nCbs), "should be called 4 times")
 	})
 
@@ -152,8 +153,9 @@ func TestRtxTimer(t *testing.T) {
 
 		time.Sleep(time.Duration(interval*1.5) * time.Millisecond)
 		rt.stop()
-
 		assert.False(t, rt.isRunning(), "should not be running")
+
+		rt.close() // ensure all timer callbacks ended
 		assert.Equal(t, int32(1), atomic.LoadInt32(&nCbs), "must be called once")
 	})
 
@@ -176,8 +178,9 @@ func TestRtxTimer(t *testing.T) {
 
 		time.Sleep(time.Duration(interval*1.5) * time.Millisecond)
 		rt.stop()
-
 		assert.False(t, rt.isRunning(), "should not be running")
+
+		rt.close() // ensure all timer callbacks ended
 		assert.Equal(t, int32(0), atomic.LoadInt32(&nCbs), "no callback should be made")
 	})
 
@@ -204,6 +207,8 @@ func TestRtxTimer(t *testing.T) {
 		time.Sleep(time.Duration(interval*1.5) * time.Millisecond)
 		rt.stop()
 		assert.False(t, rt.isRunning(), "should NOT be running")
+
+		rt.close() // ensure all timer callbacks ended
 		assert.Equal(t, int32(1), atomic.LoadInt32(&nCbs), "must be called once")
 	})
 
@@ -227,6 +232,7 @@ func TestRtxTimer(t *testing.T) {
 			assert.False(t, rt.isRunning(), "should NOT be running")
 		}
 
+		rt.close() // ensure all timer callbacks ended
 		assert.Equal(t, int32(0), atomic.LoadInt32(&nCbs), "no callback should be made")
 	})
 
@@ -315,7 +321,7 @@ func TestRtxTimer(t *testing.T) {
 		assert.True(t, elapsed > 0.600, "must have taken more than 600 msec")
 		assert.True(t, elapsed < 0.700, "must fail in less than 700 msec")
 
-		rt.stop()
+		rt.close()
 	})
 
 	t.Run("stop timer that is not running is noop", func(t *testing.T) {

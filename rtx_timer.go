@@ -101,6 +101,7 @@ type rtxTimer struct {
 	observer   rtxTimerObserver
 	maxRetrans uint
 	stopFunc   stopTimerLoop
+	runningCh  <-chan struct{}
 	closed     bool
 	mutex      sync.RWMutex
 }
@@ -140,8 +141,12 @@ func (t *rtxTimer) start(rto float64) bool {
 	var nRtos uint
 
 	cancelCh := make(chan struct{})
+	runningCh := make(chan struct{})
 
 	go func() {
+		defer func() {
+			close(runningCh)
+		}()
 		canceling := false
 
 		for !canceling {
@@ -164,6 +169,7 @@ func (t *rtxTimer) start(rto float64) bool {
 		}
 	}()
 
+	t.runningCh = runningCh
 	t.stopFunc = func() {
 		close(cancelCh)
 	}
@@ -171,29 +177,34 @@ func (t *rtxTimer) start(rto float64) bool {
 	return true
 }
 
-// stop stops the timer.
-func (t *rtxTimer) stop() {
-	t.mutex.Lock()
-	defer t.mutex.Unlock()
-
+// stopInternal stops the timer. t.mutex must be locked before calling this.
+func (t *rtxTimer) stopInternal() {
 	if t.stopFunc != nil {
 		t.stopFunc()
 		t.stopFunc = nil
 	}
 }
 
+// stop stops the timer.
+func (t *rtxTimer) stop() {
+	t.mutex.Lock()
+	t.stopInternal()
+	t.mutex.Unlock()
+}
+
 // closes the timer. this is similar to stop() but subsequent start() call
 // will fail (the timer is no longer usable)
+// Unlike stop(), it is guaranteed that the callbacks are ended when close() returns.
 func (t *rtxTimer) close() {
 	t.mutex.Lock()
-	defer t.mutex.Unlock()
-
-	if t.stopFunc != nil {
-		t.stopFunc()
-		t.stopFunc = nil
-	}
-
+	t.stopInternal()
+	runningCh := t.runningCh
 	t.closed = true
+	t.mutex.Unlock()
+
+	if runningCh != nil {
+		<-runningCh // wait until timer routine stops
+	}
 }
 
 // isRunning tests if the timer is running.
