@@ -3,6 +3,7 @@ package sctp
 import (
 	//"fmt"
 	"math"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -102,10 +103,10 @@ func (o *testTimerObserver) onRetransmissionFailure(id int) {
 func TestRtxTimer(t *testing.T) {
 	t.Run("callback interval", func(t *testing.T) {
 		timerID := 0
-		var nCbs int
+		var nCbs int32
 		rt := newRTXTimer(timerID, &testTimerObserver{
 			onRTO: func(id int, nRtos uint) {
-				nCbs++
+				atomic.AddInt32(&nCbs, 1)
 				// 30 : 1 (30)
 				// 60 : 2 (90)
 				// 120: 3 (210)
@@ -126,16 +127,16 @@ func TestRtxTimer(t *testing.T) {
 		rt.stop()
 		assert.False(t, rt.isRunning(), "should not be running")
 
-		assert.Equal(t, 4, nCbs, "should be called 4 times (actual: %d)", nCbs)
+		assert.Equal(t, int32(4), atomic.LoadInt32(&nCbs), "should be called 4 times")
 	})
 
 	t.Run("last start wins", func(t *testing.T) {
 		timerID := 3
-		var nCbs int
+		var nCbs int32
 
 		rt := newRTXTimer(timerID, &testTimerObserver{
 			onRTO: func(id int, nRtos uint) {
-				nCbs++
+				atomic.AddInt32(&nCbs, 1)
 				assert.Equal(t, timerID, id, "unexpted timer ID: %d", id)
 			},
 			onRtxFailure: func(id int) {},
@@ -153,16 +154,16 @@ func TestRtxTimer(t *testing.T) {
 		rt.stop()
 
 		assert.False(t, rt.isRunning(), "should not be running")
-		assert.Equal(t, 1, nCbs, "must be called once")
+		assert.Equal(t, int32(1), atomic.LoadInt32(&nCbs), "must be called once")
 	})
 
 	t.Run("stop right afeter start", func(t *testing.T) {
 		timerID := 3
-		var nCbs int
+		var nCbs int32
 
 		rt := newRTXTimer(timerID, &testTimerObserver{
 			onRTO: func(id int, nRtos uint) {
-				nCbs++
+				atomic.AddInt32(&nCbs, 1)
 				assert.Equal(t, timerID, id, "unexpted timer ID: %d", id)
 			},
 			onRtxFailure: func(id int) {},
@@ -177,15 +178,15 @@ func TestRtxTimer(t *testing.T) {
 		rt.stop()
 
 		assert.False(t, rt.isRunning(), "should not be running")
-		assert.Equal(t, 0, nCbs, "must be called once")
+		assert.Equal(t, int32(0), atomic.LoadInt32(&nCbs), "no callback should be made")
 	})
 
 	t.Run("start, stop then start", func(t *testing.T) {
 		timerID := 1
-		var nCbs int
+		var nCbs int32
 		rt := newRTXTimer(timerID, &testTimerObserver{
 			onRTO: func(id int, nRtos uint) {
-				nCbs++
+				atomic.AddInt32(&nCbs, 1)
 				assert.Equal(t, timerID, id, "unexpted timer ID: %d", id)
 			},
 			onRtxFailure: func(id int) {},
@@ -203,15 +204,15 @@ func TestRtxTimer(t *testing.T) {
 		time.Sleep(time.Duration(interval*1.5) * time.Millisecond)
 		rt.stop()
 		assert.False(t, rt.isRunning(), "should NOT be running")
-		assert.Equal(t, 1, nCbs, "must be called once")
+		assert.Equal(t, int32(1), atomic.LoadInt32(&nCbs), "must be called once")
 	})
 
 	t.Run("start and stop in a tight loop", func(t *testing.T) {
 		timerID := 2
-		var nCbs int
+		var nCbs int32
 		rt := newRTXTimer(timerID, &testTimerObserver{
 			onRTO: func(id int, nRtos uint) {
-				nCbs++
+				atomic.AddInt32(&nCbs, 1)
 				t.Log("onRTO() called")
 				assert.Equal(t, timerID, id, "unexpted timer ID: %d", id)
 			},
@@ -226,12 +227,12 @@ func TestRtxTimer(t *testing.T) {
 			assert.False(t, rt.isRunning(), "should NOT be running")
 		}
 
-		assert.Equal(t, 0, nCbs, "no callback should be made")
+		assert.Equal(t, int32(0), atomic.LoadInt32(&nCbs), "no callback should be made")
 	})
 
 	t.Run("timer should stop after rtx failure", func(t *testing.T) {
 		timerID := 4
-		var nCbs int
+		var nCbs int32
 		doneCh := make(chan bool)
 
 		since := time.Now()
@@ -240,7 +241,7 @@ func TestRtxTimer(t *testing.T) {
 			onRTO: func(id int, nRtos uint) {
 				assert.Equal(t, timerID, id, "unexpted timer ID: %d", id)
 				t.Logf("onRTO: n=%d elapsed=%.03f\n", nRtos, time.Since(since).Seconds())
-				nCbs++
+				atomic.AddInt32(&nCbs, 1)
 			},
 			onRtxFailure: func(id int) {
 				assert.Equal(t, timerID, id, "unexpted timer ID: %d", id)
@@ -266,7 +267,7 @@ func TestRtxTimer(t *testing.T) {
 		<-doneCh
 
 		assert.False(t, rt.isRunning(), "should not be running")
-		assert.Equal(t, 5, nCbs, "must have been called 5 times")
+		assert.Equal(t, int32(5), atomic.LoadInt32(&nCbs), "should be called 5 times")
 		assert.True(t, elapsed > 0.600, "must have taken more than 600 msec")
 		assert.True(t, elapsed < 0.700, "must fail in less than 700 msec")
 	})
@@ -274,7 +275,7 @@ func TestRtxTimer(t *testing.T) {
 	t.Run("timer should not stop if maxRetrans is 0", func(t *testing.T) {
 		timerID := 4
 		maxRtos := uint(6)
-		var nCbs int
+		var nCbs int32
 		doneCh := make(chan bool)
 
 		since := time.Now()
@@ -284,7 +285,7 @@ func TestRtxTimer(t *testing.T) {
 				assert.Equal(t, timerID, id, "unexpted timer ID: %d", id)
 				elapsed = time.Since(since).Seconds()
 				t.Logf("onRTO: n=%d elapsed=%.03f\n", nRtos, elapsed)
-				nCbs++
+				atomic.AddInt32(&nCbs, 1)
 				if nRtos == maxRtos {
 					doneCh <- true
 				}
@@ -310,7 +311,7 @@ func TestRtxTimer(t *testing.T) {
 		<-doneCh
 
 		assert.True(t, rt.isRunning(), "should still be running")
-		assert.Equal(t, 6, nCbs, "must have been called 6 times")
+		assert.Equal(t, int32(6), atomic.LoadInt32(&nCbs), "should be called 6 times")
 		assert.True(t, elapsed > 0.600, "must have taken more than 600 msec")
 		assert.True(t, elapsed < 0.700, "must fail in less than 700 msec")
 
