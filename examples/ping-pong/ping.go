@@ -7,30 +7,15 @@ import (
 	"log"
 	"net"
 
-	"github.com/pion/logging"
 	"github.com/pion/sctp"
 )
 
 func main() {
-	conn, err := net.Dial("udp", "127.0.0.1:5678")
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer conn.Close()
-	fmt.Println("dialed udp ponger")
+	// Prepare the IP to connect to
+	addr := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 5678}
 
-	config := sctp.Config{
-		NetConn:       conn,
-		LoggerFactory: logging.NewDefaultLoggerFactory(),
-	}
-	a, err := sctp.Client(config)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer a.Close()
-	fmt.Println("created a client")
-
-	stream, err := a.OpenStream(0, sctp.PayloadTypeWebRTCString)
+	// Open SCTP stream
+	stream, err := sctp.Dial("udp", addr, 0)
 	if err != nil {
 		log.Fatal(err)
 	}

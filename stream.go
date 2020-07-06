@@ -3,7 +3,9 @@ package sctp
 import (
 	"io"
 	"math"
+	"net"
 	"sync"
+	"time"
 
 	"github.com/pion/logging"
 	"github.com/pkg/errors"
@@ -353,4 +355,29 @@ func (s *Stream) onBufferReleased(nBytesReleased int) {
 func (s *Stream) getNumBytesInReassemblyQueue() int {
 	// No lock is required as it reads the size with atomic load function.
 	return s.reassemblyQueue.getNumBytes()
+}
+
+// LocalAddr implements net.Conn.LocalAddr
+func (s *Stream) LocalAddr() net.Addr {
+	return s.association.netConn.LocalAddr()
+}
+
+// RemoteAddr implements net.Conn.RemoteAddr
+func (s *Stream) RemoteAddr() net.Addr {
+	return s.association.netConn.RemoteAddr()
+}
+
+// SetDeadline is a stub
+func (s *Stream) SetDeadline(t time.Time) error {
+	return nil
+}
+
+// SetReadDeadline is a stub
+func (s *Stream) SetReadDeadline(t time.Time) error {
+	return nil
+}
+
+// SetWriteDeadline is a stub
+func (s *Stream) SetWriteDeadline(t time.Time) error {
+	return nil
 }

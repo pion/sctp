@@ -1,7 +1,7 @@
 all: ping pong
 
-ping: ping.go conn.go
+ping: ping.go
 	go build -o $@
 
-pong: pong.go conn.go
+pong: pong.go
 	go build -o $@ -tags $@
