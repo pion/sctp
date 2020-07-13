@@ -100,7 +100,11 @@ func TestInitMarshalUnmarshal(t *testing.T) {
 	initAck.numInboundStreams = 1
 	initAck.initiateTag = 123
 	initAck.advertisedReceiverWindowCredit = 1024
-	initAck.params = []param{newRandomStateCookie()}
+	cookie, errRand := newRandomStateCookie()
+	if errRand != nil {
+		t.Fatal(errors.Wrap(errRand, "Failed to generate random state cookie"))
+	}
+	initAck.params = []param{cookie}
 
 	p.chunks = []chunk{initAck}
 	rawPkt, err := p.marshal()

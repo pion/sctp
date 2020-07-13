@@ -1,10 +1,8 @@
 package sctp
 
 import (
-	"encoding/binary"
+	"crypto/rand"
 	"fmt"
-	"math/rand"
-	"time"
 )
 
 type paramStateCookie struct {
@@ -12,21 +10,19 @@ type paramStateCookie struct {
 	cookie []byte
 }
 
-func newRandomStateCookie() *paramStateCookie {
-	rs := rand.NewSource(time.Now().UnixNano())
-	r := rand.New(rs)
+func newRandomStateCookie() (*paramStateCookie, error) {
 	randCookie := make([]byte, 32)
-	i := 0
-	for i < 4 {
-		binary.BigEndian.PutUint64(randCookie[i*4:], r.Uint64())
-		i++
+	_, err := rand.Read(randCookie)
+	// crypto/rand.Read returns n == len(b) if and only if err == nil.
+	if err != nil {
+		return nil, err
 	}
 
 	s := &paramStateCookie{
 		cookie: randCookie,
 	}
 
-	return s
+	return s, nil
 }
 
 func (s *paramStateCookie) marshal() ([]byte, error) {

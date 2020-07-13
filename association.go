@@ -5,15 +5,18 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"math/rand"
 	"net"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/pion/logging"
+	"github.com/pion/randutil"
 	"github.com/pkg/errors"
 )
+
+// Use global random generator to properly seed by crypto grade random.
+var globalMathRandomGenerator = randutil.NewMathRandomGenerator()
 
 const (
 	receiveMTU          uint32 = 8192 // MTU for inbound packet (from DTLS)
@@ -229,9 +232,6 @@ func Client(config Config) (*Association, error) {
 }
 
 func createAssociation(config Config) *Association {
-	rs := rand.NewSource(time.Now().UnixNano())
-	r := rand.New(rs)
-
 	var maxReceiveBufferSize uint32
 	if config.MaxReceiveBufferSize == 0 {
 		maxReceiveBufferSize = initialRecvBufSize
@@ -239,7 +239,7 @@ func createAssociation(config Config) *Association {
 		maxReceiveBufferSize = config.MaxReceiveBufferSize
 	}
 
-	tsn := r.Uint32()
+	tsn := globalMathRandomGenerator.Uint32()
 	a := &Association{
 		netConn:                 config.NetConn,
 		maxReceiveBufferSize:    maxReceiveBufferSize,
@@ -251,7 +251,7 @@ func createAssociation(config Config) *Association {
 		controlQueue:            newControlQueue(),
 		mtu:                     initialMTU,
 		maxPayloadSize:          initialMTU - (commonHeaderSize + dataChunkHeaderSize),
-		myVerificationTag:       r.Uint32(),
+		myVerificationTag:       globalMathRandomGenerator.Uint32(),
 		myNextTSN:               tsn,
 		myNextRSN:               tsn,
 		minTSN2MeasureRTT:       tsn,
@@ -869,7 +869,10 @@ func (a *Association) handleInit(p *packet, i *chunkInit) ([]*packet, error) {
 	initAck.advertisedReceiverWindowCredit = a.maxReceiveBufferSize
 
 	if a.myCookie == nil {
-		a.myCookie = newRandomStateCookie()
+		var err error
+		if a.myCookie, err = newRandomStateCookie(); err != nil {
+			return nil, err
+		}
 	}
 
 	initAck.params = []param{a.myCookie}
