@@ -982,10 +982,12 @@ func (a *Association) handleHeartbeat(c *chunkHeartbeat) []*packet {
 func (a *Association) handleCookieEcho(c *chunkCookieEcho) []*packet {
 	state := a.getState()
 	a.log.Debugf("[%s] COOKIE-ECHO received in state '%s'", a.name, getAssociationStateString(state))
-	if state != established {
-		if state != closed && state != cookieWait && state != cookieEchoed {
-			return nil
-		}
+	switch state {
+	default:
+		return nil
+	case established:
+		break
+	case closed, cookieWait, cookieEchoed:
 		if !bytes.Equal(a.myCookie.cookie, c.cookie) {
 			return nil
 		}
