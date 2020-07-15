@@ -986,7 +986,9 @@ func (a *Association) handleCookieEcho(c *chunkCookieEcho) []*packet {
 	default:
 		return nil
 	case established:
-		break
+		if !bytes.Equal(a.myCookie.cookie, c.cookie) {
+			return nil
+		}
 	case closed, cookieWait, cookieEchoed:
 		if !bytes.Equal(a.myCookie.cookie, c.cookie) {
 			return nil
