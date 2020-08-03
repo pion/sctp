@@ -1764,8 +1764,8 @@ func (a *Association) movePendingDataChunkToInflightQueue(c *chunkPayloadData) {
 
 	a.checkPartialReliabilityStatus(c)
 
-	a.log.Tracef("[%s] sending tsn=%d ssn=%d sent=%d len=%d (%v,%v)",
-		a.name, c.tsn, c.streamSequenceNumber, c.nSent, len(c.userData), c.beginningFragment, c.endingFragment)
+	a.log.Tracef("[%s] sending ppi=%d tsn=%d ssn=%d sent=%d len=%d (%v,%v)",
+		a.name, c.payloadType, c.tsn, c.streamSequenceNumber, c.nSent, len(c.userData), c.beginningFragment, c.endingFragment)
 
 	// Push it into the inflightQueue
 	a.inflightQueue.pushNoCheck(c)
@@ -1889,19 +1889,28 @@ func (a *Association) checkPartialReliabilityStatus(c *chunkPayloadData) {
 		return
 	}
 
+	// draft-ietf-rtcweb-data-protocol-09.txt section 6
+	//	6.  Procedures
+	//		All Data Channel Establishment Protocol messages MUST be sent using
+	//		ordered delivery and reliable transmission.
+	//
+	if c.payloadType == PayloadTypeWebRTCDCEP {
+		return
+	}
+
 	// PR-SCTP
 	if s, ok := a.streams[c.streamIdentifier]; ok {
 		s.lock.RLock()
 		if s.reliabilityType == ReliabilityTypeRexmit {
 			if c.nSent >= s.reliabilityValue {
 				c.setAbandoned(true)
-				a.log.Tracef("[%s] marked as abandoned: tsn=%d (remix: %d)", a.name, c.tsn, c.nSent)
+				a.log.Tracef("[%s] marked as abandoned: tsn=%d ppi=%d (remix: %d)", a.name, c.tsn, c.payloadType, c.nSent)
 			}
 		} else if s.reliabilityType == ReliabilityTypeTimed {
 			elapsed := int64(time.Since(c.since).Seconds() * 1000)
 			if elapsed >= int64(s.reliabilityValue) {
 				c.setAbandoned(true)
-				a.log.Tracef("[%s] marked as abandoned: tsn=%d (timed: %d)", a.name, c.tsn, elapsed)
+				a.log.Tracef("[%s] marked as abandoned: tsn=%d ppi=%d (timed: %d)", a.name, c.tsn, c.payloadType, elapsed)
 			}
 		}
 		s.lock.RUnlock()
