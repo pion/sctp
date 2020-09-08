@@ -11,6 +11,7 @@ import (
 	"math/rand"
 	"net"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -2401,5 +2402,59 @@ func TestAssocHandleInit(t *testing.T) {
 
 	t.Run("unexpected state shutdownSent", func(t *testing.T) {
 		handleInitTest(t, shutdownSent, true)
+	})
+}
+
+func TestAssocMaxMessageSize(t *testing.T) {
+	t.Run("default", func(t *testing.T) {
+		loggerFactory := logging.NewDefaultLoggerFactory()
+		a := createAssociation(Config{
+			LoggerFactory: loggerFactory,
+		})
+		assert.NotNil(t, a, "should succeed")
+		assert.Equal(t, uint32(65536), a.MaxMessageSize(), "should match")
+
+		s := a.createStream(1, false)
+		assert.NotNil(t, s, "should succeed")
+
+		p := make([]byte, 65537)
+		var err error
+		_, err = s.WriteSCTP(p[:65536], s.defaultPayloadType)
+		assert.False(t, strings.Contains(err.Error(), "larger than maximum"), "should be false")
+
+		_, err = s.WriteSCTP(p[:65537], s.defaultPayloadType)
+		assert.True(t, strings.Contains(err.Error(), "larger than maximum"), "should be false")
+	})
+
+	t.Run("explicit", func(t *testing.T) {
+		loggerFactory := logging.NewDefaultLoggerFactory()
+		a := createAssociation(Config{
+			MaxMessageSize: 30000,
+			LoggerFactory:  loggerFactory,
+		})
+		assert.NotNil(t, a, "should succeed")
+		assert.Equal(t, uint32(30000), a.MaxMessageSize(), "should match")
+
+		s := a.createStream(1, false)
+		assert.NotNil(t, s, "should succeed")
+
+		p := make([]byte, 30001)
+		var err error
+		_, err = s.WriteSCTP(p[:30000], s.defaultPayloadType)
+		assert.False(t, strings.Contains(err.Error(), "larger than maximum"), "should be false")
+
+		_, err = s.WriteSCTP(p[:30001], s.defaultPayloadType)
+		assert.True(t, strings.Contains(err.Error(), "larger than maximum"), "should be false")
+	})
+
+	t.Run("set value", func(t *testing.T) {
+		loggerFactory := logging.NewDefaultLoggerFactory()
+		a := createAssociation(Config{
+			LoggerFactory: loggerFactory,
+		})
+		assert.NotNil(t, a, "should succeed")
+		assert.Equal(t, uint32(65536), a.MaxMessageSize(), "should match")
+		a.SetMaxMessageSize(20000)
+		assert.Equal(t, uint32(20000), a.MaxMessageSize(), "should match")
 	})
 }

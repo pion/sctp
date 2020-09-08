@@ -19,11 +19,12 @@ import (
 var globalMathRandomGenerator = randutil.NewMathRandomGenerator()
 
 const (
-	receiveMTU          uint32 = 8192 // MTU for inbound packet (from DTLS)
-	initialMTU          uint32 = 1228 // initial MTU for outgoing packets (to DTLS)
-	initialRecvBufSize  uint32 = 1024 * 1024
-	commonHeaderSize    uint32 = 12
-	dataChunkHeaderSize uint32 = 16
+	receiveMTU            uint32 = 8192 // MTU for inbound packet (from DTLS)
+	initialMTU            uint32 = 1228 // initial MTU for outgoing packets (to DTLS)
+	initialRecvBufSize    uint32 = 1024 * 1024
+	commonHeaderSize      uint32 = 12
+	dataChunkHeaderSize   uint32 = 16
+	defaultMaxMessageSize uint32 = 65536
 )
 
 // association state enums
@@ -146,6 +147,7 @@ type Association struct {
 
 	// Congestion control parameters
 	maxReceiveBufferSize uint32
+	maxMessageSize       uint32
 	cwnd                 uint32 // my congestion window size
 	rwnd                 uint32 // calculated peer's receiver windows size
 	ssthresh             uint32 // slow start threshold
@@ -196,6 +198,7 @@ type Association struct {
 type Config struct {
 	NetConn              net.Conn
 	MaxReceiveBufferSize uint32
+	MaxMessageSize       uint32
 	LoggerFactory        logging.LoggerFactory
 }
 
@@ -239,10 +242,18 @@ func createAssociation(config Config) *Association {
 		maxReceiveBufferSize = config.MaxReceiveBufferSize
 	}
 
+	var maxMessageSize uint32
+	if config.MaxMessageSize == 0 {
+		maxMessageSize = defaultMaxMessageSize
+	} else {
+		maxMessageSize = config.MaxMessageSize
+	}
+
 	tsn := globalMathRandomGenerator.Uint32()
 	a := &Association{
 		netConn:                 config.NetConn,
 		maxReceiveBufferSize:    maxReceiveBufferSize,
+		maxMessageSize:          maxMessageSize,
 		myMaxNumOutboundStreams: math.MaxUint16,
 		myMaxNumInboundStreams:  math.MaxUint16,
 		payloadQueue:            newPayloadQueue(),
@@ -2218,4 +2229,14 @@ func (a *Association) bufferedAmount() int {
 	defer a.lock.RUnlock()
 
 	return a.pendingQueue.getNumBytes() + a.inflightQueue.getNumBytes()
+}
+
+// MaxMessageSize returns the maximum message size you can send.
+func (a *Association) MaxMessageSize() uint32 {
+	return atomic.LoadUint32(&a.maxMessageSize)
+}
+
+// SetMaxMessageSize sets the maximum message size you can send.
+func (a *Association) SetMaxMessageSize(maxMsgSize uint32) {
+	atomic.StoreUint32(&a.maxMessageSize, maxMsgSize)
 }
