@@ -179,7 +179,8 @@ func (s *Stream) Write(p []byte) (n int, err error) {
 
 // WriteSCTP writes len(p) bytes from p to the DTLS connection
 func (s *Stream) WriteSCTP(p []byte, ppi PayloadProtocolIdentifier) (n int, err error) {
-	if len(p) > math.MaxUint16 {
+	maxMessageSize := s.association.MaxMessageSize()
+	if len(p) > int(maxMessageSize) {
 		return 0, errors.Errorf("Outbound packet larger than maximum message size %v", math.MaxUint16)
 	}
 
