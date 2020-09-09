@@ -11,7 +11,7 @@ import (
 // simply using the `Write` method. So, to make it work, `disconnectedPacketConn`
 // will infer the last packet that it reads as the reply address for `Write`
 
-type disconnectedPacketConn struct {
+type disconnectedPacketConn struct { //nolint: unused
 	mu    sync.RWMutex
 	rAddr net.Addr
 	pConn net.PacketConn
