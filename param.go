@@ -29,6 +29,7 @@ func buildParam(t paramType, rawParam []byte) (param, error) {
 		return (&paramOutgoingResetRequest{}).unmarshal(rawParam)
 	case reconfigResp:
 		return (&paramReconfigResponse{}).unmarshal(rawParam)
+	default:
+		return nil, errors.Errorf("Unhandled ParamType %v", t)
 	}
-	return nil, errors.Errorf("Unhandled ParamType %v", t)
 }

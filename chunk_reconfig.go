@@ -83,6 +83,7 @@ func (c *chunkReconfig) marshal() ([]byte, error) {
 }
 
 func (c *chunkReconfig) check() (abort bool, err error) {
+	// nolint:godox
 	// TODO: check allowed combinations:
 	// https://tools.ietf.org/html/rfc6525#section-3.1
 	return true, nil
@@ -92,7 +93,7 @@ func (c *chunkReconfig) check() (abort bool, err error) {
 func (c *chunkReconfig) String() string {
 	res := fmt.Sprintf("Param A:\n %s", c.paramA)
 	if c.paramB != nil {
-		res = res + fmt.Sprintf("Param B:\n %s", c.paramB)
+		res += fmt.Sprintf("Param B:\n %s", c.paramB)
 	}
 	return res
 }

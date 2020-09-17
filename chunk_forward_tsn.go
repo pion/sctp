@@ -44,6 +44,8 @@ const (
 	forwardTSNStreamLength = 4
 )
 
+var errMarshalStreamFailed = errors.New("failed to marshal stream")
+
 func (c *chunkForwardTSN) unmarshal(raw []byte) error {
 	if err := c.chunkHeader.unmarshal(raw); err != nil {
 		return err
@@ -61,7 +63,7 @@ func (c *chunkForwardTSN) unmarshal(raw []byte) error {
 		s := chunkForwardTSNStream{}
 
 		if err := s.unmarshal(c.raw[offset:]); err != nil {
-			return fmt.Errorf("failed to unmarshal stream: %v", err)
+			return fmt.Errorf("failed to unmarshal stream: %w", err)
 		}
 
 		c.streams = append(c.streams, s)
@@ -80,7 +82,7 @@ func (c *chunkForwardTSN) marshal() ([]byte, error) {
 	for _, s := range c.streams {
 		b, err := s.marshal()
 		if err != nil {
-			return nil, fmt.Errorf("failed to marshal stream: %v", err)
+			return nil, fmt.Errorf("%w: %v", errMarshalStreamFailed, err)
 		}
 		out = append(out, b...)
 	}
@@ -133,7 +135,7 @@ func (s *chunkForwardTSNStream) unmarshal(raw []byte) error {
 	return nil
 }
 
-func (s *chunkForwardTSNStream) marshal() ([]byte, error) {
+func (s *chunkForwardTSNStream) marshal() ([]byte, error) { // nolint:unparam
 	out := make([]byte, forwardTSNStreamLength)
 
 	binary.BigEndian.PutUint16(out[0:], s.identifier)

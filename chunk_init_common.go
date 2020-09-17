@@ -149,7 +149,7 @@ func (i chunkInitCommon) String() string {
 	)
 
 	for i, param := range i.params {
-		res = res + fmt.Sprintf("Param %d:\n %s", i, param)
+		res += fmt.Sprintf("Param %d:\n %s", i, param)
 	}
 	return res
 }

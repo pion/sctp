@@ -1,10 +1,11 @@
 package sctp
 
 import (
-	"fmt"
 	"io"
 	"sort"
 	"sync/atomic"
+
+	"github.com/pkg/errors"
 )
 
 func sortChunksByTSN(a []*chunkPayloadData) {
@@ -104,6 +105,8 @@ type reassemblyQueue struct {
 	unorderedChunks []*chunkPayloadData
 	nBytes          uint64
 }
+
+var errTryAgain = errors.New("try again")
 
 func newReassemblyQueue(si uint16) *reassemblyQueue {
 	// From RFC 4960 Sec 6.5:
@@ -251,24 +254,25 @@ func (r *reassemblyQueue) isReadable() bool {
 func (r *reassemblyQueue) read(buf []byte) (int, PayloadProtocolIdentifier, error) {
 	var cset *chunkSet
 	// Check unordered first
-	if len(r.unordered) > 0 {
+	switch {
+	case len(r.unordered) > 0:
 		cset = r.unordered[0]
 		r.unordered = r.unordered[1:]
-	} else if len(r.ordered) > 0 {
+	case len(r.ordered) > 0:
 		// Now, check ordered
 		cset = r.ordered[0]
 		if !cset.isComplete() {
-			return 0, 0, fmt.Errorf("try again")
+			return 0, 0, errTryAgain
 		}
 		if sna16GT(cset.ssn, r.nextSSN) {
-			return 0, 0, fmt.Errorf("try again")
+			return 0, 0, errTryAgain
 		}
 		r.ordered = r.ordered[1:]
 		if cset.ssn == r.nextSSN {
 			r.nextSSN++
 		}
-	} else {
-		return 0, 0, fmt.Errorf("try again")
+	default:
+		return 0, 0, errTryAgain
 	}
 
 	// Concat all fragments into the buffer
@@ -290,7 +294,7 @@ func (r *reassemblyQueue) read(buf []byte) (int, PayloadProtocolIdentifier, erro
 	return nWritten, ppi, err
 }
 
-func (r *reassemblyQueue) forwardTSNForOrdered(newCumulativeTSN uint32, lastSSN uint16) {
+func (r *reassemblyQueue) forwardTSNForOrdered(lastSSN uint16) {
 	// Use lastSSN to locate a chunkSet then remove it if the set has
 	// not been complete
 	keep := []*chunkSet{}

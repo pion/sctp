@@ -6,40 +6,47 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-var (
-	testChunkReconfigParamA = []byte{0x0, 0xd, 0x0, 0x16, 0x0, 0x0, 0x0, 0x1, 0x0, 0x0, 0x0, 0x2, 0x0, 0x0, 0x0, 0x3, 0x0, 0x4, 0x0, 0x5, 0x0, 0x6}
-	testChunkReconfigParamB = []byte{0x0, 0xd, 0x0, 0x10, 0x0, 0x0, 0x0, 0x1, 0x0, 0x0, 0x0, 0x2, 0x0, 0x0, 0x0, 0x3}
-)
+func testChunkReconfigParamA() []byte {
+	return []byte{0x0, 0xd, 0x0, 0x16, 0x0, 0x0, 0x0, 0x1, 0x0, 0x0, 0x0, 0x2, 0x0, 0x0, 0x0, 0x3, 0x0, 0x4, 0x0, 0x5, 0x0, 0x6}
+}
+
+func testChunkReconfigParamB() []byte {
+	return []byte{0x0, 0xd, 0x0, 0x10, 0x0, 0x0, 0x0, 0x1, 0x0, 0x0, 0x0, 0x2, 0x0, 0x0, 0x0, 0x3}
+}
 
 func TestParamOutgoingResetRequest_Success(t *testing.T) {
 	tt := []struct {
 		binary []byte
 		parsed *paramOutgoingResetRequest
 	}{
-		{testChunkReconfigParamA,
+		{
+			testChunkReconfigParamA(),
 			&paramOutgoingResetRequest{
 				paramHeader: paramHeader{
 					typ: outSSNResetReq,
 					len: 22,
-					raw: testChunkReconfigParamA[4:],
+					raw: testChunkReconfigParamA()[4:],
 				},
 				reconfigRequestSequenceNumber:  1,
 				reconfigResponseSequenceNumber: 2,
 				senderLastTSN:                  3,
 				streamIdentifiers:              []uint16{4, 5, 6},
-			}},
-		{testChunkReconfigParamB,
+			},
+		},
+		{
+			testChunkReconfigParamB(),
 			&paramOutgoingResetRequest{
 				paramHeader: paramHeader{
 					typ: outSSNResetReq,
 					len: 16,
-					raw: testChunkReconfigParamB[4:],
+					raw: testChunkReconfigParamB()[4:],
 				},
 				reconfigRequestSequenceNumber:  1,
 				reconfigResponseSequenceNumber: 2,
 				senderLastTSN:                  3,
 				streamIdentifiers:              []uint16{},
-			}},
+			},
+		},
 	}
 
 	for i, tc := range tt {
@@ -62,7 +69,7 @@ func TestParamOutgoingResetRequest_Failure(t *testing.T) {
 		name   string
 		binary []byte
 	}{
-		{"packet too short", testChunkReconfigParamA[:8]},
+		{"packet too short", testChunkReconfigParamA()[:8]},
 		{"param too short", []byte{0x0, 0xd, 0x0, 0x4}},
 	}
 

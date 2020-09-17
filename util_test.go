@@ -29,7 +29,7 @@ func TestPadByte_Success(t *testing.T) {
 func TestSerialNumberArithmetic(t *testing.T) {
 	const div int = 16
 
-	t.Run("32-bit", func(t *testing.T) {
+	t.Run("32-bit", func(t *testing.T) { // nolint:dupl
 		const serialBits uint32 = 32
 		const interval uint32 = uint32((uint64(1) << uint64(serialBits)) / uint64(div))
 		const maxForwardDistance uint32 = 1<<(serialBits-1) - 1
@@ -65,7 +65,7 @@ func TestSerialNumberArithmetic(t *testing.T) {
 		}
 	})
 
-	t.Run("16-bit", func(t *testing.T) {
+	t.Run("16-bit", func(t *testing.T) { // nolint:dupl
 		const serialBits uint16 = 16
 		const interval uint16 = uint16((uint64(1) << uint64(serialBits)) / uint64(div))
 		const maxForwardDistance uint16 = 1<<(serialBits-1) - 1

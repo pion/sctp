@@ -5,7 +5,6 @@ package sctp
 import (
 	cryptoRand "crypto/rand"
 	"encoding/binary"
-	"fmt"
 	"io"
 	"math"
 	"math/rand"
@@ -18,7 +17,17 @@ import (
 
 	"github.com/pion/logging"
 	"github.com/pion/transport/test"
+	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
+)
+
+var (
+	errHandshakeFailed       = errors.New("handshake failed")
+	errSINotMatch            = errors.New("SI should match")
+	errReadData              = errors.New("failed to read data")
+	errReceivedDataNot3Bytes = errors.New("received data must by 3 bytes")
+	errPPIUnexpected         = errors.New("unexpected ppi")
+	errReceivedDataMismatch  = errors.New("received data mismatch")
 )
 
 func TestAssocStressDuplex(t *testing.T) {
@@ -41,7 +50,7 @@ func stressDuplex(t *testing.T) {
 
 	defer stop(t)
 
-	// TODO: Increase once SCTP is more reliable in case of slow reader
+	// Need to Increase once SCTP is more reliable in case of slow reader
 	opt := test.Options{
 		MsgSize:  2048, // 65535,
 		MsgCount: 10,   // 1000,
@@ -231,8 +240,6 @@ func (c *dumbConn) SetWriteDeadline(t time.Time) error {
 	return nil
 }
 
-////////////////////////////////////////////////////////////////////////////////
-
 func createNewAssociationPair(br *test.Bridge, ackMode int, recvBufSize uint32) (*Association, *Association, error) {
 	var a0, a1 *Association
 	var err0, err1 error
@@ -280,7 +287,7 @@ loop1:
 	}
 
 	if !a0handshakeDone || !a1handshakeDone {
-		return nil, nil, fmt.Errorf("handshake failed")
+		return nil, nil, errHandshakeFailed
 	}
 
 	if err0 != nil {
@@ -301,12 +308,12 @@ func closeAssociationPair(br *test.Bridge, a0, a1 *Association) {
 	close1Ch := make(chan bool)
 
 	go func() {
-		//nolint:errcheck,gosec
+		// nolint:errcheck,gosec
 		a0.Close()
 		close0Ch <- true
 	}()
 	go func() {
-		//nolint:errcheck,gosec
+		// nolint:errcheck,gosec
 		a1.Close()
 		close1Ch <- true
 	}()
@@ -368,7 +375,7 @@ func establishSessionPair(br *test.Bridge, a0, a1 *Association, si uint16) (*Str
 	}
 
 	if s0.streamIdentifier != s1.streamIdentifier {
-		return nil, nil, fmt.Errorf("SI should match")
+		return nil, nil, errSINotMatch
 	}
 
 	br.Process()
@@ -376,19 +383,19 @@ func establishSessionPair(br *test.Bridge, a0, a1 *Association, si uint16) (*Str
 	buf := make([]byte, 1024)
 	n, ppi, err := s1.ReadSCTP(buf)
 	if err != nil {
-		return nil, nil, fmt.Errorf("faild to read data")
+		return nil, nil, errReadData
 	}
 
 	if n != len(helloMsg) {
-		return nil, nil, fmt.Errorf("received data must by 3 bytes")
+		return nil, nil, errReceivedDataNot3Bytes
 	}
 
 	if ppi != PayloadTypeWebRTCDCEP {
-		return nil, nil, fmt.Errorf("unexpected ppi")
+		return nil, nil, errPPIUnexpected
 	}
 
 	if string(buf[:n]) != helloMsg {
-		return nil, nil, fmt.Errorf("received data mismatch")
+		return nil, nil, errReceivedDataMismatch
 	}
 
 	flushBuffers(br, a0, a1)
@@ -513,7 +520,7 @@ func TestAssocReliable(t *testing.T) {
 		closeAssociationPair(br, a0, a1)
 	})
 
-	t.Run("ordered fragmented then defragmented", func(t *testing.T) {
+	t.Run("ordered fragmented then defragmented", func(t *testing.T) { // nolint:dupl
 		lim := test.TimeOut(time.Second * 10)
 		defer lim.Stop()
 
@@ -554,7 +561,7 @@ func TestAssocReliable(t *testing.T) {
 		closeAssociationPair(br, a0, a1)
 	})
 
-	t.Run("unordered fragmented then defragmented", func(t *testing.T) {
+	t.Run("unordered fragmented then defragmented", func(t *testing.T) { // nolint:dupl
 		lim := test.TimeOut(time.Second * 10)
 		defer lim.Stop()
 
@@ -780,7 +787,7 @@ func TestAssocUnreliable(t *testing.T) {
 	rand.Seed(time.Now().UnixNano())
 	rand.Shuffle(len(sbuf), func(i, j int) { sbuf[i], sbuf[j] = sbuf[j], sbuf[i] })
 
-	t.Run("Rexmit ordered no fragment", func(t *testing.T) {
+	t.Run("Rexmit ordered no fragment", func(t *testing.T) { // nolint:dupl
 		lim := test.TimeOut(time.Second * 10)
 		defer lim.Stop()
 
@@ -890,7 +897,7 @@ func TestAssocUnreliable(t *testing.T) {
 		closeAssociationPair(br, a0, a1)
 	})
 
-	t.Run("Rexmit unordered no fragment", func(t *testing.T) {
+	t.Run("Rexmit unordered no fragment", func(t *testing.T) { // nolint:dupl
 		lim := test.TimeOut(time.Second * 10)
 		defer lim.Stop()
 
@@ -998,7 +1005,7 @@ func TestAssocUnreliable(t *testing.T) {
 		closeAssociationPair(br, a0, a1)
 	})
 
-	t.Run("Timed ordered", func(t *testing.T) {
+	t.Run("Timed ordered", func(t *testing.T) { // nolint:dupl
 		lim := test.TimeOut(time.Second * 10)
 		defer lim.Stop()
 
@@ -1035,7 +1042,7 @@ func TestAssocUnreliable(t *testing.T) {
 		}
 		assert.Equal(t, len(sbuf), n, "unexpected length of written data")
 
-		//br.Drop(0, 0, 1) // drop the first packet (second one should be sacked)
+		// br.Drop(0, 0, 1) // drop the first packet (second one should be sacked)
 		flushBuffers(br, a0, a1)
 
 		buf := make([]byte, 2000)
@@ -1187,13 +1194,14 @@ func TestCreateForwardTSN(t *testing.T) {
 		si1OK := false
 		si2OK := false
 		for _, s := range fwdtsn.streams {
-			if s.identifier == 1 {
+			switch s.identifier {
+			case 1:
 				assert.Equal(t, uint16(3), s.sequence, "ssn should be 3")
 				si1OK = true
-			} else if s.identifier == 2 {
+			case 2:
 				assert.Equal(t, uint16(1), s.sequence, "ssn should be 1")
 				si2OK = true
-			} else {
+			default:
 				assert.Fail(t, "unexpected stream indentifier")
 			}
 		}
@@ -1564,6 +1572,8 @@ func TestAssocT1CookieTimer(t *testing.T) {
 				switch c.(type) {
 				case *chunkCookieEcho:
 					return false // drop
+				default:
+					return true
 				}
 			}
 			return true
@@ -2233,6 +2243,7 @@ func newFakeEchoConn(errClose error) *fakeEchoConn {
 		errClose: errClose,
 	}
 }
+
 func (c *fakeEchoConn) Read(b []byte) (int, error) {
 	r, ok := <-c.echo
 	if ok {
@@ -2247,6 +2258,7 @@ func (c *fakeEchoConn) Read(b []byte) (int, error) {
 	}
 	return 0, io.EOF
 }
+
 func (c *fakeEchoConn) Write(b []byte) (int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -2259,6 +2271,7 @@ func (c *fakeEchoConn) Write(b []byte) (int, error) {
 	c.bytesSent += uint64(len(b))
 	return len(b), nil
 }
+
 func (c *fakeEchoConn) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()

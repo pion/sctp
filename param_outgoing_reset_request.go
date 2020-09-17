@@ -2,7 +2,6 @@ package sctp
 
 import (
 	"encoding/binary"
-
 	"errors"
 )
 
@@ -53,6 +52,8 @@ type paramOutgoingResetRequest struct {
 	streamIdentifiers []uint16
 }
 
+var errSSNResetRequestParamTooShort = errors.New("outgoing SSN reset request parameter too short")
+
 func (r *paramOutgoingResetRequest) marshal() ([]byte, error) {
 	r.typ = outSSNResetReq
 	r.raw = make([]byte, paramOutgoingResetRequestStreamIdentifiersOffset+2*len(r.streamIdentifiers))
@@ -71,7 +72,7 @@ func (r *paramOutgoingResetRequest) unmarshal(raw []byte) (param, error) {
 		return nil, err
 	}
 	if len(r.raw) < paramOutgoingResetRequestStreamIdentifiersOffset {
-		return nil, errors.New("outgoing SSN reset request parameter too short")
+		return nil, errSSNResetRequestParamTooShort
 	}
 	r.reconfigRequestSequenceNumber = binary.BigEndian.Uint32(r.raw)
 	r.reconfigResponseSequenceNumber = binary.BigEndian.Uint32(r.raw[4:])

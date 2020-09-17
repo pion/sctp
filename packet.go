@@ -9,11 +9,11 @@ import (
 )
 
 // Create the crc32 table we'll use for the checksum
-var castagnoliTable = crc32.MakeTable(crc32.Castagnoli)
+var castagnoliTable = crc32.MakeTable(crc32.Castagnoli) // nolint:gochecknoglobals
 
 // Allocate and zero this data once.
 // We need to use it for the checksum and don't want to allocate/clear each time.
-var fourZeroes [4]byte
+var fourZeroes [4]byte // nolint:gochecknoglobals
 
 /*
 Packet represents an SCTP packet, defined in https://tools.ietf.org/html/rfc4960#section-3
@@ -172,7 +172,7 @@ func (p *packet) String() string {
 		p.verificationTag,
 	)
 	for i, chunk := range p.chunks {
-		res = res + fmt.Sprintf("Chunk %d:\n %s", i, chunk)
+		res += fmt.Sprintf("Chunk %d:\n %s", i, chunk)
 	}
 	return res
 }

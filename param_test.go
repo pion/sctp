@@ -10,7 +10,7 @@ func TestBuildParam_Success(t *testing.T) {
 	tt := []struct {
 		binary []byte
 	}{
-		{testChunkReconfigParamA},
+		{testChunkReconfigParamA()},
 	}
 
 	for i, tc := range tt {
@@ -36,7 +36,7 @@ func TestBuildParam_Failure(t *testing.T) {
 		binary []byte
 	}{
 		{"invalid ParamType", []byte{0x0, 0x0}},
-		{"build failure", testChunkReconfigParamA[:8]},
+		{"build failure", testChunkReconfigParamA()[:8]},
 	}
 
 	for i, tc := range tt {

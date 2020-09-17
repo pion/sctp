@@ -30,11 +30,13 @@ type vNetEnv struct {
 	numToDropCookieAck  int
 }
 
+var errSCTPPacketParse = fmt.Errorf("unable to parse SCTP packet")
+
 func (venv *vNetEnv) dropNextDataChunk(numToDrop int) {
 	venv.numToDropData = numToDrop
 }
 
-func (venv *vNetEnv) dropNextReconfigChunk(numToDrop int) {
+func (venv *vNetEnv) dropNextReconfigChunk(numToDrop int) { // nolint:unused
 	venv.numToDropReconfig = numToDrop
 }
 
@@ -71,7 +73,7 @@ func buildVNetEnv(cfg *vNetEnvConfig) (*vNetEnv, error) {
 			var toDrop bool
 			p := &packet{}
 			if err2 := p.unmarshal(c.UserData()); err2 != nil {
-				panic(fmt.Errorf("unable to parse SCTP packet"))
+				panic(errSCTPPacketParse)
 			}
 
 		loop:
@@ -383,7 +385,7 @@ func TestRwndFull(t *testing.T) {
 	})
 }
 
-func testStreamClose(t *testing.T, dropReconfig bool) {
+func TestStreamClose(t *testing.T) {
 	lim := test.TimeOut(time.Second * 10)
 	defer lim.Stop()
 
@@ -557,16 +559,6 @@ func testStreamClose(t *testing.T, dropReconfig bool) {
 	<-clientShutDown
 	<-serverShutDown
 	log.Info("all done")
-}
-
-func TestStreamClose(t *testing.T) {
-	t.Run("Normal close", func(t *testing.T) {
-		testStreamClose(t, false)
-	})
-
-	t.Run("Drop reconfig packet", func(t *testing.T) {
-		testStreamClose(t, true)
-	})
 }
 
 // this test case reproduces the issue mentioned in

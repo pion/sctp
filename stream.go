@@ -97,7 +97,7 @@ func (s *Stream) ReadSCTP(p []byte) (int, PayloadProtocolIdentifier, error) {
 		n, ppi, err := s.reassemblyQueue.read(p)
 		if err == nil {
 			return n, ppi, nil
-		} else if err == io.ErrShortBuffer {
+		} else if errors.Is(err, io.ErrShortBuffer) {
 			return 0, PayloadProtocolIdentifier(0), err
 		}
 
@@ -126,7 +126,7 @@ func (s *Stream) handleData(pd *chunkPayloadData) {
 	}
 }
 
-func (s *Stream) handleForwardTSNForOrdered(newCumulativeTSN uint32, ssn uint16) {
+func (s *Stream) handleForwardTSNForOrdered(ssn uint16) {
 	var readable bool
 
 	func() {
@@ -139,7 +139,7 @@ func (s *Stream) handleForwardTSNForOrdered(newCumulativeTSN uint32, ssn uint16)
 
 		// Remove all chunks older than or equal to the new TSN from
 		// the reassemblyQueue.
-		s.reassemblyQueue.forwardTSNForOrdered(newCumulativeTSN, ssn)
+		s.reassemblyQueue.forwardTSNForOrdered(ssn)
 		readable = s.reassemblyQueue.isReadable()
 	}()
 

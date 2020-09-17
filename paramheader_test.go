@@ -6,21 +6,23 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-var (
-	testParamHeader = []byte{0x0, 0x1, 0x0, 0x4}
-)
+func testParamHeader() []byte {
+	return []byte{0x0, 0x1, 0x0, 0x4}
+}
 
 func TestParamHeader_Success(t *testing.T) {
 	tt := []struct {
 		binary []byte
 		parsed *paramHeader
 	}{
-		{testParamHeader,
+		{
+			testParamHeader(),
 			&paramHeader{
 				typ: heartbeatInfo,
 				len: 4,
 				raw: []byte{},
-			}},
+			},
+		},
 	}
 
 	for i, tc := range tt {
@@ -43,10 +45,10 @@ func TestParamHeaderUnmarshal_Failure(t *testing.T) {
 		name   string
 		binary []byte
 	}{
-		{"header too short", testParamHeader[:2]},
+		{"header too short", testParamHeader()[:2]},
 		// {"wrong param type", []byte{0x0, 0x0, 0x0, 0x4}}, // Not possible to fail parseParamType atm.
 		{"reported length below header length", []byte{0x0, 0xd, 0x0, 0x3}},
-		{"wrong reported length", testChunkReconfigParamA[:4]},
+		{"wrong reported length", testChunkReconfigParamA()[:4]},
 	}
 
 	for i, tc := range tt {

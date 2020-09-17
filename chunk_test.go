@@ -9,11 +9,13 @@ import (
 
 func TestInitChunk(t *testing.T) {
 	pkt := &packet{}
-	rawPkt := []byte{0x13, 0x88, 0x13, 0x88, 0x00, 0x00, 0x00, 0x00, 0x81, 0x46, 0x9d, 0xfc, 0x01, 0x00, 0x00, 0x56, 0x55,
+	rawPkt := []byte{
+		0x13, 0x88, 0x13, 0x88, 0x00, 0x00, 0x00, 0x00, 0x81, 0x46, 0x9d, 0xfc, 0x01, 0x00, 0x00, 0x56, 0x55,
 		0xb9, 0x64, 0xa5, 0x00, 0x02, 0x00, 0x00, 0x04, 0x00, 0x08, 0x00, 0xe8, 0x6d, 0x10, 0x30, 0xc0, 0x00, 0x00, 0x04, 0x80,
 		0x08, 0x00, 0x09, 0xc0, 0x0f, 0xc1, 0x80, 0x82, 0x00, 0x00, 0x00, 0x80, 0x02, 0x00, 0x24, 0x9f, 0xeb, 0xbb, 0x5c, 0x50,
 		0xc9, 0xbf, 0x75, 0x9c, 0xb1, 0x2c, 0x57, 0x4f, 0xa4, 0x5a, 0x51, 0xba, 0x60, 0x17, 0x78, 0x27, 0x94, 0x5c, 0x31, 0xe6,
-		0x5d, 0x5b, 0x09, 0x47, 0xe2, 0x22, 0x06, 0x80, 0x04, 0x00, 0x06, 0x00, 0x01, 0x00, 0x00, 0x80, 0x03, 0x00, 0x06, 0x80, 0xc1, 0x00, 0x00}
+		0x5d, 0x5b, 0x09, 0x47, 0xe2, 0x22, 0x06, 0x80, 0x04, 0x00, 0x06, 0x00, 0x01, 0x00, 0x00, 0x80, 0x03, 0x00, 0x06, 0x80, 0xc1, 0x00, 0x00,
+	}
 	err := pkt.unmarshal(rawPkt)
 	if err != nil {
 		t.Error(errors.Wrap(err, "Unmarshal failed, has chunk"))
@@ -24,17 +26,18 @@ func TestInitChunk(t *testing.T) {
 		t.Error("Failed to cast Chunk -> Init")
 	}
 
-	if err != nil {
+	switch {
+	case err != nil:
 		t.Error(errors.Wrap(err, "Unmarshal init Chunk failed"))
-	} else if i.initiateTag != 1438213285 {
+	case i.initiateTag != 1438213285:
 		t.Error(errors.Errorf("Unmarshal passed for SCTP packet, but got incorrect initiate tag exp: %d act: %d", 1438213285, i.initiateTag))
-	} else if i.advertisedReceiverWindowCredit != 131072 {
+	case i.advertisedReceiverWindowCredit != 131072:
 		t.Error(errors.Errorf("Unmarshal passed for SCTP packet, but got incorrect advertisedReceiverWindowCredit exp: %d act: %d", 131072, i.advertisedReceiverWindowCredit))
-	} else if i.numOutboundStreams != 1024 {
+	case i.numOutboundStreams != 1024:
 		t.Error(errors.Errorf("Unmarshal passed for SCTP packet, but got incorrect numOutboundStreams tag exp: %d act: %d", 1024, i.numOutboundStreams))
-	} else if i.numInboundStreams != 2048 {
+	case i.numInboundStreams != 2048:
 		t.Error(errors.Errorf("Unmarshal passed for SCTP packet, but got incorrect numInboundStreams exp: %d act: %d", 2048, i.numInboundStreams))
-	} else if i.initialTSN != uint32(3899461680) {
+	case i.initialTSN != uint32(3899461680):
 		t.Error(errors.Errorf("Unmarshal passed for SCTP packet, but got incorrect initialTSN exp: %d act: %d", uint32(3899461680), i.initialTSN))
 	}
 }
@@ -123,17 +126,18 @@ func TestInitMarshalUnmarshal(t *testing.T) {
 		t.Error("Failed to cast Chunk -> InitAck")
 	}
 
-	if err != nil {
+	switch {
+	case err != nil:
 		t.Error(errors.Wrap(err, "Unmarshal init ack Chunk failed"))
-	} else if i.initiateTag != 123 {
+	case i.initiateTag != 123:
 		t.Error(errors.Errorf("Unmarshal passed for SCTP packet, but got incorrect initiate tag exp: %d act: %d", 123, i.initiateTag))
-	} else if i.advertisedReceiverWindowCredit != 1024 {
+	case i.advertisedReceiverWindowCredit != 1024:
 		t.Error(errors.Errorf("Unmarshal passed for SCTP packet, but got incorrect advertisedReceiverWindowCredit exp: %d act: %d", 1024, i.advertisedReceiverWindowCredit))
-	} else if i.numOutboundStreams != 1 {
+	case i.numOutboundStreams != 1:
 		t.Error(errors.Errorf("Unmarshal passed for SCTP packet, but got incorrect numOutboundStreams tag exp: %d act: %d", 1, i.numOutboundStreams))
-	} else if i.numInboundStreams != 1 {
+	case i.numInboundStreams != 1:
 		t.Error(errors.Errorf("Unmarshal passed for SCTP packet, but got incorrect numInboundStreams exp: %d act: %d", 1, i.numInboundStreams))
-	} else if i.initialTSN != 123 {
+	case i.initialTSN != 123:
 		t.Error(errors.Errorf("Unmarshal passed for SCTP packet, but got incorrect initialTSN exp: %d act: %d", 123, i.initialTSN))
 	}
 }
@@ -186,7 +190,7 @@ func TestReconfigChunk(t *testing.T) {
 
 func TestForwardTSNChunk(t *testing.T) {
 	pkt := &packet{}
-	rawPkt := append([]byte{0x13, 0x88, 0x13, 0x88, 0xb6, 0xa5, 0x12, 0xe5, 0x1f, 0x9d, 0xa0, 0xfb}, testChunkForwardTSN...)
+	rawPkt := append([]byte{0x13, 0x88, 0x13, 0x88, 0xb6, 0xa5, 0x12, 0xe5, 0x1f, 0x9d, 0xa0, 0xfb}, testChunkForwardTSN()...)
 	err := pkt.unmarshal(rawPkt)
 	if err != nil {
 		t.Error(errors.Wrap(err, "Unmarshal failed, has chunk"))

@@ -20,7 +20,7 @@ func main() {
 
 	conn, err := net.ListenUDP("udp", &addr)
 	if err != nil {
-		log.Fatal(err)
+		log.Panic(err)
 	}
 	defer conn.Close()
 	fmt.Println("created a udp listener")
@@ -31,14 +31,14 @@ func main() {
 	}
 	a, err := sctp.Server(config)
 	if err != nil {
-		log.Fatal(err)
+		log.Panic(err)
 	}
 	defer a.Close()
 	fmt.Println("created a server")
 
 	stream, err := a.AcceptStream()
 	if err != nil {
-		log.Fatal(err)
+		log.Panic(err)
 	}
 	defer stream.Close()
 	fmt.Println("accepted a stream")
@@ -50,7 +50,7 @@ func main() {
 		buff := make([]byte, 1024)
 		_, err = stream.Read(buff)
 		if err != nil {
-			log.Fatal(err)
+			log.Panic(err)
 		}
 		pingMsg := string(buff)
 		fmt.Println("received:", pingMsg)
@@ -59,7 +59,7 @@ func main() {
 		pongMsg := fmt.Sprintf("pong %d", pongSeqNum)
 		_, err = stream.Write([]byte(pongMsg))
 		if err != nil {
-			log.Fatal(err)
+			log.Panic(err)
 		}
 		fmt.Println("sent:", pongMsg)
 
