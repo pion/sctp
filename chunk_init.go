@@ -1,4 +1,4 @@
-package sctp
+package sctp // nolint:dupl
 
 import (
 	"fmt"

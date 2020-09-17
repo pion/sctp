@@ -2,9 +2,8 @@ package sctp
 
 import (
 	"encoding/binary"
-	"fmt"
-
 	"errors"
+	"fmt"
 )
 
 // This parameter is used by the receiver of a Re-configuration Request
@@ -46,6 +45,8 @@ const (
 	reconfigResultInProgress                    reconfigResult = 6
 )
 
+var errReconfigRespParamTooShort = errors.New("reconfig response parameter too short")
+
 func (t reconfigResult) String() string {
 	switch t {
 	case reconfigResultSuccessNOP:
@@ -82,7 +83,7 @@ func (r *paramReconfigResponse) unmarshal(raw []byte) (param, error) {
 		return nil, err
 	}
 	if len(r.raw) < 8 {
-		return nil, errors.New("reconfig response parameter too short")
+		return nil, errReconfigRespParamTooShort
 	}
 	r.reconfigResponseSequenceNumber = binary.BigEndian.Uint32(r.raw)
 	r.result = reconfigResult(binary.BigEndian.Uint32(r.raw[4:]))

@@ -6,23 +6,25 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-var (
-	testParamForwardTSNSupported = []byte{0xc0, 0x0, 0x0, 0x4}
-)
+func testParamForwardTSNSupported() []byte {
+	return []byte{0xc0, 0x0, 0x0, 0x4}
+}
 
 func TestParamForwardTSNSupported_Success(t *testing.T) {
 	tt := []struct {
 		binary []byte
 		parsed *paramForwardTSNSupported
 	}{
-		{testParamForwardTSNSupported,
+		{
+			testParamForwardTSNSupported(),
 			&paramForwardTSNSupported{
 				paramHeader: paramHeader{
 					typ: forwardTSNSupp,
 					len: 4,
 					raw: []byte{},
 				},
-			}},
+			},
+		},
 	}
 
 	for i, tc := range tt {

@@ -1,7 +1,6 @@
 package sctp
 
 import (
-	//"fmt"
 	"math"
 	"sync/atomic"
 	"testing"
@@ -84,8 +83,10 @@ func TestRTOManager(t *testing.T) {
 	})
 }
 
-type onRTO func(id int, n uint)
-type onRtxFailure func(id int)
+type (
+	onRTO        func(id int, n uint)
+	onRtxFailure func(id int)
+)
 
 type testTimerObserver struct {
 	onRTO        onRTO
@@ -118,7 +119,7 @@ func TestRtxTimer(t *testing.T) {
 
 		assert.False(t, rt.isRunning(), "should not be running")
 
-		//since := time.Now()
+		// since := time.Now()
 		ok := rt.start(30)
 		assert.True(t, ok, "should be true")
 		assert.True(t, rt.isRunning(), "should be running")

@@ -1,10 +1,9 @@
 package sctp
 
 import (
-	"fmt"
+	"github.com/pkg/errors"
 )
 
-////////////////////////////////////////////////////////////////////////////////
 // pendingBaseQueue
 
 type pendingBaseQueue struct {
@@ -39,7 +38,6 @@ func (q *pendingBaseQueue) size() int {
 	return len(q.queue)
 }
 
-////////////////////////////////////////////////////////////////////////////////
 // pendingQueue
 
 type pendingQueue struct {
@@ -49,6 +47,12 @@ type pendingQueue struct {
 	selected            bool
 	unorderedIsSelected bool
 }
+
+var (
+	errUnexpectedChuckPoppedUnordered = errors.New("unexpected chunk popped (unordered)")
+	errUnexpectedChuckPoppedOrdered   = errors.New("unexpected chunk popped (ordered)")
+	errUnexpectedQState               = errors.New("unexpected q state (should've been selected)")
+)
 
 func newPendingQueue() *pendingQueue {
 	return &pendingQueue{
@@ -86,12 +90,12 @@ func (q *pendingQueue) pop(c *chunkPayloadData) error {
 		if q.unorderedIsSelected {
 			popped = q.unorderedQueue.pop()
 			if popped != c {
-				return fmt.Errorf("unexped chunk popped (unordered)")
+				return errUnexpectedChuckPoppedUnordered
 			}
 		} else {
 			popped = q.orderedQueue.pop()
 			if popped != c {
-				return fmt.Errorf("unexped chunk popped (ordered)")
+				return errUnexpectedChuckPoppedOrdered
 			}
 		}
 		if popped.endingFragment {
@@ -99,12 +103,12 @@ func (q *pendingQueue) pop(c *chunkPayloadData) error {
 		}
 	} else {
 		if !c.beginningFragment {
-			return fmt.Errorf("unexpected q state (should've been selected)")
+			return errUnexpectedQState
 		}
 		if c.unordered {
 			popped := q.unorderedQueue.pop()
 			if popped != c {
-				return fmt.Errorf("unexped chunk popped (unordered)")
+				return errUnexpectedChuckPoppedUnordered
 			}
 			if !popped.endingFragment {
 				q.selected = true
@@ -113,7 +117,7 @@ func (q *pendingQueue) pop(c *chunkPayloadData) error {
 		} else {
 			popped := q.orderedQueue.pop()
 			if popped != c {
-				return fmt.Errorf("unexped chunk popped (ordered)")
+				return errUnexpectedChuckPoppedOrdered
 			}
 			if !popped.endingFragment {
 				q.selected = true

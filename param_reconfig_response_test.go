@@ -6,25 +6,27 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-var (
-	testChunkReconfigResponce = []byte{0x0, 0x10, 0x0, 0xc, 0x0, 0x0, 0x0, 0x1, 0x0, 0x0, 0x0, 0x1}
-)
+func testChunkReconfigResponce() []byte {
+	return []byte{0x0, 0x10, 0x0, 0xc, 0x0, 0x0, 0x0, 0x1, 0x0, 0x0, 0x0, 0x1}
+}
 
 func TestParamReconfigResponse_Success(t *testing.T) {
 	tt := []struct {
 		binary []byte
 		parsed *paramReconfigResponse
 	}{
-		{testChunkReconfigResponce,
+		{
+			testChunkReconfigResponce(),
 			&paramReconfigResponse{
 				paramHeader: paramHeader{
 					typ: reconfigResp,
 					len: 12,
-					raw: testChunkReconfigResponce[4:],
+					raw: testChunkReconfigResponce()[4:],
 				},
 				reconfigResponseSequenceNumber: 1,
 				result:                         reconfigResultSuccessPerformed,
-			}},
+			},
+		},
 	}
 
 	for i, tc := range tt {
@@ -47,7 +49,7 @@ func TestParamReconfigResponse_Failure(t *testing.T) {
 		name   string
 		binary []byte
 	}{
-		{"packet too short", testChunkReconfigParamA[:8]},
+		{"packet too short", testChunkReconfigParamA()[:8]},
 		{"param too short", []byte{0x0, 0x10, 0x0, 0x4}},
 	}
 

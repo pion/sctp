@@ -1,7 +1,6 @@
 package sctp
 
 import (
-	//"fmt"
 	"io"
 	"testing"
 
@@ -400,7 +399,7 @@ func TestReassemblyQueue(t *testing.T) {
 		assert.False(t, complete, "chunk set should not be complete yet")
 		assert.Equal(t, 9, rq.getNumBytes(), "num bytes mismatch")
 
-		rq.forwardTSNForOrdered(13, ssnDropped)
+		rq.forwardTSNForOrdered(ssnDropped)
 
 		assert.Equal(t, 1, len(rq.ordered), "there should be one chunk left")
 		assert.Equal(t, 3, rq.getNumBytes(), "num bytes mismatch")

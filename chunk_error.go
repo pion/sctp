@@ -1,4 +1,4 @@
-package sctp
+package sctp // nolint:dupl
 
 import (
 	"fmt"
@@ -64,6 +64,7 @@ func (a *chunkError) unmarshal(raw []byte) error {
 	}
 	return nil
 }
+
 func (a *chunkError) marshal() ([]byte, error) {
 	a.chunkHeader.typ = ctError
 	a.flags = 0x00
