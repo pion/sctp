@@ -2,9 +2,8 @@ package sctp
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
-
-	"github.com/pkg/errors"
 )
 
 // paramType represents a SCTP INIT/INITACK parameter
@@ -39,9 +38,11 @@ const (
 	adaptLayerInd      paramType = 49158 // Adaptation Layer Indication (0xC006)	[RFC5061]
 )
 
+var errParamPacketTooShort = errors.New("packet to short")
+
 func parseParamType(raw []byte) (paramType, error) {
 	if len(raw) < 2 {
-		return paramType(0), errors.New("packet to short")
+		return paramType(0), errParamPacketTooShort
 	}
 	return paramType(binary.BigEndian.Uint16(raw)), nil
 }

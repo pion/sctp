@@ -1,7 +1,8 @@
 package sctp
 
 import (
-	"github.com/pkg/errors"
+	"errors"
+	"fmt"
 )
 
 /*
@@ -31,34 +32,40 @@ in Section 3.2.1, i.e.:
 Variable Parameters                  Status     Type Value
 -------------------------------------------------------------
 Heartbeat Info                       Mandatory   1
-
 */
 type chunkHeartbeatAck struct {
 	chunkHeader
 	params []param
 }
 
+var (
+	errUnimplemented                = errors.New("unimplemented")
+	errHeartbeatAckParams           = errors.New("heartbeat Ack must have one param")
+	errHeartbeatAckNotHeartbeatInfo = errors.New("heartbeat Ack must have one param, and it should be a HeartbeatInfo")
+	errHeartbeatAckMarshalParam     = errors.New("unable to marshal parameter for Heartbeat Ack")
+)
+
 func (h *chunkHeartbeatAck) unmarshal(raw []byte) error {
-	return errors.Errorf("Unimplemented")
+	return errUnimplemented
 }
 
 func (h *chunkHeartbeatAck) marshal() ([]byte, error) {
 	if len(h.params) != 1 {
-		return nil, errors.Errorf("Heartbeat Ack must have one param")
+		return nil, errHeartbeatAckParams
 	}
 
 	switch h.params[0].(type) {
 	case *paramHeartbeatInfo:
 		// ParamHeartbeatInfo is valid
 	default:
-		return nil, errors.Errorf("Heartbeat Ack must have one param, and it should be a HeartbeatInfo")
+		return nil, errHeartbeatAckNotHeartbeatInfo
 	}
 
 	out := make([]byte, 0)
 	for idx, p := range h.params {
 		pp, err := p.marshal()
 		if err != nil {
-			return nil, errors.Wrap(err, "Unable to marshal parameter for Heartbeat Ack")
+			return nil, fmt.Errorf("%w: %v", errHeartbeatAckMarshalParam, err)
 		}
 
 		out = append(out, pp...)

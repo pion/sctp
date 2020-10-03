@@ -1,7 +1,8 @@
 package sctp
 
 import (
-	"github.com/pkg/errors"
+	"errors"
+	"fmt"
 )
 
 /*
@@ -31,35 +32,42 @@ in Section 3.2.1, i.e.:
 Variable Parameters                  Status     Type Value
 -------------------------------------------------------------
 heartbeat Info                       Mandatory   1
-
 */
 type chunkHeartbeat struct {
 	chunkHeader
 	params []param
 }
 
+var (
+	errChunkTypeNotHeartbeat      = errors.New("ChunkType is not of type HEARTBEAT")
+	errHeartbeatNotLongEnoughInfo = errors.New("heartbeat is not long enough to contain Heartbeat Info")
+	errParseParamTypeFailed       = errors.New("failed to parse param type")
+	errHeartbeatParam             = errors.New("heartbeat should only have HEARTBEAT param")
+	errHeartbeatChunkUnmarshal    = errors.New("failed unmarshalling param in Heartbeat Chunk")
+)
+
 func (h *chunkHeartbeat) unmarshal(raw []byte) error {
 	if err := h.chunkHeader.unmarshal(raw); err != nil {
 		return err
 	} else if h.typ != ctHeartbeat {
-		return errors.Errorf("ChunkType is not of type HEARTBEAT, actually is %s", h.typ.String())
+		return fmt.Errorf("%w: actually is %s", errChunkTypeNotHeartbeat, h.typ.String())
 	}
 
 	if len(raw) <= chunkHeaderSize {
-		return errors.Errorf("Heartbeat is not long enough to contain Heartbeat Info %d", len(raw))
+		return fmt.Errorf("%w: %d", errHeartbeatNotLongEnoughInfo, len(raw))
 	}
 
 	pType, err := parseParamType(raw[chunkHeaderSize:])
 	if err != nil {
-		return errors.Wrap(err, "failed to parse param type")
+		return fmt.Errorf("%w: %v", errParseParamTypeFailed, err)
 	}
 	if pType != heartbeatInfo {
-		return errors.Errorf("Heartbeat should only have HEARTBEAT param, instead have %s", pType.String())
+		return fmt.Errorf("%w: instead have %s", errHeartbeatParam, pType.String())
 	}
 
 	p, err := buildParam(pType, raw[chunkHeaderSize:])
 	if err != nil {
-		return errors.Wrap(err, "Failed unmarshalling param in Heartbeat Chunk")
+		return fmt.Errorf("%w: %v", errHeartbeatChunkUnmarshal, err)
 	}
 	h.params = append(h.params, p)
 
@@ -67,7 +75,7 @@ func (h *chunkHeartbeat) unmarshal(raw []byte) error {
 }
 
 func (h *chunkHeartbeat) Marshal() ([]byte, error) {
-	return nil, errors.Errorf("Unimplemented")
+	return nil, errUnimplemented
 }
 
 func (h *chunkHeartbeat) check() (abort bool, err error) {

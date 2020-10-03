@@ -2,6 +2,7 @@ package sctp
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -12,13 +13,31 @@ import (
 
 	"github.com/pion/logging"
 	"github.com/pion/randutil"
-	"github.com/pkg/errors"
 )
 
 // Use global random generator to properly seed by crypto grade random.
 var (
-	globalMathRandomGenerator = randutil.NewMathRandomGenerator() // nolint:gochecknoglobals
-	errChunk                  = errors.New("Abort chunk, with following errors")
+	globalMathRandomGenerator        = randutil.NewMathRandomGenerator() // nolint:gochecknoglobals
+	errChunk                         = errors.New("abort chunk, with following errors")
+	errAssociationClosedBeforeConn   = errors.New("association closed before connecting")
+	errSilentlyDiscard               = errors.New("silently discard")
+	errInitNotStoredToSend           = errors.New("the init not stored to send")
+	errCookieEchoNotStoredToSend     = errors.New("cookieEcho not stored to send")
+	errSCTPPacketSourcePortZero      = errors.New("sctp packet must not have a source port of 0")
+	errSCTPPacketDestinationPortZero = errors.New("sctp packet must not have a destination port of 0")
+	errInitChunkBundled              = errors.New("init chunk must not be bundled with any other chunk")
+	errInitChunkVerifyTagNotZero     = errors.New("init chunk expects a verification tag of 0 on the packet when out-of-the-blue")
+	errHandleInitState               = errors.New("todo: handle Init when in state")
+	errInitAckNoCookie               = errors.New("no cookie in InitAck")
+	errStreamAlreadyExist            = errors.New("there already exists a stream with identifier")
+	errInflightQueueTSNPop           = errors.New("unable to be popped from inflight queue TSN")
+	errTSNRequestNotExist            = errors.New("requested non-existent TSN")
+	errResetPacketInStateNotExist    = errors.New("sending reset packet in non-established state")
+	errParamterType                  = errors.New("unexpected parameter type")
+	errPayloadDataStateNotExist      = errors.New("sending payload data in non-established state")
+	errChunkTypeUnhandled            = errors.New("unhandled chunk type")
+	errHandshakeInitAck              = errors.New("handshake failed (INIT ACK)")
+	errHandshakeCookieEcho           = errors.New("handshake failed (COOKIE ECHO)")
 )
 
 const (
@@ -217,7 +236,7 @@ func Server(config Config) (*Association, error) {
 		}
 		return a, nil
 	case <-a.readLoopCloseCh:
-		return nil, errors.Errorf("association closed before connecting")
+		return nil, errAssociationClosedBeforeConn
 	}
 }
 
@@ -233,7 +252,7 @@ func Client(config Config) (*Association, error) {
 		}
 		return a, nil
 	case <-a.readLoopCloseCh:
-		return nil, errors.Errorf("association closed before connecting")
+		return nil, errAssociationClosedBeforeConn
 	}
 }
 
@@ -281,7 +300,7 @@ func createAssociation(config Config) *Association {
 		handshakeCompletedCh:    make(chan error),
 		cumulativeTSNAckPoint:   tsn - 1,
 		advancedPeerTSNAckPoint: tsn - 1,
-		silentError:             errors.Errorf("silently discard"),
+		silentError:             errSilentlyDiscard,
 		stats:                   &associationStats{},
 		log:                     config.LoggerFactory.NewLogger("sctp"),
 	}
@@ -336,7 +355,7 @@ func (a *Association) init(isClient bool) {
 func (a *Association) sendInit() error {
 	a.log.Debugf("[%s] sending INIT", a.name)
 	if a.storedInit == nil {
-		return errors.Errorf("the init not stored to send")
+		return errInitNotStoredToSend
 	}
 
 	outbound := &packet{}
@@ -357,7 +376,7 @@ func (a *Association) sendInit() error {
 // caller must hold a.lock
 func (a *Association) sendCookieEcho() error {
 	if a.storedCookieEcho == nil {
-		return errors.Errorf("cookieEcho not stored to send")
+		return errCookieEchoNotStoredToSend
 	}
 
 	a.log.Debugf("[%s] sending COOKIE-ECHO", a.name)
@@ -731,7 +750,7 @@ func checkPacket(p *packet) error {
 	// identify the association to which this packet belongs.  The port
 	// number 0 MUST NOT be used.
 	if p.sourcePort == 0 {
-		return errors.Errorf("sctp packet must not have a source port of 0")
+		return errSCTPPacketSourcePortZero
 	}
 
 	// This is the SCTP port number to which this packet is destined.
@@ -739,7 +758,7 @@ func checkPacket(p *packet) error {
 	// SCTP packet to the correct receiving endpoint/application.  The
 	// port number 0 MUST NOT be used.
 	if p.destinationPort == 0 {
-		return errors.Errorf("sctp packet must not have a destination port of 0")
+		return errSCTPPacketDestinationPortZero
 	}
 
 	// Check values on the packet that are specific to a particular chunk type
@@ -750,13 +769,13 @@ func checkPacket(p *packet) error {
 			// They MUST be the only chunks present in the SCTP packets that carry
 			// them.
 			if len(p.chunks) != 1 {
-				return errors.Errorf("init chunk must not be bundled with any other chunk")
+				return errInitChunkBundled
 			}
 
 			// A packet containing an INIT chunk MUST have a zero Verification
 			// Tag.
 			if p.verificationTag != 0 {
-				return errors.Errorf("init chunk expects a verification tag of 0 on the packet when out-of-the-blue")
+				return errInitChunkVerifyTagNotZero
 			}
 		}
 	}
@@ -838,7 +857,7 @@ func (a *Association) handleInit(p *packet, i *chunkInit) ([]*packet, error) {
 	if state != closed && state != cookieWait && state != cookieEchoed {
 		// 5.2.2.  Unexpected INIT in States Other than CLOSED, COOKIE-ECHOED,
 		//        COOKIE-WAIT, and SHUTDOWN-ACK-SENT
-		return nil, errors.Errorf("todo: handle Init when in state %s", getAssociationStateString(state))
+		return nil, fmt.Errorf("%w: %s", errHandleInitState, getAssociationStateString(state))
 	}
 
 	// Should we be setting any of these permanently until we've ACKed further?
@@ -954,7 +973,7 @@ func (a *Association) handleInitAck(p *packet, i *chunkInitAck) error {
 		a.log.Warnf("[%s] not using ForwardTSN (on initAck)\n", a.name)
 	}
 	if cookieParam == nil {
-		return errors.Errorf("no cookie in InitAck")
+		return errInitAckNoCookie
 	}
 
 	a.storedCookieEcho = &chunkCookieEcho{}
@@ -1146,7 +1165,7 @@ func (a *Association) OpenStream(streamIdentifier uint16, defaultPayloadType Pay
 	defer a.lock.Unlock()
 
 	if _, ok := a.streams[streamIdentifier]; ok {
-		return nil, errors.Errorf("there already exists a stream with identifier %d", streamIdentifier)
+		return nil, fmt.Errorf("%w: %d", errStreamAlreadyExist, streamIdentifier)
 	}
 
 	s := a.createStream(streamIdentifier, false)
@@ -1213,7 +1232,7 @@ func (a *Association) processSelectiveAck(d *chunkSelectiveAck) (map[uint16]int,
 	for i := a.cumulativeTSNAckPoint + 1; sna32LTE(i, d.cumulativeTSNAck); i++ {
 		c, ok := a.inflightQueue.pop(i)
 		if !ok {
-			return nil, 0, errors.Errorf("tsn %v unable to be popped from inflight queue", i)
+			return nil, 0, fmt.Errorf("%w: %v", errInflightQueueTSNPop, i)
 		}
 
 		if !c.acked {
@@ -1268,7 +1287,7 @@ func (a *Association) processSelectiveAck(d *chunkSelectiveAck) (map[uint16]int,
 			tsn := d.cumulativeTSNAck + uint32(i)
 			c, ok := a.inflightQueue.get(tsn)
 			if !ok {
-				return nil, 0, errors.Errorf("requested non-existent TSN %v", tsn)
+				return nil, 0, fmt.Errorf("%w: %v", errTSNRequestNotExist, tsn)
 			}
 
 			if !c.acked {
@@ -1384,7 +1403,7 @@ func (a *Association) processFastRetransmission(cumTSNAckPoint, htna uint32, cum
 		for tsn := cumTSNAckPoint + 1; sna32LT(tsn, maxTSN); tsn++ {
 			c, ok := a.inflightQueue.get(tsn)
 			if !ok {
-				return errors.Errorf("requested non-existent TSN %v", tsn)
+				return fmt.Errorf("%w: %v", errTSNRequestNotExist, tsn)
 			}
 			if !c.acked && !c.abandoned() && c.missIndicator < 3 {
 				c.missIndicator++
@@ -1686,7 +1705,7 @@ func (a *Association) sendResetRequest(streamIdentifier uint16) error {
 
 	state := a.getState()
 	if state != established {
-		return errors.Errorf("sending reset packet in non-established state: state=%s",
+		return fmt.Errorf("%w: state=%s", errResetPacketInStateNotExist,
 			getAssociationStateString(state))
 	}
 
@@ -1722,7 +1741,7 @@ func (a *Association) handleReconfigParam(raw param) (*packet, error) {
 		}
 		return nil, nil
 	default:
-		return nil, errors.Errorf("unexpected parameter type %T", p)
+		return nil, fmt.Errorf("%w: %t", errParamterType, p)
 	}
 }
 
@@ -1880,7 +1899,7 @@ func (a *Association) sendPayloadData(chunks []*chunkPayloadData) error {
 
 	state := a.getState()
 	if state != established {
-		return errors.Errorf("sending payload data in non-established state: state=%s",
+		return fmt.Errorf("%w: state=%s", errPayloadDataStateNotExist,
 			getAssociationStateString(state))
 	}
 
@@ -2080,7 +2099,7 @@ func (a *Association) handleChunk(p *packet, c chunk) error {
 		packets = a.handleForwardTSN(c)
 
 	default:
-		err = errors.Errorf("unhandled chunk type")
+		err = errChunkTypeUnhandled
 	}
 
 	// Log and return, the only condition that is fatal is a ABORT chunk
@@ -2190,13 +2209,13 @@ func (a *Association) onRetransmissionFailure(id int) {
 
 	if id == timerT1Init {
 		a.log.Errorf("[%s] retransmission failure: T1-init", a.name)
-		a.handshakeCompletedCh <- errors.Errorf("handshake failed (INIT ACK)")
+		a.handshakeCompletedCh <- errHandshakeInitAck
 		return
 	}
 
 	if id == timerT1Cookie {
 		a.log.Errorf("[%s] retransmission failure: T1-cookie", a.name)
-		a.handshakeCompletedCh <- errors.Errorf("handshake failed (COOKIE ECHO)")
+		a.handshakeCompletedCh <- errHandshakeCookieEcho
 		return
 	}
 

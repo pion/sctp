@@ -1,9 +1,8 @@
 package sctp
 
 import (
+	"errors"
 	"fmt"
-
-	"github.com/pkg/errors"
 )
 
 /*
@@ -28,6 +27,8 @@ type errorCauseProtocolViolation struct {
 	additionalInformation []byte
 }
 
+var errProtocolViolationUnmarshal = errors.New("unable to unmarshal Protocol Violation error")
+
 func (e *errorCauseProtocolViolation) marshal() ([]byte, error) {
 	e.raw = e.additionalInformation
 	return e.errorCauseHeader.marshal()
@@ -36,7 +37,7 @@ func (e *errorCauseProtocolViolation) marshal() ([]byte, error) {
 func (e *errorCauseProtocolViolation) unmarshal(raw []byte) error {
 	err := e.errorCauseHeader.unmarshal(raw)
 	if err != nil {
-		return errors.Wrap(err, "Unable to unmarshal Protocol Violation error")
+		return fmt.Errorf("%w: %v", errProtocolViolationUnmarshal, err)
 	}
 
 	e.additionalInformation = e.raw

@@ -2,10 +2,9 @@ package sctp
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/crc32"
-
-	"github.com/pkg/errors"
 )
 
 // Create the crc32 table we'll use for the checksum
@@ -60,9 +59,16 @@ const (
 	packetHeaderSize = 12
 )
 
+var (
+	errPacketRawTooSmall           = errors.New("raw is smaller than the minimum length for a SCTP packet")
+	errParseSCTPChunkNotEnoughData = errors.New("unable to parse SCTP chunk, not enough data for complete header")
+	errUnmarshalUnknownChunkType   = errors.New("failed to unmarshal, contains unknown chunk type")
+	errChecksumMismatch            = errors.New("checksum mismatch theirs")
+)
+
 func (p *packet) unmarshal(raw []byte) error {
 	if len(raw) < packetHeaderSize {
-		return errors.Errorf("raw only %d bytes, %d is the minimum length for a SCTP packet", len(raw), packetHeaderSize)
+		return fmt.Errorf("%w: raw only %d bytes, %d is the minimum length", errPacketRawTooSmall, len(raw), packetHeaderSize)
 	}
 
 	p.sourcePort = binary.BigEndian.Uint16(raw[0:])
@@ -75,7 +81,7 @@ func (p *packet) unmarshal(raw []byte) error {
 		if offset == len(raw) {
 			break
 		} else if offset+chunkHeaderSize > len(raw) {
-			return errors.Errorf("Unable to parse SCTP chunk, not enough data for complete header: offset %d remaining %d", offset, len(raw))
+			return fmt.Errorf("%w: offset %d remaining %d", errParseSCTPChunkNotEnoughData, offset, len(raw))
 		}
 
 		var c chunk
@@ -103,7 +109,7 @@ func (p *packet) unmarshal(raw []byte) error {
 		case ctError:
 			c = &chunkError{}
 		default:
-			return errors.Errorf("Failed to unmarshal, contains unknown chunk type %s", chunkType(raw[offset]).String())
+			return fmt.Errorf("%w: %s", errUnmarshalUnknownChunkType, chunkType(raw[offset]).String())
 		}
 
 		if err := c.unmarshal(raw[offset:]); err != nil {
@@ -117,7 +123,7 @@ func (p *packet) unmarshal(raw []byte) error {
 	theirChecksum := binary.LittleEndian.Uint32(raw[8:])
 	ourChecksum := generatePacketChecksum(raw)
 	if theirChecksum != ourChecksum {
-		return errors.Errorf("Checksum mismatch theirs: %d ours: %d", theirChecksum, ourChecksum)
+		return fmt.Errorf("%w: %d ours: %d", errChecksumMismatch, theirChecksum, ourChecksum)
 	}
 	return nil
 }
