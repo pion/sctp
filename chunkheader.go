@@ -2,8 +2,8 @@ package sctp
 
 import (
 	"encoding/binary"
-
-	"github.com/pkg/errors"
+	"errors"
+	"fmt"
 )
 
 /*
@@ -33,9 +33,15 @@ const (
 	chunkHeaderSize = 4
 )
 
+var (
+	errChunkHeaderTooSmall       = errors.New("raw is too small for a SCTP chunk")
+	errChunkHeaderNotEnoughSpace = errors.New("not enough data left in SCTP packet to satisfy requested length")
+	errChunkHeaderPaddingNonZero = errors.New("chunk padding is non-zero at offset")
+)
+
 func (c *chunkHeader) unmarshal(raw []byte) error {
 	if len(raw) < chunkHeaderSize {
-		return errors.Errorf("raw only %d bytes, %d is the minimum length for a SCTP chunk", len(raw), chunkHeaderSize)
+		return fmt.Errorf("%w: raw only %d bytes, %d is the minimum length", errChunkHeaderTooSmall, len(raw), chunkHeaderSize)
 	}
 
 	c.typ = chunkType(raw[0])
@@ -47,7 +53,7 @@ func (c *chunkHeader) unmarshal(raw []byte) error {
 	lengthAfterValue := len(raw) - (chunkHeaderSize + valueLength)
 
 	if lengthAfterValue < 0 {
-		return errors.Errorf("Not enough data left in SCTP packet to satisfy requested length remain %d req %d ", valueLength, len(raw)-chunkHeaderSize)
+		return fmt.Errorf("%w: remain %d req %d ", errChunkHeaderNotEnoughSpace, valueLength, len(raw)-chunkHeaderSize)
 	} else if lengthAfterValue < 4 {
 		// https://tools.ietf.org/html/rfc4960#section-3.2
 		// The Chunk Length field does not count any chunk padding.
@@ -61,7 +67,7 @@ func (c *chunkHeader) unmarshal(raw []byte) error {
 		for i := lengthAfterValue; i > 0; i-- {
 			paddingOffset := chunkHeaderSize + valueLength + (i - 1)
 			if raw[paddingOffset] != 0 {
-				return errors.Errorf("Chunk padding is non-zero at offset %d ", paddingOffset)
+				return fmt.Errorf("%w: %d ", errChunkHeaderPaddingNonZero, paddingOffset)
 			}
 		}
 	}

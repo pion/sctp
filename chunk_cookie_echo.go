@@ -1,7 +1,8 @@
 package sctp
 
 import (
-	"github.com/pkg/errors"
+	"errors"
+	"fmt"
 )
 
 /*
@@ -15,12 +16,13 @@ CookieEcho represents an SCTP Chunk of type CookieEcho
 |                     Cookie                                    |
 |                                                               |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-
 */
 type chunkCookieEcho struct {
 	chunkHeader
 	cookie []byte
 }
+
+var errChunkTypeNotCookieEcho = errors.New("ChunkType is not of type COOKIEECHO")
 
 func (c *chunkCookieEcho) unmarshal(raw []byte) error {
 	if err := c.chunkHeader.unmarshal(raw); err != nil {
@@ -28,7 +30,7 @@ func (c *chunkCookieEcho) unmarshal(raw []byte) error {
 	}
 
 	if c.typ != ctCookieEcho {
-		return errors.Errorf("ChunkType is not of type COOKIEECHO, actually is %s", c.typ.String())
+		return fmt.Errorf("%w: actually is %s", errChunkTypeNotCookieEcho, c.typ.String())
 	}
 	c.cookie = c.raw
 

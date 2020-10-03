@@ -2,9 +2,8 @@ package sctp
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
-
-	"github.com/pkg/errors"
 )
 
 // This chunk shall be used by the data sender to inform the data
@@ -44,7 +43,10 @@ const (
 	forwardTSNStreamLength = 4
 )
 
-var errMarshalStreamFailed = errors.New("failed to marshal stream")
+var (
+	errMarshalStreamFailed = errors.New("failed to marshal stream")
+	errChunkTooShort       = errors.New("chunk too short")
+)
 
 func (c *chunkForwardTSN) unmarshal(raw []byte) error {
 	if err := c.chunkHeader.unmarshal(raw); err != nil {
@@ -52,7 +54,7 @@ func (c *chunkForwardTSN) unmarshal(raw []byte) error {
 	}
 
 	if len(c.raw) < newCumulativeTSNLength {
-		return errors.New("chunk to short")
+		return errChunkTooShort
 	}
 
 	c.newCumulativeTSN = binary.BigEndian.Uint32(c.raw[0:])
@@ -63,7 +65,7 @@ func (c *chunkForwardTSN) unmarshal(raw []byte) error {
 		s := chunkForwardTSNStream{}
 
 		if err := s.unmarshal(c.raw[offset:]); err != nil {
-			return fmt.Errorf("failed to unmarshal stream: %w", err)
+			return fmt.Errorf("%w: %v", errMarshalStreamFailed, err)
 		}
 
 		c.streams = append(c.streams, s)
@@ -127,7 +129,7 @@ func (s *chunkForwardTSNStream) length() int {
 
 func (s *chunkForwardTSNStream) unmarshal(raw []byte) error {
 	if len(raw) < forwardTSNStreamLength {
-		return errors.New("stream to short")
+		return errChunkTooShort
 	}
 	s.identifier = binary.BigEndian.Uint16(raw[0:])
 	s.sequence = binary.BigEndian.Uint16(raw[2:])
