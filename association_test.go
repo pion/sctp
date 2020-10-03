@@ -5,6 +5,7 @@ package sctp
 import (
 	cryptoRand "crypto/rand"
 	"encoding/binary"
+	"errors"
 	"io"
 	"math"
 	"math/rand"
@@ -17,7 +18,6 @@ import (
 
 	"github.com/pion/logging"
 	"github.com/pion/transport/test"
-	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
 )
 

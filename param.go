@@ -1,13 +1,16 @@
 package sctp
 
 import (
-	"github.com/pkg/errors"
+	"errors"
+	"fmt"
 )
 
 type param interface {
 	marshal() ([]byte, error)
 	length() int
 }
+
+var errParamTypeUnhandled = errors.New("unhandled ParamType")
 
 func buildParam(t paramType, rawParam []byte) (param, error) {
 	switch t {
@@ -30,6 +33,6 @@ func buildParam(t paramType, rawParam []byte) (param, error) {
 	case reconfigResp:
 		return (&paramReconfigResponse{}).unmarshal(rawParam)
 	default:
-		return nil, errors.Errorf("Unhandled ParamType %v", t)
+		return nil, fmt.Errorf("%w: %v", errParamTypeUnhandled, t)
 	}
 }

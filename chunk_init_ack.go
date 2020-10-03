@@ -1,9 +1,8 @@
 package sctp // nolint:dupl
 
 import (
+	"errors"
 	"fmt"
-
-	"github.com/pkg/errors"
 )
 
 /*
@@ -19,12 +18,23 @@ IPv6 IP (Note 1)               Optional    6
 Unrecognized Parameter              Optional    8
 Reserved for ECN Capable (Note 2)   Optional    32768 (0x8000)
 Host Name IP (Note 3)          Optional    11<Paste>
-
 */
 type chunkInitAck struct {
 	chunkHeader
 	chunkInitCommon
 }
+
+var (
+	errChunkTypeNotInitAck              = errors.New("ChunkType is not of type INIT ACK")
+	errChunkNotLongEnoughForParams      = errors.New("chunk Value isn't long enough for mandatory parameters exp")
+	errChunkTypeInitAckFlagZero         = errors.New("ChunkType of type INIT ACK flags must be all 0")
+	errInitAckUnmarshalFailed           = errors.New("failed to unmarshal INIT body")
+	errInitCommonDataMarshalFailed      = errors.New("failed marshaling INIT common data")
+	errChunkTypeInitAckInitateTagZero   = errors.New("ChunkType of type INIT ACK InitiateTag must not be 0")
+	errInitAckInboundStreamRequestZero  = errors.New("INIT ACK inbound stream request must be > 0")
+	errInitAckOutboundStreamRequestZero = errors.New("INIT ACK outbound stream request must be > 0")
+	errInitAckAdvertisedReceiver1500    = errors.New("INIT ACK Advertised Receiver Window Credit (a_rwnd) must be >= 1500")
+)
 
 func (i *chunkInitAck) unmarshal(raw []byte) error {
 	if err := i.chunkHeader.unmarshal(raw); err != nil {
@@ -32,20 +42,20 @@ func (i *chunkInitAck) unmarshal(raw []byte) error {
 	}
 
 	if i.typ != ctInitAck {
-		return errors.Errorf("ChunkType is not of type INIT ACK, actually is %s", i.typ.String())
+		return fmt.Errorf("%w: actually is %s", errChunkTypeNotInitAck, i.typ.String())
 	} else if len(i.raw) < initChunkMinLength {
-		return errors.Errorf("Chunk Value isn't long enough for mandatory parameters exp: %d actual: %d", initChunkMinLength, len(i.raw))
+		return fmt.Errorf("%w: %d actual: %d", errChunkNotLongEnoughForParams, initChunkMinLength, len(i.raw))
 	}
 
 	// The Chunk Flags field in INIT is reserved, and all bits in it should
 	// be set to 0 by the sender and ignored by the receiver.  The sequence
 	// of parameters within an INIT can be processed in any order.
 	if i.flags != 0 {
-		return errors.New("ChunkType of type INIT ACK flags must be all 0")
+		return errChunkTypeInitAckFlagZero
 	}
 
 	if err := i.chunkInitCommon.unmarshal(i.raw); err != nil {
-		return errors.Wrap(err, "Failed to unmarshal INIT body")
+		return fmt.Errorf("%w: %v", errInitAckUnmarshalFailed, err)
 	}
 
 	return nil
@@ -54,7 +64,7 @@ func (i *chunkInitAck) unmarshal(raw []byte) error {
 func (i *chunkInitAck) marshal() ([]byte, error) {
 	initShared, err := i.chunkInitCommon.marshal()
 	if err != nil {
-		return nil, errors.Wrap(err, "Failed marshaling INIT common data")
+		return nil, fmt.Errorf("%w: %v", errInitCommonDataMarshalFailed, err)
 	}
 
 	i.chunkHeader.typ = ctInitAck
@@ -77,7 +87,7 @@ func (i *chunkInitAck) check() (abort bool, err error) {
 	// purpose.
 	if i.initiateTag == 0 {
 		abort = true
-		return abort, errors.New("ChunkType of type INIT ACK InitiateTag must not be 0")
+		return abort, errChunkTypeInitAckInitateTagZero
 	}
 
 	// Defines the maximum number of streams the sender of this INIT ACK
@@ -92,7 +102,7 @@ func (i *chunkInitAck) check() (abort bool, err error) {
 	// destroy the association discarding its TCB.
 	if i.numInboundStreams == 0 {
 		abort = true
-		return abort, errors.New("INIT ACK inbound stream request must be > 0")
+		return abort, errInitAckInboundStreamRequestZero
 	}
 
 	// Defines the number of outbound streams the sender of this INIT ACK
@@ -105,7 +115,7 @@ func (i *chunkInitAck) check() (abort bool, err error) {
 
 	if i.numOutboundStreams == 0 {
 		abort = true
-		return abort, errors.New("INIT ACK outbound stream request must be > 0")
+		return abort, errInitAckOutboundStreamRequestZero
 	}
 
 	// An SCTP receiver MUST be able to receive a minimum of 1500 bytes in
@@ -114,7 +124,7 @@ func (i *chunkInitAck) check() (abort bool, err error) {
 	// ACK.
 	if i.advertisedReceiverWindowCredit < 1500 {
 		abort = true
-		return abort, errors.New("INIT ACK Advertised Receiver Window Credit (a_rwnd) must be >= 1500")
+		return abort, errInitAckAdvertisedReceiver1500
 	}
 
 	return false, nil

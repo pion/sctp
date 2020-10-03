@@ -3,9 +3,8 @@ package sctp
 import (
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
-
-	"github.com/pkg/errors"
 )
 
 type paramHeader struct {
@@ -16,6 +15,13 @@ type paramHeader struct {
 
 const (
 	paramHeaderLength = 4
+)
+
+var (
+	errParamHeaderTooShort                  = errors.New("param header too short")
+	errParamHeaderSelfReportedLengthShorter = errors.New("param self reported length is shorter than header length")
+	errParamHeaderSelfReportedLengthLonger  = errors.New("param self reported length is longer than header length")
+	errParamHeaderParseFailed               = errors.New("failed to parse param type")
 )
 
 func (p *paramHeader) marshal() ([]byte, error) {
@@ -31,20 +37,20 @@ func (p *paramHeader) marshal() ([]byte, error) {
 
 func (p *paramHeader) unmarshal(raw []byte) error {
 	if len(raw) < paramHeaderLength {
-		return errors.New("param header too short")
+		return errParamHeaderTooShort
 	}
 
 	paramLengthPlusHeader := binary.BigEndian.Uint16(raw[2:])
 	if int(paramLengthPlusHeader) < paramHeaderLength {
-		return errors.Errorf("param self reported length (%d) smaller than header length (%d)", int(paramLengthPlusHeader), paramHeaderLength)
+		return fmt.Errorf("%w: param self reported length (%d) shorter than header length (%d)", errParamHeaderSelfReportedLengthShorter, int(paramLengthPlusHeader), paramHeaderLength)
 	}
 	if len(raw) < int(paramLengthPlusHeader) {
-		return errors.Errorf("param length (%d) shorter than its self reported length (%d)", len(raw), int(paramLengthPlusHeader))
+		return fmt.Errorf("%w: param length (%d) shorter than its self reported length (%d)", errParamHeaderSelfReportedLengthLonger, len(raw), int(paramLengthPlusHeader))
 	}
 
 	typ, err := parseParamType(raw[0:])
 	if err != nil {
-		return errors.Wrap(err, "failed to parse param type")
+		return fmt.Errorf("%w: %v", errParamHeaderParseFailed, err)
 	}
 	p.typ = typ
 	p.raw = raw[paramHeaderLength:paramLengthPlusHeader]

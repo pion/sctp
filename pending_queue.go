@@ -1,7 +1,7 @@
 package sctp
 
 import (
-	"github.com/pkg/errors"
+	"errors"
 )
 
 // pendingBaseQueue

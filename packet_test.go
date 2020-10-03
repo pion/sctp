@@ -3,8 +3,6 @@ package sctp
 import (
 	"bytes"
 	"testing"
-
-	"github.com/pkg/errors"
 )
 
 func TestPacketUnmarshal(t *testing.T) {
@@ -18,13 +16,13 @@ func TestPacketUnmarshal(t *testing.T) {
 	err := pkt.unmarshal(headerOnly)
 	switch {
 	case err != nil:
-		t.Error(errors.Wrap(err, "Unmarshal failed for SCTP packet with no chunks"))
+		t.Errorf("Unmarshal failed for SCTP packet with no chunks: %v", err)
 	case pkt.sourcePort != 5000:
-		t.Error(errors.Errorf("Unmarshal passed for SCTP packet, but got incorrect source port exp: %d act: %d", 5000, pkt.sourcePort))
+		t.Errorf("Unmarshal passed for SCTP packet, but got incorrect source port exp: %d act: %d", 5000, pkt.sourcePort)
 	case pkt.destinationPort != 5000:
-		t.Error(errors.Errorf("Unmarshal passed for SCTP packet, but got incorrect destination port exp: %d act: %d", 5000, pkt.destinationPort))
+		t.Errorf("Unmarshal passed for SCTP packet, but got incorrect destination port exp: %d act: %d", 5000, pkt.destinationPort)
 	case pkt.verificationTag != 0:
-		t.Error(errors.Errorf("Unmarshal passed for SCTP packet, but got incorrect verification tag exp: %d act: %d", 0, pkt.verificationTag))
+		t.Errorf("Unmarshal passed for SCTP packet, but got incorrect verification tag exp: %d act: %d", 0, pkt.verificationTag)
 	}
 
 	rawChunk := []byte{
@@ -36,7 +34,7 @@ func TestPacketUnmarshal(t *testing.T) {
 	}
 
 	if err := pkt.unmarshal(rawChunk); err != nil {
-		t.Error(errors.Wrap(err, "Unmarshal failed, has chunk"))
+		t.Errorf("Unmarshal failed, has chunk: %v", err)
 	}
 }
 
@@ -45,14 +43,14 @@ func TestPacketMarshal(t *testing.T) {
 
 	headerOnly := []byte{0x13, 0x88, 0x13, 0x88, 0x00, 0x00, 0x00, 0x00, 0x06, 0xa9, 0x00, 0xe1}
 	if err := pkt.unmarshal(headerOnly); err != nil {
-		t.Error(errors.Wrap(err, "Unmarshal failed for SCTP packet with no chunks"))
+		t.Errorf("Unmarshal failed for SCTP packet with no chunks: %v", err)
 	}
 
 	headerOnlyMarshaled, err := pkt.marshal()
 	if err != nil {
-		t.Error(errors.Wrap(err, "Marshal failed for SCTP packet with no chunks"))
+		t.Errorf("Marshal failed for SCTP packet with no chunks: %v", err)
 	} else if !bytes.Equal(headerOnly, headerOnlyMarshaled) {
-		t.Error(errors.Errorf("Unmarshal/Marshaled header only packet did not match \nheaderOnly: % 02x \nheaderOnlyMarshaled % 02x", headerOnly, headerOnlyMarshaled))
+		t.Errorf("Unmarshal/Marshaled header only packet did not match \nheaderOnly: % 02x \nheaderOnlyMarshaled % 02x", headerOnly, headerOnlyMarshaled)
 	}
 }
 

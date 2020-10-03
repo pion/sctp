@@ -1,9 +1,8 @@
 package sctp // nolint:dupl
 
 import (
+	"errors"
 	"fmt"
-
-	"github.com/pkg/errors"
 )
 
 /*
@@ -39,13 +38,18 @@ type chunkError struct {
 	errorCauses []errorCause
 }
 
+var (
+	errChunkTypeNotCtError   = errors.New("ChunkType is not of type ctError")
+	errBuildErrorChunkFailed = errors.New("failed build Error Chunk")
+)
+
 func (a *chunkError) unmarshal(raw []byte) error {
 	if err := a.chunkHeader.unmarshal(raw); err != nil {
 		return err
 	}
 
 	if a.typ != ctError {
-		return errors.Errorf("ChunkType is not of type ctError, actually is %s", a.typ.String())
+		return fmt.Errorf("%w, actually is %s", errChunkTypeNotCtError, a.typ.String())
 	}
 
 	offset := chunkHeaderSize
@@ -56,7 +60,7 @@ func (a *chunkError) unmarshal(raw []byte) error {
 
 		e, err := buildErrorCause(raw[offset:])
 		if err != nil {
-			return errors.Wrap(err, "Failed build Error Chunk")
+			return fmt.Errorf("%w: %v", errBuildErrorChunkFailed, err)
 		}
 
 		offset += int(e.length())

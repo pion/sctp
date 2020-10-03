@@ -1,7 +1,8 @@
 package sctp
 
 import (
-	"github.com/pkg/errors"
+	"errors"
+	"fmt"
 )
 
 /*
@@ -17,13 +18,15 @@ type chunkCookieAck struct {
 	chunkHeader
 }
 
+var errChunkTypeNotCookieAck = errors.New("ChunkType is not of type COOKIEACK")
+
 func (c *chunkCookieAck) unmarshal(raw []byte) error {
 	if err := c.chunkHeader.unmarshal(raw); err != nil {
 		return err
 	}
 
 	if c.typ != ctCookieAck {
-		return errors.Errorf("ChunkType is not of type COOKIEACK, actually is %s", c.typ.String())
+		return fmt.Errorf("%w: actually is %s", errChunkTypeNotCookieAck, c.typ.String())
 	}
 
 	return nil
