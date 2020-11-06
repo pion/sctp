@@ -16,7 +16,11 @@ func main() {
 	if err != nil {
 		log.Panic(err)
 	}
-	defer conn.Close()
+	defer func() {
+		if closeErr := conn.Close(); closeErr != nil {
+			panic(err)
+		}
+	}()
 	fmt.Println("dialed udp ponger")
 
 	config := sctp.Config{
@@ -27,14 +31,22 @@ func main() {
 	if err != nil {
 		log.Panic(err)
 	}
-	defer a.Close()
+	defer func() {
+		if closeErr := a.Close(); closeErr != nil {
+			panic(err)
+		}
+	}()
 	fmt.Println("created a client")
 
 	stream, err := a.OpenStream(0, sctp.PayloadTypeWebRTCString)
 	if err != nil {
 		log.Panic(err)
 	}
-	defer stream.Close()
+	defer func() {
+		if closeErr := stream.Close(); closeErr != nil {
+			panic(err)
+		}
+	}()
 	fmt.Println("opened a stream")
 
 	// set unordered = true and 10ms treshold for dropping packets
