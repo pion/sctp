@@ -49,6 +49,7 @@ Check out the **[contributing wiki](https://github.com/pion/webrtc/wiki/Contribu
 * [Luke Curley](https://github.com/kixelated) - *Performance*
 * [Aaron France](https://github.com/AeroNotix)
 * [ZHENK](https://github.com/scorpionknifes)
+* [Teddy](https://github.com/rgeorgeoff)
 
 ### License
 MIT License - see [LICENSE](LICENSE) for full text
