@@ -79,8 +79,8 @@ const (
 // ack transmission state
 const (
 	ackStateIdle      int = iota // ack timer is off
-	ackStateImmediate            // ack timer is on (ack is being delayed)
-	ackStateDelay                // will send ack immediately
+	ackStateImmediate            // will send ack immediately
+	ackStateDelay                // ack timer is on (ack is being delayed)
 )
 
 // other constants
@@ -618,7 +618,7 @@ func (a *Association) gatherOutboundDataAndReconfigPackets(rawPackets [][]byte) 
 }
 
 // The caller should hold the lock
-func (a *Association) gatherOutboundFrastRetransmissionPackets(rawPackets [][]byte) [][]byte {
+func (a *Association) gatherOutboundFastRetransmissionPackets(rawPackets [][]byte) [][]byte {
 	if a.willRetransmitFast {
 		a.willRetransmitFast = false
 
@@ -733,7 +733,7 @@ func (a *Association) gatherOutbound() [][]byte {
 
 	if state == established {
 		rawPackets = a.gatherOutboundDataAndReconfigPackets(rawPackets)
-		rawPackets = a.gatherOutboundFrastRetransmissionPackets(rawPackets)
+		rawPackets = a.gatherOutboundFastRetransmissionPackets(rawPackets)
 		rawPackets = a.gatherOutboundSackPackets(rawPackets)
 		rawPackets = a.gatherOutboundForwardTSNPackets(rawPackets)
 	}
