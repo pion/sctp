@@ -108,6 +108,12 @@ func (p *packet) unmarshal(raw []byte) error {
 			c = &chunkForwardTSN{}
 		case ctError:
 			c = &chunkError{}
+		case ctShutdown:
+			c = &chunkShutdown{}
+		case ctShutdownAck:
+			c = &chunkShutdownAck{}
+		case ctShutdownComplete:
+			c = &chunkShutdownComplete{}
 		default:
 			return fmt.Errorf("%w: %s", errUnmarshalUnknownChunkType, chunkType(raw[offset]).String())
 		}

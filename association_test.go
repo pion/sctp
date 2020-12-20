@@ -3,6 +3,7 @@
 package sctp
 
 import (
+	"context"
 	cryptoRand "crypto/rand"
 	"encoding/binary"
 	"errors"
@@ -19,6 +20,7 @@ import (
 	"github.com/pion/logging"
 	"github.com/pion/transport/test"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 var (
@@ -2470,4 +2472,181 @@ func TestAssocMaxMessageSize(t *testing.T) {
 		a.SetMaxMessageSize(20000)
 		assert.Equal(t, uint32(20000), a.MaxMessageSize(), "should match")
 	})
+}
+
+func createAssocs(t *testing.T) (a1, a2 *Association) {
+	addr1 := &net.UDPAddr{
+		IP:   net.IP{127, 0, 0, 1},
+		Port: 1234,
+	}
+
+	addr2 := &net.UDPAddr{
+		IP:   net.IP{127, 0, 0, 1},
+		Port: 5678,
+	}
+
+	udp1, err := net.DialUDP("udp", addr1, addr2)
+	if err != nil {
+		panic(err)
+	}
+
+	udp2, err := net.DialUDP("udp", addr2, addr1)
+	if err != nil {
+		panic(err)
+	}
+
+	loggerFactory := logging.NewDefaultLoggerFactory()
+
+	a1Chan := make(chan *Association)
+	a2Chan := make(chan *Association)
+
+	go func() {
+		a, err := Client(Config{
+			NetConn:       udp1,
+			LoggerFactory: loggerFactory,
+		})
+		require.NoError(t, err)
+
+		a1Chan <- a
+	}()
+
+	go func() {
+		a, err := Client(Config{
+			NetConn:       udp2,
+			LoggerFactory: loggerFactory,
+		})
+		require.NoError(t, err)
+
+		a2Chan <- a
+	}()
+
+	select {
+	case a1 = <-a1Chan:
+	case <-time.After(time.Second):
+		assert.Fail(t, "timed out waiting for a1")
+	}
+
+	select {
+	case a2 = <-a2Chan:
+	case <-time.After(time.Second):
+		assert.Fail(t, "timed out waiting for a2")
+	}
+
+	return a1, a2
+}
+
+func TestAssociation_Shutdown(t *testing.T) {
+	runtime.GC()
+	n0 := runtime.NumGoroutine()
+
+	defer func() {
+		runtime.GC()
+		assert.Equal(t, n0, runtime.NumGoroutine(), "goroutine is leaked")
+	}()
+
+	a1, a2 := createAssocs(t)
+
+	s11, err := a1.OpenStream(1, PayloadTypeWebRTCString)
+	require.NoError(t, err)
+
+	s21, err := a2.OpenStream(1, PayloadTypeWebRTCString)
+	require.NoError(t, err)
+
+	testData := []byte("test")
+
+	i, err := s11.Write(testData)
+	assert.Equal(t, len(testData), i)
+	assert.NoError(t, err)
+
+	buf := make([]byte, len(testData))
+	i, err = s21.Read(buf)
+	assert.Equal(t, len(testData), i)
+	assert.NoError(t, err)
+	assert.Equal(t, testData, buf)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	err = a1.Shutdown(ctx)
+	require.NoError(t, err)
+
+	// Wait for close read loop channels to prevent flaky tests.
+	select {
+	case <-a2.readLoopCloseCh:
+	case <-time.After(1 * time.Second):
+		assert.Fail(t, "timed out waiting for a2 read loop to close")
+	}
+}
+
+func TestAssociation_ShutdownDuringWrite(t *testing.T) {
+	runtime.GC()
+	n0 := runtime.NumGoroutine()
+
+	defer func() {
+		runtime.GC()
+		assert.Equal(t, n0, runtime.NumGoroutine(), "goroutine is leaked")
+	}()
+
+	a1, a2 := createAssocs(t)
+
+	s11, err := a1.OpenStream(1, PayloadTypeWebRTCString)
+	require.NoError(t, err)
+
+	s21, err := a2.OpenStream(1, PayloadTypeWebRTCString)
+	require.NoError(t, err)
+
+	writingDone := make(chan struct{})
+
+	go func() {
+		defer close(writingDone)
+
+		var i byte
+
+		for {
+			i++
+
+			if i%100 == 0 {
+				time.Sleep(20 * time.Millisecond)
+			}
+
+			_, writeErr := s21.Write([]byte{i})
+			if writeErr != nil {
+				return
+			}
+		}
+	}()
+
+	testData := []byte("test")
+
+	i, err := s11.Write(testData)
+	assert.Equal(t, len(testData), i)
+	assert.NoError(t, err)
+
+	buf := make([]byte, len(testData))
+	i, err = s21.Read(buf)
+	assert.Equal(t, len(testData), i)
+	assert.NoError(t, err)
+	assert.Equal(t, testData, buf)
+
+	// running this test with -race flag is very slow so timeout needs to be high.
+	timeout := 5 * time.Minute
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	err = a1.Shutdown(ctx)
+	require.NoError(t, err, "timed out waiting for a1 shutdown to complete")
+
+	select {
+	case <-writingDone:
+	case <-time.After(timeout):
+		assert.Fail(t, "timed out waiting writing goroutine to exit")
+	}
+
+	// Wait for close read loop channels to prevent flaky tests.
+	select {
+	case <-a2.readLoopCloseCh:
+	case <-time.After(timeout):
+		assert.Fail(t, "timed out waiting for a2 read loop to close")
+	}
 }
