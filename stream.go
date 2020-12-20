@@ -190,6 +190,16 @@ func (s *Stream) WriteSCTP(p []byte, ppi PayloadProtocolIdentifier) (n int, err 
 		return 0, fmt.Errorf("%w: %v", errOutboundPacketTooLarge, math.MaxUint16)
 	}
 
+	switch s.association.getState() {
+	case shutdownSent, shutdownAckSent, shutdownPending, shutdownReceived:
+		s.lock.Lock()
+		if s.writeErr == nil {
+			s.writeErr = errStreamClosed
+		}
+		s.lock.Unlock()
+	default:
+	}
+
 	s.lock.RLock()
 	err = s.writeErr
 	s.lock.RUnlock()
