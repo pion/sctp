@@ -32,6 +32,8 @@ func buildErrorCause(raw []byte) (errorCause, error) {
 		e = &errorCauseUnrecognizedChunkType{}
 	case protocolViolation:
 		e = &errorCauseProtocolViolation{}
+	case userInitiatedAbort:
+		e = &errorCauseUserInitiatedAbort{}
 	default:
 		return nil, fmt.Errorf("%w: %s", errBuildErrorCaseHandle, c.String())
 	}
@@ -39,6 +41,7 @@ func buildErrorCause(raw []byte) (errorCause, error) {
 	if err := e.unmarshal(raw); err != nil {
 		return nil, err
 	}
+
 	return e, nil
 }
 
