@@ -1146,6 +1146,11 @@ func (a *Association) handleHeartbeat(c *chunkHeartbeat) []*packet {
 func (a *Association) handleCookieEcho(c *chunkCookieEcho) []*packet {
 	state := a.getState()
 	a.log.Debugf("[%s] COOKIE-ECHO received in state '%s'", a.name, getAssociationStateString(state))
+
+	if a.myCookie == nil {
+		a.log.Debugf("[%s] COOKIE-ECHO received before initialization", a.name)
+		return nil
+	}
 	switch state {
 	default:
 		return nil
