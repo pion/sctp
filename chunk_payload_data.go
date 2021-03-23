@@ -2,6 +2,7 @@ package sctp
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -95,6 +96,8 @@ const (
 	PayloadTypeWebRTCBinaryEmpty PayloadProtocolIdentifier = 57
 )
 
+var errChunkPayloadSmall = errors.New("packet is smaller than the header size")
+
 func (p PayloadProtocolIdentifier) String() string {
 	switch p {
 	case PayloadTypeWebRTCDCEP:
@@ -122,6 +125,9 @@ func (p *chunkPayloadData) unmarshal(raw []byte) error {
 	p.beginningFragment = p.flags&payloadDataBeginingFragmentBitmask != 0
 	p.endingFragment = p.flags&payloadDataEndingFragmentBitmask != 0
 
+	if len(raw) < payloadDataHeaderSize {
+		return errChunkPayloadSmall
+	}
 	p.tsn = binary.BigEndian.Uint32(p.raw[0:])
 	p.streamIdentifier = binary.BigEndian.Uint16(p.raw[4:])
 	p.streamSequenceNumber = binary.BigEndian.Uint16(p.raw[6:])

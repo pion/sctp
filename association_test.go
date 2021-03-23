@@ -2650,3 +2650,140 @@ func TestAssociation_ShutdownDuringWrite(t *testing.T) {
 		assert.Fail(t, "timed out waiting for a2 read loop to close")
 	}
 }
+
+func TestAssociation_HandlePacketBeforeInit(t *testing.T) {
+	loggerFactory := logging.NewDefaultLoggerFactory()
+
+	testCases := map[string]struct {
+		inputPacket *packet
+	}{
+		"InitAck": {
+			inputPacket: &packet{
+				sourcePort:      1,
+				destinationPort: 1,
+				chunks: []chunk{
+					&chunkInitAck{
+						chunkInitCommon: chunkInitCommon{
+							initiateTag:                    1,
+							numInboundStreams:              1,
+							numOutboundStreams:             1,
+							advertisedReceiverWindowCredit: 1500,
+						},
+					},
+				},
+			},
+		},
+		"Abort": {
+			inputPacket: &packet{
+				sourcePort:      1,
+				destinationPort: 1,
+				chunks:          []chunk{&chunkAbort{}},
+			},
+		},
+		"CoockeEcho": {
+			inputPacket: &packet{
+				sourcePort:      1,
+				destinationPort: 1,
+				chunks:          []chunk{&chunkCookieEcho{}},
+			},
+		},
+		"HeartBeat": {
+			inputPacket: &packet{
+				sourcePort:      1,
+				destinationPort: 1,
+				chunks:          []chunk{&chunkHeartbeat{}},
+			},
+		},
+		"PayloadData": {
+			inputPacket: &packet{
+				sourcePort:      1,
+				destinationPort: 1,
+				chunks:          []chunk{&chunkPayloadData{}},
+			},
+		},
+		"Sack": {
+			inputPacket: &packet{
+				sourcePort:      1,
+				destinationPort: 1,
+				chunks: []chunk{&chunkSelectiveAck{
+					cumulativeTSNAck:               1000,
+					advertisedReceiverWindowCredit: 1500,
+					gapAckBlocks: []gapAckBlock{
+						{start: 100, end: 200},
+					},
+				}},
+			},
+		},
+		"Reconfig": {
+			inputPacket: &packet{
+				sourcePort:      1,
+				destinationPort: 1,
+				chunks: []chunk{&chunkReconfig{
+					paramA: &paramOutgoingResetRequest{},
+					paramB: &paramReconfigResponse{},
+				}},
+			},
+		},
+		"ForwardTSN": {
+			inputPacket: &packet{
+				sourcePort:      1,
+				destinationPort: 1,
+				chunks: []chunk{&chunkForwardTSN{
+					newCumulativeTSN: 100,
+				}},
+			},
+		},
+		"Error": {
+			inputPacket: &packet{
+				sourcePort:      1,
+				destinationPort: 1,
+				chunks:          []chunk{&chunkError{}},
+			},
+		},
+		"Shutdown": {
+			inputPacket: &packet{
+				sourcePort:      1,
+				destinationPort: 1,
+				chunks:          []chunk{&chunkShutdown{}},
+			},
+		},
+		"ShutdownAck": {
+			inputPacket: &packet{
+				sourcePort:      1,
+				destinationPort: 1,
+				chunks:          []chunk{&chunkShutdownAck{}},
+			},
+		},
+		"ShutdownComplete": {
+			inputPacket: &packet{
+				sourcePort:      1,
+				destinationPort: 1,
+				chunks:          []chunk{&chunkShutdownComplete{}},
+			},
+		},
+	}
+
+	for name, testCase := range testCases {
+		testCase := testCase
+		t.Run(name, func(t *testing.T) {
+			aConn, charlieConn := pipeDump()
+			a := createAssociation(Config{
+				NetConn:              aConn,
+				MaxReceiveBufferSize: 0,
+				LoggerFactory:        loggerFactory,
+			})
+			a.init(true)
+			defer func() {
+				assert.NoError(t, a.close())
+			}()
+
+			packet, err := testCase.inputPacket.marshal()
+			assert.NoError(t, err)
+			_, err = charlieConn.Write(packet)
+			assert.NoError(t, err)
+
+			// Should not panic.
+			time.Sleep(100 * time.Millisecond)
+		})
+	}
+}
