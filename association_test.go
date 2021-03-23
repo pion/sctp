@@ -2650,3 +2650,46 @@ func TestAssociation_ShutdownDuringWrite(t *testing.T) {
 		assert.Fail(t, "timed out waiting for a2 read loop to close")
 	}
 }
+
+func TestAssociation_Abort(t *testing.T) {
+	runtime.GC()
+	n0 := runtime.NumGoroutine()
+
+	defer func() {
+		runtime.GC()
+		assert.Equal(t, n0, runtime.NumGoroutine(), "goroutine is leaked")
+	}()
+
+	a1, a2 := createAssocs(t)
+
+	s11, err := a1.OpenStream(1, PayloadTypeWebRTCString)
+	require.NoError(t, err)
+
+	s21, err := a2.OpenStream(1, PayloadTypeWebRTCString)
+	require.NoError(t, err)
+
+	testData := []byte("test")
+
+	i, err := s11.Write(testData)
+	assert.Equal(t, len(testData), i)
+	assert.NoError(t, err)
+
+	buf := make([]byte, len(testData))
+	i, err = s21.Read(buf)
+	assert.Equal(t, len(testData), i)
+	assert.NoError(t, err)
+	assert.Equal(t, testData, buf)
+
+	a1.Abort("1234")
+
+	// Wait for close read loop channels to prevent flaky tests.
+	select {
+	case <-a2.readLoopCloseCh:
+	case <-time.After(1 * time.Second):
+		assert.Fail(t, "timed out waiting for a2 read loop to close")
+	}
+
+	i, err = s21.Read(buf)
+	assert.Equal(t, i, 0, "expected no data read")
+	assert.Error(t, err, "User Initiated Abort: 1234", "expected abort reason")
+}
