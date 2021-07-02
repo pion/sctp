@@ -33,24 +33,5 @@ If you need commercial support or don't want to use public methods you can conta
 ### Contributing
 Check out the **[contributing wiki](https://github.com/pion/webrtc/wiki/Contributing)** to join the group of amazing people making this project possible:
 
-* [John Bradley](https://github.com/kc5nra) - *Original Author*
-* [Sean DuBois](https://github.com/Sean-Der) - *Original Author*
-* [Michiel De Backker](https://github.com/backkem) - *Public API, Initialization*
-* [Konstantin Itskov](https://github.com/trivigy) - *Fix documentation*
-* [chenkaiC4](https://github.com/chenkaiC4) - *Fix GolangCI Linter*
-* [Ronan J](https://github.com/ronanj) - *Fix PPID*
-* [Michael MacDonald](https://github.com/mjmac) - *Fix races*
-* [Yutaka Takeda](https://github.com/enobufs) - *PR-SCTP, Retransmissions, Congestion Control*
-* [Antoine Baché](https://github.com/Antonito) - *SCTP Profiling*
-* [Cecylia Bocovich](https://github.com/cohosh) - *Fix SCTP reads*
-* [Hugo Arregui](https://github.com/hugoArregui)
-* [Atsushi Watanabe](https://github.com/at-wat)
-* [Lukas Herman](https://github.com/lherman-cs)
-* [Luke Curley](https://github.com/kixelated) - *Performance*
-* [Aaron France](https://github.com/AeroNotix)
-* [ZHENK](https://github.com/scorpionknifes)
-* [Teddy](https://github.com/rgeorgeoff)
-* [Jerko Steiner](https://github.com/jeremija)
-
 ### License
 MIT License - see [LICENSE](LICENSE) for full text
