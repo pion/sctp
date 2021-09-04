@@ -18,6 +18,8 @@ func buildParam(t paramType, rawParam []byte) (param, error) {
 		return (&paramForwardTSNSupported{}).unmarshal(rawParam)
 	case supportedExt:
 		return (&paramSupportedExtensions{}).unmarshal(rawParam)
+	case ecnCapable:
+		return (&paramECNCapable{}).unmarshal(rawParam)
 	case random:
 		return (&paramRandom{}).unmarshal(rawParam)
 	case reqHMACAlgo:
