@@ -169,6 +169,7 @@ type Association struct {
 	pendingQueue            *pendingQueue
 	controlQueue            *controlQueue
 	mtu                     uint32
+	rtt 										float64
 	maxPayloadSize          uint32 // max DATA chunk payload size
 	cumulativeTSNAckPoint   uint32
 	advancedPeerTSNAckPoint uint32
@@ -962,6 +963,31 @@ func (a *Association) BytesReceived() uint64 {
 	return atomic.LoadUint64(&a.bytesReceived)
 }
 
+// MTU returns the association's current mtu
+func (a *Association) MTU() uint32 {
+	return atomic.LoadUint32(&a.mtu)
+}
+
+// CWND returns the association's current cwnd (congestionWindow)
+func (a *Association) CWND() uint32 {
+	return atomic.LoadUint32(&a.cwnd)
+}
+
+// RWND returns the association's current rwnd (receiverWindow)
+func (a *Association) RWND() uint32 {
+	return atomic.LoadUint32(&a.rwnd)
+}
+
+// UNACKData returns the association's unacknowledged DATA chunks
+/*
+func (a *Association) UNACKData() uint32 {
+	return atomic.LoadUint32(&a.rwnd)
+}
+*/
+func (a *Association) SmoothedRoundTripTime() float64 {
+	return atomic.LoadFloat64(&a.mtu)
+}
+
 func setSupportedExtensions(init *chunkInitCommon) {
 	// nolint:godox
 	// TODO RFC5061 https://tools.ietf.org/html/rfc6525#section-5.2
@@ -1403,6 +1429,7 @@ func (a *Association) processSelectiveAck(d *chunkSelectiveAck) (map[uint16]int,
 			if c.nSent == 1 && sna32GTE(c.tsn, a.minTSN2MeasureRTT) {
 				a.minTSN2MeasureRTT = a.myNextTSN
 				rtt := time.Since(c.since).Seconds() * 1000.0
+				a.rtt = float64(rtt)
 				srtt := a.rtoMgr.setNewRTT(rtt)
 				a.log.Tracef("[%s] SACK: measured-rtt=%f srtt=%f new-rto=%f",
 					a.name, rtt, srtt, a.rtoMgr.getRTO())
