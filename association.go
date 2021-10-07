@@ -170,7 +170,7 @@ type Association struct {
 	pendingQueue            *pendingQueue
 	controlQueue            *controlQueue
 	mtu                     uint32
-	rtt 			float64
+	rtt 										float64
 	maxPayloadSize          uint32 // max DATA chunk payload size
 	cumulativeTSNAckPoint   uint32
 	advancedPeerTSNAckPoint uint32
@@ -1430,7 +1430,7 @@ func (a *Association) processSelectiveAck(d *chunkSelectiveAck) (map[uint16]int,
 			//        chunk or for a later instance)
 			if c.nSent == 1 && sna32GTE(c.tsn, a.minTSN2MeasureRTT) {
 				a.minTSN2MeasureRTT = a.myNextTSN
-				rtt := time.Since(c.since).Seconds() * 1000.0
+				rtt := time.Since(c.since).Seconds()
 				a.rtt = rtt
 				srtt := a.rtoMgr.setNewRTT(rtt)
 				a.log.Tracef("[%s] SACK: measured-rtt=%f srtt=%f new-rto=%f",
