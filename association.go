@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"github.com/pion/logging"
 	"github.com/pion/randutil"
@@ -984,8 +985,9 @@ func (a *Association) UNACKData() uint32 {
 	return atomic.LoadUint32(&a.rwnd)
 }
 */
-func (a *Association) SmoothedRoundTripTime() float64 {
-	return atomic.LoadFloat64(&a.mtu)
+// Get latest Round Trip Time for smoothedRoundTripTime in SCTPTransportStats
+func (a *Association) RTT() float64 {
+	return math.Float64frombits(atomic.LoadUint64((*uint64)(unsafe.Pointer(&a.rtt))))
 }
 
 func setSupportedExtensions(init *chunkInitCommon) {
@@ -1429,7 +1431,7 @@ func (a *Association) processSelectiveAck(d *chunkSelectiveAck) (map[uint16]int,
 			if c.nSent == 1 && sna32GTE(c.tsn, a.minTSN2MeasureRTT) {
 				a.minTSN2MeasureRTT = a.myNextTSN
 				rtt := time.Since(c.since).Seconds() * 1000.0
-				a.rtt = float64(rtt)
+				a.rtt = rtt
 				srtt := a.rtoMgr.setNewRTT(rtt)
 				a.log.Tracef("[%s] SACK: measured-rtt=%f srtt=%f new-rto=%f",
 					a.name, rtt, srtt, a.rtoMgr.getRTO())
