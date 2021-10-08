@@ -11,7 +11,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unsafe"
 
 	"github.com/pion/logging"
 	"github.com/pion/randutil"
@@ -170,7 +169,7 @@ type Association struct {
 	pendingQueue            *pendingQueue
 	controlQueue            *controlQueue
 	mtu                     uint32
-	rtt 		        float64
+	srtt 										atomic.Value // type float64
 	maxPayloadSize          uint32 // max DATA chunk payload size
 	cumulativeTSNAckPoint   uint32
 	advancedPeerTSNAckPoint uint32
@@ -325,6 +324,7 @@ func createAssociation(config Config) *Association {
 	a.log.Tracef("[%s] updated cwnd=%d ssthresh=%d inflight=%d (INI)",
 		a.name, a.cwnd, a.ssthresh, a.inflightQueue.getNumBytes())
 
+	a.srtt.Store(float64(0))
 	a.t1Init = newRTXTimer(timerT1Init, a, maxInitRetrans)
 	a.t1Cookie = newRTXTimer(timerT1Cookie, a, maxInitRetrans)
 	a.t2Shutdown = newRTXTimer(timerT2Shutdown, a, noMaxRetrans) // retransmit forever
@@ -985,9 +985,9 @@ func (a *Association) UNACKData() uint32 {
 	return atomic.LoadUint32(&a.rwnd)
 }
 */
-// Get latest Round Trip Time for smoothedRoundTripTime in SCTPTransportStats
-func (a *Association) RTT() float64 {
-	return math.Float64frombits(atomic.LoadUint64((*uint64)(unsafe.Pointer(&a.rtt))))
+// Get latest Smoothed Round Trip Time for smoothedRoundTripTime in SCTPTransportStats
+func (a *Association) SRTT() float64 {
+	return a.srtt.Load().(float64)
 }
 
 func setSupportedExtensions(init *chunkInitCommon) {
@@ -1431,8 +1431,8 @@ func (a *Association) processSelectiveAck(d *chunkSelectiveAck) (map[uint16]int,
 			if c.nSent == 1 && sna32GTE(c.tsn, a.minTSN2MeasureRTT) {
 				a.minTSN2MeasureRTT = a.myNextTSN
 				rtt := time.Since(c.since).Seconds() * 1000.0
-				a.rtt = rtt
 				srtt := a.rtoMgr.setNewRTT(rtt)
+				a.srtt.Store(srtt)
 				a.log.Tracef("[%s] SACK: measured-rtt=%f srtt=%f new-rto=%f",
 					a.name, rtt, srtt, a.rtoMgr.getRTO())
 			}
@@ -1471,6 +1471,7 @@ func (a *Association) processSelectiveAck(d *chunkSelectiveAck) (map[uint16]int,
 					a.minTSN2MeasureRTT = a.myNextTSN
 					rtt := time.Since(c.since).Seconds() * 1000.0
 					srtt := a.rtoMgr.setNewRTT(rtt)
+					a.srtt.Store(srtt)
 					a.log.Tracef("[%s] SACK: measured-rtt=%f srtt=%f new-rto=%f",
 						a.name, rtt, srtt, a.rtoMgr.getRTO())
 				}
