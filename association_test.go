@@ -2235,6 +2235,10 @@ type fakeEchoConn struct {
 
 	bytesSent     uint64
 	bytesReceived uint64
+	mtu	      uint32
+	cwnd          uint32
+	rwnd          uint32
+	srtt          float64
 }
 
 func newFakeEchoConn(errClose error) *fakeEchoConn {
@@ -2357,6 +2361,10 @@ func TestStats(t *testing.T) {
 	defer conn.mu.Unlock()
 	assert.Equal(t, conn.bytesReceived, a.BytesReceived())
 	assert.Equal(t, conn.bytesSent, a.BytesSent())
+	assert.Equal(t, conn.mtu, a.MTU())
+	assert.Equal(t, conn.cwnd, a.CWND())
+	assert.Equal(t, conn.rwnd, a.RWND())
+	assert.Equal(t, conn.srtt, a.SRTT())
 }
 
 func TestAssocHandleInit(t *testing.T) {
