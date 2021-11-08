@@ -38,10 +38,7 @@ func main() {
 	}()
 	fmt.Println("created a client")
 
-	stream, err := a.OpenStream(0, sctp.PayloadTypeWebRTCString)
-	if err != nil {
-		log.Panic(err)
-	}
+	stream := a.OpenStream(0, sctp.PayloadTypeWebRTCString)
 	defer func() {
 		if closeErr := stream.Close(); closeErr != nil {
 			panic(err)

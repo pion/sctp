@@ -74,15 +74,8 @@ func pipe(piper piperFunc) (*Stream, *Stream, func(*testing.T), error) {
 	}
 
 	var sa, sb *Stream
-	sa, err = aa.OpenStream(0, 0)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-
-	sb, err = ab.OpenStream(0, 0)
-	if err != nil {
-		return nil, nil, nil, err
-	}
+	sa = aa.OpenStream(0, 0)
+	sb = ab.OpenStream(0, 0)
 
 	stop := func(t *testing.T) {
 		err = sa.Close()
@@ -359,12 +352,9 @@ func flushBuffers(br *test.Bridge, a0, a1 *Association) {
 
 func establishSessionPair(br *test.Bridge, a0, a1 *Association, si uint16) (*Stream, *Stream, error) {
 	helloMsg := "Hello" // mimic datachannel.channelOpen
-	s0, err := a0.OpenStream(si, PayloadTypeWebRTCBinary)
-	if err != nil {
-		return nil, nil, err
-	}
+	s0 := a0.OpenStream(si, PayloadTypeWebRTCBinary)
 
-	_, err = s0.WriteSCTP([]byte(helloMsg), PayloadTypeWebRTCDCEP)
+	_, err := s0.WriteSCTP([]byte(helloMsg), PayloadTypeWebRTCDCEP)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -2546,11 +2536,8 @@ func TestAssociation_Shutdown(t *testing.T) {
 
 	a1, a2 := createAssocs(t)
 
-	s11, err := a1.OpenStream(1, PayloadTypeWebRTCString)
-	require.NoError(t, err)
-
-	s21, err := a2.OpenStream(1, PayloadTypeWebRTCString)
-	require.NoError(t, err)
+	s11 := a1.OpenStream(1, PayloadTypeWebRTCString)
+	s21 := a2.OpenStream(1, PayloadTypeWebRTCString)
 
 	testData := []byte("test")
 
@@ -2589,11 +2576,8 @@ func TestAssociation_ShutdownDuringWrite(t *testing.T) {
 
 	a1, a2 := createAssocs(t)
 
-	s11, err := a1.OpenStream(1, PayloadTypeWebRTCString)
-	require.NoError(t, err)
-
-	s21, err := a2.OpenStream(1, PayloadTypeWebRTCString)
-	require.NoError(t, err)
+	s11 := a1.OpenStream(1, PayloadTypeWebRTCString)
+	s21 := a2.OpenStream(1, PayloadTypeWebRTCString)
 
 	writingDone := make(chan struct{})
 

@@ -286,10 +286,7 @@ func testRwndFull(t *testing.T, unordered bool) {
 		log.Info("client handshake complete")
 		close(clientHandshakeDone)
 
-		stream, err := assoc.OpenStream(777, PayloadTypeWebRTCBinary)
-		if !assert.NoError(t, err, "should succeed") {
-			return
-		}
+		stream := assoc.OpenStream(777, PayloadTypeWebRTCBinary)
 		defer stream.Close() // nolint:errcheck
 
 		// Send a message to let server side stream to open
@@ -485,10 +482,7 @@ func TestStreamClose(t *testing.T) {
 
 		log.Info("client handshake complete")
 
-		stream, err := assoc.OpenStream(777, PayloadTypeWebRTCBinary)
-		if !assert.NoError(t, err, "should succeed") {
-			return
-		}
+		stream := assoc.OpenStream(777, PayloadTypeWebRTCBinary)
 
 		stream.SetReliabilityParams(false, ReliabilityTypeReliable, 0)
 
