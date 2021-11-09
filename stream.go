@@ -6,6 +6,7 @@ import (
 	"io"
 	"math"
 	"sync"
+	"sync/atomic"
 
 	"github.com/pion/logging"
 )
@@ -54,15 +55,7 @@ func (s *Stream) StreamIdentifier() uint16 {
 
 // SetDefaultPayloadType sets the default payload type used by Write.
 func (s *Stream) SetDefaultPayloadType(defaultPayloadType PayloadProtocolIdentifier) {
-	s.lock.Lock()
-	defer s.lock.Unlock()
-
-	s.setDefaultPayloadType(defaultPayloadType)
-}
-
-// setDefaultPayloadType sets the defaultPayloadType. The caller should hold the lock.
-func (s *Stream) setDefaultPayloadType(defaultPayloadType PayloadProtocolIdentifier) {
-	s.defaultPayloadType = defaultPayloadType
+	atomic.StoreUint32((*uint32)(&s.defaultPayloadType), uint32(defaultPayloadType))
 }
 
 // SetReliabilityParams sets reliability parameters for this stream.
@@ -180,7 +173,8 @@ func (s *Stream) handleForwardTSNForUnordered(newCumulativeTSN uint32) {
 
 // Write writes len(p) bytes from p with the default Payload Protocol Identifier
 func (s *Stream) Write(p []byte) (n int, err error) {
-	return s.WriteSCTP(p, s.defaultPayloadType)
+	ppi := PayloadProtocolIdentifier(atomic.LoadUint32((*uint32)(&s.defaultPayloadType)))
+	return s.WriteSCTP(p, ppi)
 }
 
 // WriteSCTP writes len(p) bytes from p to the DTLS connection
