@@ -4,6 +4,7 @@
 # This file is auto generated, using git to list all individuals contributors.
 # see `.github/generate-authors.sh` for the scripting
 Aaron France <aaron.l.france@gmail.com>
+Adrian Cable <adrian.cable@gmail.com>
 Atsushi Watanabe <atsushi.w@ieee.org>
 backkem <mail@backkem.me>
 Cecylia Bocovich <cohosh@torproject.org>
