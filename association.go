@@ -31,6 +31,7 @@ var (
 	errInitChunkVerifyTagNotZero     = errors.New("init chunk expects a verification tag of 0 on the packet when out-of-the-blue")
 	errHandleInitState               = errors.New("todo: handle Init when in state")
 	errInitAckNoCookie               = errors.New("no cookie in InitAck")
+	errStreamAlreadyExist            = errors.New("there already exists a stream with identifier")
 	errInflightQueueTSNPop           = errors.New("unable to be popped from inflight queue TSN")
 	errTSNRequestNotExist            = errors.New("requested non-existent TSN")
 	errResetPacketInStateNotExist    = errors.New("sending reset packet in non-established state")
@@ -168,8 +169,8 @@ type Association struct {
 	pendingQueue            *pendingQueue
 	controlQueue            *controlQueue
 	mtu                     uint32
-	srtt 			atomic.Value // type float64
-	maxPayloadSize          uint32 // max DATA chunk payload size
+	srtt                    atomic.Value // type float64
+	maxPayloadSize          uint32       // max DATA chunk payload size
 	cumulativeTSNAckPoint   uint32
 	advancedPeerTSNAckPoint uint32
 	useForwardTSN           bool
@@ -1236,7 +1237,7 @@ func (a *Association) handleData(d *chunkPayloadData) []*packet {
 
 	canPush := a.payloadQueue.canPush(d, a.peerLastTSN)
 	if canPush {
-		s := a.getOrCreateStream(d.streamIdentifier, true, PayloadTypeUnknown)
+		s := a.getOrCreateStream(d.streamIdentifier)
 		if s == nil {
 			// silentely discard the data. (sender will retry on T3-rtx timeout)
 			// see pion/sctp#30
@@ -1327,7 +1328,14 @@ func (a *Association) OpenStream(streamIdentifier uint16, defaultPayloadType Pay
 	a.lock.Lock()
 	defer a.lock.Unlock()
 
-	return a.getOrCreateStream(streamIdentifier, false, defaultPayloadType), nil
+	if _, ok := a.streams[streamIdentifier]; ok {
+		return nil, fmt.Errorf("%w: %d", errStreamAlreadyExist, streamIdentifier)
+	}
+
+	s := a.createStream(streamIdentifier, false)
+	s.setDefaultPayloadType(defaultPayloadType)
+
+	return s, nil
 }
 
 // AcceptStream accepts a stream
@@ -1370,17 +1378,12 @@ func (a *Association) createStream(streamIdentifier uint16, accept bool) *Stream
 }
 
 // getOrCreateStream gets or creates a stream. The caller should hold the lock.
-func (a *Association) getOrCreateStream(streamIdentifier uint16, accept bool, defaultPayloadType PayloadProtocolIdentifier) *Stream {
+func (a *Association) getOrCreateStream(streamIdentifier uint16) *Stream {
 	if s, ok := a.streams[streamIdentifier]; ok {
-		s.SetDefaultPayloadType(defaultPayloadType)
 		return s
 	}
 
-	s := a.createStream(streamIdentifier, accept)
-	if s != nil {
-		s.SetDefaultPayloadType(defaultPayloadType)
-	}
-	return s
+	return a.createStream(streamIdentifier, true)
 }
 
 // The caller should hold the lock.
