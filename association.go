@@ -984,7 +984,7 @@ func (a *Association) UNACKData() uint32 {
 	return atomic.LoadUint32(&a.rwnd)
 }
 */
-// Get latest Smoothed Round Trip Time for smoothedRoundTripTime in SCTPTransportStats
+// SRTT returns the latest smoothedRoundTripTime
 func (a *Association) SRTT() float64 {
 	return a.srtt.Load().(float64)
 }
