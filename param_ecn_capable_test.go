@@ -6,20 +6,20 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func testParamForwardTSNSupported() []byte {
-	return []byte{0xc0, 0x0, 0x0, 0x4}
+func testParamECNCapabale() []byte {
+	return []byte{0x80, 0x0, 0x0, 0x4}
 }
 
-func TestParamForwardTSNSupported_Success(t *testing.T) {
+func TestParamECNCapabale_Success(t *testing.T) {
 	tt := []struct {
 		binary []byte
-		parsed *paramForwardTSNSupported
+		parsed *paramECNCapable
 	}{
 		{
-			testParamForwardTSNSupported(),
-			&paramForwardTSNSupported{
+			testParamECNCapabale(),
+			&paramECNCapable{
 				paramHeader: paramHeader{
-					typ: forwardTSNSupp,
+					typ: ecnCapable,
 					len: 4,
 					raw: []byte{},
 				},
@@ -28,7 +28,7 @@ func TestParamForwardTSNSupported_Success(t *testing.T) {
 	}
 
 	for i, tc := range tt {
-		actual := &paramForwardTSNSupported{}
+		actual := &paramECNCapable{}
 		_, err := actual.unmarshal(tc.binary)
 		if err != nil {
 			t.Fatalf("failed to unmarshal #%d: %v", i, err)
@@ -42,7 +42,7 @@ func TestParamForwardTSNSupported_Success(t *testing.T) {
 	}
 }
 
-func TestParamForwardTSNSupported_Failure(t *testing.T) {
+func TestParamECNCapabale_Failure(t *testing.T) {
 	tt := []struct {
 		name   string
 		binary []byte
@@ -51,7 +51,7 @@ func TestParamForwardTSNSupported_Failure(t *testing.T) {
 	}
 
 	for i, tc := range tt {
-		actual := &paramForwardTSNSupported{}
+		actual := &paramECNCapable{}
 		_, err := actual.unmarshal(tc.binary)
 		if err == nil {
 			t.Errorf("expected unmarshal #%d: '%s' to fail.", i, tc.name)
