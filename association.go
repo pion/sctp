@@ -248,9 +248,13 @@ func Server(config Config) (*Association, error) {
 }
 
 // Client opens a SCTP stream over a conn
-func Client(config Config) (*Association, error) {
+func Client(config Config, streamIdentifiers ...uint16) (*Association, error) {
 	a := createAssociation(config)
 	a.init(true)
+
+	for _, s := range streamIdentifiers {
+		_, _ = a.OpenStream(s, PayloadTypeWebRTCBinary)
+	}
 
 	select {
 	case err := <-a.handshakeCompletedCh:
