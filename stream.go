@@ -116,11 +116,11 @@ func (s *Stream) handleData(pd *chunkPayloadData) {
 	var readable bool
 	if s.reassemblyQueue.push(pd) {
 		readable = s.reassemblyQueue.isReadable()
-		s.log.Debugf("[%s] reassemblyQueue readable=%v", s.name, readable)
+		s.log.Tracef("[%s] reassemblyQueue readable=%v", s.name, readable)
 		if readable {
-			s.log.Debugf("[%s] readNotifier.signal()", s.name)
+			s.log.Tracef("[%s] readNotifier.signal()", s.name)
 			s.readNotifier.Signal()
-			s.log.Debugf("[%s] readNotifier.signal() done", s.name)
+			s.log.Tracef("[%s] readNotifier.signal() done", s.name)
 		}
 	}
 }

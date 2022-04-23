@@ -1617,14 +1617,6 @@ func (a *Association) handleSack(d *chunkSelectiveAck) error {
 		a.onCumulativeTSNAckPointAdvanced(totalBytesAcked)
 	}
 
-	for si, nBytesAcked := range bytesAckedPerStream {
-		if s, ok := a.streams[si]; ok {
-			a.lock.Unlock()
-			s.onBufferReleased(nBytesAcked)
-			a.lock.Lock()
-		}
-	}
-
 	// New rwnd value
 	// RFC 4960 sec 6.2.1.  Processing a Received SACK
 	// D)
@@ -2012,13 +2004,17 @@ func (a *Association) popPendingDataChunksToSend() ([]*chunkPayloadData, []uint1
 		//      is 0), the data sender can always have one DATA chunk in flight to
 		//      the receiver if allowed by cwnd (see rule B, below).
 
+		bytesSentPerStream := map[uint16]int{}
+
 		for {
 			c := a.pendingQueue.peek()
 			if c == nil {
+				a.log.Debug("no more pending data")
 				break // no more pending data
 			}
 
-			dataLen := uint32(len(c.userData))
+			dataLen := len(c.userData)
+
 			if dataLen == 0 {
 				sisToReset = append(sisToReset, c.streamIdentifier)
 				err := a.pendingQueue.pop(c)
@@ -2028,15 +2024,24 @@ func (a *Association) popPendingDataChunksToSend() ([]*chunkPayloadData, []uint1
 				continue
 			}
 
-			if uint32(a.inflightQueue.getNumBytes())+dataLen > a.cwnd {
+			if uint32(a.inflightQueue.getNumBytes())+uint32(dataLen) > a.cwnd {
+				a.log.Debugf("would exceed cwnd: inflight=%d, dataLen=%d cwnd=%d", a.inflightQueue.getNumBytes(), dataLen, a.cwnd)
 				break // would exceeds cwnd
 			}
 
-			if dataLen > a.rwnd {
+			if uint32(dataLen) > a.rwnd {
+				a.log.Debugf("no more rwnd: dataLen=%d rwnd=%d", dataLen, a.rwnd)
 				break // no more rwnd
 			}
 
-			a.rwnd -= dataLen
+			a.rwnd -= uint32(dataLen)
+
+			// Sum the number of bytes sent per stream
+			if amount, ok := bytesSentPerStream[c.streamIdentifier]; ok {
+				bytesSentPerStream[c.streamIdentifier] = amount + dataLen
+			} else {
+				bytesSentPerStream[c.streamIdentifier] = dataLen
+			}
 
 			a.movePendingDataChunkToInflightQueue(c)
 			chunks = append(chunks, c)
@@ -2047,8 +2052,26 @@ func (a *Association) popPendingDataChunksToSend() ([]*chunkPayloadData, []uint1
 			// Send zero window probe
 			c := a.pendingQueue.peek()
 			if c != nil {
+				dataLen := len(c.userData)
+
+				// Sum the number of bytes sent per stream
+				if amount, ok := bytesSentPerStream[c.streamIdentifier]; ok {
+					bytesSentPerStream[c.streamIdentifier] = amount + dataLen
+				} else {
+					bytesSentPerStream[c.streamIdentifier] = dataLen
+				}
+
 				a.movePendingDataChunkToInflightQueue(c)
 				chunks = append(chunks, c)
+			}
+		}
+
+		// Report the size of user data to be sent
+		for si, nBytesSent := range bytesSentPerStream {
+			if s, ok := a.streams[si]; ok {
+				a.lock.Unlock()
+				s.onBufferReleased(nBytesSent)
+				a.lock.Lock()
 			}
 		}
 	}

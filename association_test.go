@@ -1,3 +1,4 @@
+//go:build !js
 // +build !js
 
 package sctp
@@ -1809,7 +1810,7 @@ func TestAssocCongestionControl(t *testing.T) {
 		}
 
 		// Repeat calling br.Tick() until the buffered amount becomes 0
-		for s0.BufferedAmount() > 0 && nPacketsReceived < nPacketsToSend {
+		for nPacketsReceived < nPacketsToSend {
 			for {
 				n = br.Tick()
 				if n == 0 {
@@ -1847,6 +1848,7 @@ func TestAssocCongestionControl(t *testing.T) {
 		assert.True(t, cwnd > ssthresh, "should be in congestion avoidance mode")
 		assert.True(t, ssthresh >= maxReceiveBufferSize, "should not be less than the initial size of 128KB")
 
+		assert.Equal(t, uint64(0), s0.BufferedAmount())
 		assert.Equal(t, nPacketsReceived, nPacketsToSend, "unexpected num of packets received")
 		assert.Equal(t, 0, s1.getNumBytesInReassemblyQueue(), "reassembly queue should be empty")
 
@@ -1896,7 +1898,7 @@ func TestAssocCongestionControl(t *testing.T) {
 		// 2. Wait until the sender's cwnd becomes 1*MTU (RTO occurred)
 		// 3. Stat reading a1's data
 		var hasRTOed bool
-		for s0.BufferedAmount() > 0 && nPacketsReceived < nPacketsToSend {
+		for nPacketsReceived < nPacketsToSend {
 			for {
 				n = br.Tick()
 				if n == 0 {
@@ -1942,6 +1944,7 @@ func TestAssocCongestionControl(t *testing.T) {
 
 		br.Process()
 
+		assert.Equal(t, uint64(0), s0.BufferedAmount())
 		assert.Equal(t, nPacketsReceived, nPacketsToSend, "unexpected num of packets received")
 		assert.Equal(t, 0, s1.getNumBytesInReassemblyQueue(), "reassembly queue should be empty")
 
@@ -1984,13 +1987,20 @@ func TestAssocDelayedAck(t *testing.T) {
 		a1.stats.reset()
 
 		// Writes data (will fragmented)
+		t.Logf("writing data with size %d", len(sbuf))
 		n, err = s0.WriteSCTP(sbuf, PayloadTypeWebRTCBinary)
 		assert.Nil(t, err, "WriteSCTP failed")
 		assert.Equal(t, n, len(sbuf), "unexpected length of received data")
 
 		// Repeat calling br.Tick() until the buffered amount becomes 0
 		since := time.Now()
-		for s0.BufferedAmount() > 0 {
+		for {
+			a0.lock.RLock()
+			unackedSize := a0.inflightQueue.size()
+			a0.lock.RUnlock()
+			if nPacketsReceived > 0 && unackedSize == 0 {
+				break
+			}
 			for {
 				n = br.Tick()
 				if n == 0 {
@@ -2009,6 +2019,7 @@ func TestAssocDelayedAck(t *testing.T) {
 				if !assert.Nil(t, err, "ReadSCTP failed") {
 					return
 				}
+				t.Logf("read data with size %d", n)
 				assert.Equal(t, len(sbuf), n, "unexpected length of received data")
 				assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
 
