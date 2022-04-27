@@ -1,3 +1,4 @@
+//go:build !pong
 // +build !pong
 
 package main

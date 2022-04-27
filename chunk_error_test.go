@@ -21,7 +21,8 @@ func TestChunkErrorUnrecognizedChunkType(t *testing.T) {
 
 		ec := c.errorCauses[0]
 		assert.Equal(t, unrecognizedChunkType, ec.errorCauseCode(), "cause code should be unrecognizedChunkType")
-		ecUnrecognizedChunkType := ec.(*errorCauseUnrecognizedChunkType)
+		ecUnrecognizedChunkType, ok := ec.(*errorCauseUnrecognizedChunkType)
+		assert.True(t, ok)
 		unrecognizedChunk := ecUnrecognizedChunkType.unrecognizedChunk
 		assert.True(t, reflect.DeepEqual(unrecognizedChunk, orgUnrecognizedChunk), "should have valid unrecognizedChunk")
 	})

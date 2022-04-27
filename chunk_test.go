@@ -182,8 +182,8 @@ func TestReconfigChunk(t *testing.T) {
 		t.Error("Failed to cast Chunk -> Reconfig")
 	}
 
-	if c.paramA.(*paramOutgoingResetRequest).streamIdentifiers[0] != uint16(1) {
-		t.Errorf("unexpected stream identifier: %d", c.paramA.(*paramOutgoingResetRequest).streamIdentifiers[0])
+	if c.paramA.(*paramOutgoingResetRequest).streamIdentifiers[0] != uint16(1) { //nolint:forcetypeassert
+		t.Errorf("unexpected stream identifier: %d", c.paramA.(*paramOutgoingResetRequest).streamIdentifiers[0]) //nolint:forcetypeassert
 	}
 }
 

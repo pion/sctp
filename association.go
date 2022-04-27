@@ -538,7 +538,7 @@ loop:
 		for _, raw := range rawPackets {
 			_, err := a.netConn.Write(raw)
 			if err != nil {
-				if err != io.EOF {
+				if !errors.Is(err, io.EOF) {
 					a.log.Warnf("[%s] failed to write packets on netConn: %v", a.name, err)
 				}
 				a.log.Debugf("[%s] writeLoop ended", a.name)
@@ -1929,14 +1929,14 @@ func (a *Association) handleReconfigParam(raw param) (*packet, error) {
 		if resp != nil {
 			return resp, nil
 		}
-		return nil, nil
+		return nil, nil //nolint:nilnil
 
 	case *paramReconfigResponse:
 		delete(a.reconfigs, p.reconfigResponseSequenceNumber)
 		if len(a.reconfigs) == 0 {
 			a.tReconfig.stop()
 		}
-		return nil, nil
+		return nil, nil //nolint:nilnil
 	default:
 		return nil, fmt.Errorf("%w: %t", errParamterType, p)
 	}
