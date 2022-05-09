@@ -1008,14 +1008,14 @@ func (a *Association) handleInit(p *packet, i *chunkInit) ([]*packet, error) {
 		case *paramSupportedExtensions:
 			for _, t := range v.ChunkTypes {
 				if t == ctForwardTSN {
-					a.log.Debugf("[%s] use ForwardTSN (on init)\n", a.name)
+					a.log.Debugf("[%s] use ForwardTSN (on init)", a.name)
 					a.useForwardTSN = true
 				}
 			}
 		}
 	}
 	if !a.useForwardTSN {
-		a.log.Warnf("[%s] not using ForwardTSN (on init)\n", a.name)
+		a.log.Warnf("[%s] not using ForwardTSN (on init)", a.name)
 	}
 
 	outbound := &packet{}
@@ -1093,14 +1093,14 @@ func (a *Association) handleInitAck(p *packet, i *chunkInitAck) error {
 		case *paramSupportedExtensions:
 			for _, t := range v.ChunkTypes {
 				if t == ctForwardTSN {
-					a.log.Debugf("[%s] use ForwardTSN (on initAck)\n", a.name)
+					a.log.Debugf("[%s] use ForwardTSN (on initAck)", a.name)
 					a.useForwardTSN = true
 				}
 			}
 		}
 	}
 	if !a.useForwardTSN {
-		a.log.Warnf("[%s] not using ForwardTSN (on initAck)\n", a.name)
+		a.log.Warnf("[%s] not using ForwardTSN (on initAck)", a.name)
 	}
 	if cookieParam == nil {
 		return errInitAckNoCookie
@@ -1849,7 +1849,7 @@ func (a *Association) handleForwardTSN(c *chunkForwardTSN) []*packet {
 	//   send a SACK to its peer (the sender of the FORWARD TSN) since such a
 	//   duplicate may indicate the previous SACK was lost in the network.
 
-	a.log.Tracef("[%s] should send ack? newCumTSN=%d peerLastTSN=%d\n",
+	a.log.Tracef("[%s] should send ack? newCumTSN=%d peerLastTSN=%d",
 		a.name, c.newCumulativeTSN, a.peerLastTSN)
 	if sna32LTE(c.newCumulativeTSN, a.peerLastTSN) {
 		a.log.Tracef("[%s] sending ack on Forward TSN", a.name)
