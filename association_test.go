@@ -37,6 +37,7 @@ var (
 	errReceivedDataNot3Bytes = errors.New("received data must by 3 bytes")
 	errPPIUnexpected         = errors.New("unexpected ppi")
 	errReceivedDataMismatch  = errors.New("received data mismatch")
+	errConnWrite             = errors.New("connection write failed")
 )
 
 func TestAssocStressDuplex(t *testing.T) {
@@ -4449,6 +4450,105 @@ func TestAssociationAbortSetsWriteDeadline(t *testing.T) {
 	case <-time.After(300 * time.Millisecond):
 		require.FailNow(t, "Abort did not return promptly")
 	}
+}
+
+type writeErrorConn struct {
+	readStarted  chan struct{}
+	writeStarted chan struct{}
+	failWrite    chan struct{}
+	closed       chan struct{}
+	readOnce     sync.Once
+	writeOnce    sync.Once
+	closeOnce    sync.Once
+	closeCalls   atomic.Int32
+}
+
+func newWriteErrorConn() *writeErrorConn {
+	return &writeErrorConn{
+		readStarted:  make(chan struct{}),
+		writeStarted: make(chan struct{}),
+		failWrite:    make(chan struct{}),
+		closed:       make(chan struct{}),
+	}
+}
+
+func (c *writeErrorConn) Read(_ []byte) (int, error) {
+	c.readOnce.Do(func() { close(c.readStarted) })
+	<-c.closed
+
+	return 0, net.ErrClosed
+}
+
+func (c *writeErrorConn) Write(_ []byte) (int, error) {
+	c.writeOnce.Do(func() { close(c.writeStarted) })
+	<-c.failWrite
+
+	return 0, errConnWrite
+}
+
+func (c *writeErrorConn) Close() error {
+	c.closeCalls.Add(1)
+	c.closeOnce.Do(func() { close(c.closed) })
+
+	return nil
+}
+
+func (c *writeErrorConn) LocalAddr() net.Addr                { return &net.IPAddr{} }
+func (c *writeErrorConn) RemoteAddr() net.Addr               { return &net.IPAddr{} }
+func (c *writeErrorConn) SetDeadline(_ time.Time) error      { return nil }
+func (c *writeErrorConn) SetReadDeadline(_ time.Time) error  { return nil }
+func (c *writeErrorConn) SetWriteDeadline(_ time.Time) error { return nil }
+
+func TestAssociationWriteFailureClosesTransport(t *testing.T) { //nolint:cyclop
+	conn := newWriteErrorConn()
+	assoc := createTestAssociation(t, Config{
+		NetConn:       conn,
+		LoggerFactory: logging.NewDefaultLoggerFactory(),
+	})
+	assoc.initClient()
+
+	select {
+	case <-conn.readStarted:
+	case <-time.After(time.Second):
+		require.FailNow(t, "read loop did not start")
+	}
+	select {
+	case <-conn.writeStarted:
+	case <-time.After(time.Second):
+		require.FailNow(t, "write loop did not start")
+	}
+
+	stream, err := assoc.OpenStream(1, PayloadTypeWebRTCString)
+	require.NoError(t, err)
+
+	streamReadDone := make(chan error, 1)
+	go func() {
+		_, readErr := stream.Read(make([]byte, 1))
+		streamReadDone <- readErr
+	}()
+
+	close(conn.failWrite)
+
+	select {
+	case err = <-streamReadDone:
+		require.Error(t, err)
+	case <-time.After(time.Second):
+		require.FailNow(t, "stream read remained blocked after write failure")
+	}
+	select {
+	case <-assoc.readLoopCloseCh:
+	case <-time.After(time.Second):
+		require.FailNow(t, "association teardown remained blocked after write failure")
+	}
+	select {
+	case <-assoc.closeWriteLoopCh:
+	default:
+		require.FailNow(t, "association shutdown waiters were not released after write failure")
+	}
+
+	require.Equal(t, int32(1), conn.closeCalls.Load())
+	require.NoError(t, assoc.Close())
+	require.Equal(t, int32(1), conn.closeCalls.Load())
 }
 
 // readMyNextTSN uses a lock to read the myNextTSN field of the association.
