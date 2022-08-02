@@ -248,7 +248,9 @@ type Association struct {
 
 	lock sync.RWMutex
 
-	netConn net.Conn
+	netConn          net.Conn
+	netConnCloseOnce sync.Once
+	netConnCloseErr  error
 
 	peerVerificationTag    uint32
 	myVerificationTag      uint32
@@ -1057,7 +1059,7 @@ func (a *Association) close() error {
 
 	a.setState(closed)
 
-	err := a.netConn.Close()
+	err := a.closeNetConn()
 
 	a.closeAllTimers()
 
@@ -1065,6 +1067,14 @@ func (a *Association) close() error {
 	a.closeWriteLoopOnce.Do(func() { close(a.closeWriteLoopCh) })
 
 	return err
+}
+
+func (a *Association) closeNetConn() error {
+	a.netConnCloseOnce.Do(func() {
+		a.netConnCloseErr = a.netConn.Close()
+	})
+
+	return a.netConnCloseErr
 }
 
 // Abort sends the abort packet with user initiated abort and immediately
@@ -1191,6 +1201,10 @@ loop:
 					a.log.Warnf("[%s] failed to write packets on netConn: %v", a.name, err)
 				}
 				a.log.Debugf("[%s] writeLoop ended", a.name)
+
+				// A write failure may be one-sided, leaving readLoop blocked in
+				// Read. Close the transport so association teardown can finish.
+				_ = a.closeNetConn()
 
 				break loop
 			}
