@@ -1393,7 +1393,7 @@ func (a *Association) createStream(streamIdentifier uint16, accept bool) *Stream
 
 // getOrCreateStream gets or creates a stream. The caller should hold the lock.
 func (a *Association) getOrCreateStream(streamIdentifier uint16, accept bool, defaultPayloadType PayloadProtocolIdentifier) *Stream {
-	if s, ok := a.streams[streamIdentifier]; ok {
+	if s, ok := a.streams[streamIdentifier]; ok && s.writeErr != errStreamClosed {
 		s.SetDefaultPayloadType(defaultPayloadType)
 		return s
 	}
