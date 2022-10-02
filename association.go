@@ -2014,6 +2014,9 @@ func (a *Association) resetStreamsIfAny(p *paramOutgoingResetRequest) *packet {
 			if !ok {
 				continue
 			}
+			a.lock.Unlock()
+			s.onInboundStreamReset()
+			a.lock.Lock()
 			a.unregisterStream(s, io.EOF)
 		}
 		delete(a.reconfigRequests, p.reconfigRequestSequenceNumber)
@@ -2023,41 +2026,12 @@ func (a *Association) resetStreamsIfAny(p *paramOutgoingResetRequest) *packet {
 		result = reconfigResultInProgress
 	}
 
-	// From draft-ietf-rtcweb-data-channel-13 section-6.7:
-	//	if one side decides to close the data channel, it resets the corresponding
-	//	outgoing stream.  When the peer sees that an incoming stream was
-	//	reset, it also resets its corresponding outgoing stream.  Once this
-	//	is completed, the data channel is closed.
-
-	rsn := a.generateNextRSN()
-	tsn := a.myNextTSN - 1
-
-	c := &chunkReconfig{
-		paramA: &paramOutgoingResetRequest{
-			reconfigRequestSequenceNumber:  rsn,
+	return a.createPacket([]chunk{&chunkReconfig{
+		paramA: &paramReconfigResponse{
 			reconfigResponseSequenceNumber: p.reconfigRequestSequenceNumber,
-			senderLastTSN:                  tsn,
-			streamIdentifiers:              p.streamIdentifiers,
+			result:                         result,
 		},
-	}
-	a.reconfigs[rsn] = c // store in the map for retransmission
-	a.log.Debugf("[%s] sending RECONFIG : rsn=%d tsn=%d",
-		a.name, rsn, a.myNextTSN-1)
-
-	if len(a.reconfigs) > 0 {
-		a.tReconfig.start(a.rtoMgr.getRTO())
-	}
-
-	return a.createPacket([]chunk{
-		&chunkReconfig{
-			paramA: &paramReconfigResponse{
-				reconfigResponseSequenceNumber: p.reconfigRequestSequenceNumber,
-				result:                         result,
-			},
-		},
-		c,
-	})
-
+	}})
 }
 
 // Move the chunk peeked with a.pendingQueue.peek() to the inflightQueue.
