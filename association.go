@@ -1985,6 +1985,7 @@ func (a *Association) sendResetRequest(streamIdentifier uint16) error {
 func (a *Association) handleReconfigParam(raw param) (*packet, error) {
 	switch p := raw.(type) {
 	case *paramOutgoingResetRequest:
+		a.log.Tracef("[%s] handleReconfigParam (OutgoingResetRequest)", a.name)
 		a.reconfigRequests[p.reconfigRequestSequenceNumber] = p
 		resp := a.resetStreamsIfAny(p)
 		if resp != nil {
@@ -1993,6 +1994,7 @@ func (a *Association) handleReconfigParam(raw param) (*packet, error) {
 		return nil, nil //nolint:nilnil
 
 	case *paramReconfigResponse:
+		a.log.Tracef("[%s] handleReconfigParam (ReconfigResponse)", a.name)
 		delete(a.reconfigs, p.reconfigResponseSequenceNumber)
 		if len(a.reconfigs) == 0 {
 			a.tReconfig.stop()
@@ -2014,7 +2016,11 @@ func (a *Association) resetStreamsIfAny(p *paramOutgoingResetRequest) *packet {
 			if !ok {
 				continue
 			}
-			a.unregisterStream(s, io.EOF)
+			a.lock.Unlock()
+			s.onInboundStreamReset()
+			a.lock.Lock()
+			a.log.Debugf("[%s] deleting stream %d", a.name, id)
+			delete(a.streams, s.streamIdentifier)
 		}
 		delete(a.reconfigRequests, p.reconfigRequestSequenceNumber)
 	} else {
