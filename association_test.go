@@ -12,6 +12,7 @@ import (
 	"math"
 	"math/rand"
 	"net"
+	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -462,6 +463,57 @@ func TestAssocReliable(t *testing.T) {
 
 		assert.False(t, s0.reassemblyQueue.isReadable(), "should no longer be readable")
 		assert.Equal(t, 0, a0.bufferedAmount(), "incorrect bufferedAmount")
+
+		closeAssociationPair(br, a0, a1)
+	})
+
+	t.Run("ReadDeadline", func(t *testing.T) {
+		lim := test.TimeOut(time.Second * 10)
+		defer lim.Stop()
+
+		const si uint16 = 1
+		const msg = "ABC"
+		br := test.NewBridge()
+
+		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, 0)
+		if !assert.Nil(t, err, "failed to create associations") {
+			assert.FailNow(t, "failed due to earlier error")
+		}
+
+		s0, s1, err := establishSessionPair(br, a0, a1, si)
+		assert.Nil(t, err, "failed to establish session pair")
+
+		assert.Equal(t, 0, a0.bufferedAmount(), "incorrect bufferedAmount")
+
+		assert.NoError(t, s1.SetReadDeadline(time.Now().Add(time.Millisecond)), "failed to set read deadline")
+		buf := make([]byte, 32)
+		// First fails
+		n, ppi, err := s1.ReadSCTP(buf)
+		assert.Equal(t, 0, n)
+		assert.Equal(t, PayloadProtocolIdentifier(0), ppi)
+		assert.True(t, errors.Is(err, os.ErrDeadlineExceeded))
+		// Second too
+		n, ppi, err = s1.ReadSCTP(buf)
+		assert.Equal(t, 0, n)
+		assert.Equal(t, PayloadProtocolIdentifier(0), ppi)
+		assert.True(t, errors.Is(err, os.ErrDeadlineExceeded))
+		assert.NoError(t, s1.SetReadDeadline(time.Time{}), "failed to disable read deadline")
+
+		n, err = s0.WriteSCTP([]byte(msg), PayloadTypeWebRTCBinary)
+		if err != nil {
+			assert.FailNow(t, "failed due to earlier error")
+		}
+		assert.Equal(t, len(msg), n, "unexpected length of received data")
+		assert.Equal(t, len(msg), a0.bufferedAmount(), "incorrect bufferedAmount")
+
+		flushBuffers(br, a0, a1)
+
+		n, ppi, err = s1.ReadSCTP(buf)
+		if !assert.Nil(t, err, "ReadSCTP failed") {
+			assert.FailNow(t, "failed due to earlier error")
+		}
+		assert.Equal(t, n, len(msg), "unexpected length of received data")
+		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
 
 		closeAssociationPair(br, a0, a1)
 	})

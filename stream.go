@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"os"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/pion/logging"
 )
@@ -46,6 +48,7 @@ func (ss StreamState) String() string {
 var (
 	errOutboundPacketTooLarge = errors.New("outbound packet larger than maximum message size")
 	errStreamClosed           = errors.New("stream closed")
+	errReadDeadlineExceeded   = fmt.Errorf("read deadline exceeded: %w", os.ErrDeadlineExceeded)
 )
 
 // Stream represents an SCTP stream
@@ -58,6 +61,7 @@ type Stream struct {
 	sequenceNumber      uint16
 	readNotifier        *sync.Cond
 	readErr             error
+	readTimeoutCancel   chan struct{}
 	unordered           bool
 	reliabilityType     byte
 	reliabilityValue    uint32
@@ -115,6 +119,14 @@ func (s *Stream) ReadSCTP(p []byte) (int, PayloadProtocolIdentifier, error) {
 	s.lock.Lock()
 	defer s.lock.Unlock()
 
+	defer func() {
+		// close readTimeoutCancel if the current read timeout routine is no longer effective
+		if s.readTimeoutCancel != nil && s.readErr != nil {
+			close(s.readTimeoutCancel)
+			s.readTimeoutCancel = nil
+		}
+	}()
+
 	for {
 		n, ppi, err := s.reassemblyQueue.read(p)
 		if err == nil {
@@ -130,6 +142,47 @@ func (s *Stream) ReadSCTP(p []byte) (int, PayloadProtocolIdentifier, error) {
 
 		s.readNotifier.Wait()
 	}
+}
+
+// SetReadDeadline sets the read deadline in an identical way to net.Conn
+func (s *Stream) SetReadDeadline(deadline time.Time) error {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+
+	if s.readTimeoutCancel != nil {
+		close(s.readTimeoutCancel)
+		s.readTimeoutCancel = nil
+	}
+
+	if s.readErr != nil {
+		if !errors.Is(s.readErr, errReadDeadlineExceeded) {
+			return nil
+		}
+		s.readErr = nil
+	}
+
+	if !deadline.IsZero() {
+		s.readTimeoutCancel = make(chan struct{})
+
+		go func(readTimeoutCancel chan struct{}) {
+			t := time.NewTimer(time.Until(deadline))
+			select {
+			case <-readTimeoutCancel:
+				t.Stop()
+				return
+			case <-t.C:
+				s.lock.Lock()
+				if s.readErr == nil {
+					s.readErr = errReadDeadlineExceeded
+				}
+				s.readTimeoutCancel = nil
+				s.lock.Unlock()
+
+				s.readNotifier.Signal()
+			}
+		}(s.readTimeoutCancel)
+	}
+	return nil
 }
 
 func (s *Stream) handleData(pd *chunkPayloadData) {
