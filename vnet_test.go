@@ -463,8 +463,8 @@ func TestStreamClose(t *testing.T) {
 				log.Infof("server: received %d bytes (%d)", n, numServerReceived)
 				assert.Equal(t, 0, bytes.Compare(buf[:n], messages[numServerReceived]), "should receive HELLO")
 
-				_, err = stream.Write(buf[:n])
-				assert.NoError(t, err, "should succeed")
+				_, err2 := stream.Write(buf[:n])
+				assert.NoError(t, err2, "should succeed")
 
 				numServerReceived++
 			}

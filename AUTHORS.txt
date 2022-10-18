@@ -12,6 +12,7 @@ chenkaiC4 <chenkaic4@gmail.com>
 Hugo Arregui <hugo.arregui@gmail.com>
 Hugo Arregui <hugo@decentraland.org>
 Jerko Steiner <jerko.steiner@gmail.com>
+Jerry Tao <taojay315@gmail.com>
 John Bradley <jrb@turrettech.com>
 Konstantin Itskov <konstantin.itskov@kovits.com>
 Lukas Herman <lherman.cs@gmail.com>
