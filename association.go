@@ -2070,52 +2070,46 @@ func (a *Association) popPendingDataChunksToSend() ([]*chunkPayloadData, []uint1
 	chunks := []*chunkPayloadData{}
 	var sisToReset []uint16 // stream identifieres to reset
 
-	if a.pendingQueue.size() > 0 {
-		// RFC 4960 sec 6.1.  Transmission of DATA Chunks
-		//   A) At any given time, the data sender MUST NOT transmit new data to
-		//      any destination transport address if its peer's rwnd indicates
-		//      that the peer has no buffer space (i.e., rwnd is 0; see Section
-		//      6.2.1).  However, regardless of the value of rwnd (including if it
-		//      is 0), the data sender can always have one DATA chunk in flight to
-		//      the receiver if allowed by cwnd (see rule B, below).
-
-		for {
-			c := a.pendingQueue.peek()
-			if c == nil {
-				break // no more pending data
-			}
-
-			dataLen := uint32(len(c.userData))
-			if dataLen == 0 {
-				sisToReset = append(sisToReset, c.streamIdentifier)
-				err := a.pendingQueue.pop(c)
-				if err != nil {
-					a.log.Errorf("failed to pop from pending queue: %s", err.Error())
+	for _, s := range a.streams {
+		if s.pendingQueue.size() > 0 {
+			for {
+				c := s.pendingQueue.peek()
+				if c == nil {
+					break // no more pending data
 				}
-				continue
-			}
 
-			if uint32(a.inflightQueue.getNumBytes())+dataLen > a.cwnd {
-				break // would exceeds cwnd
-			}
+				dataLen := uint32(len(c.userData))
+				if dataLen == 0 {
+					sisToReset = append(sisToReset, c.streamIdentifier)
+					err := a.pendingQueue.pop(c)
+					if err != nil {
+						a.log.Errorf("failed to pop from pending queue: %s", err.Error())
+					}
+					continue
+				}
 
-			if dataLen > a.rwnd {
-				break // no more rwnd
-			}
+				if uint32(a.inflightQueue.getNumBytes())+dataLen > a.cwnd {
+					break // would exceeds cwnd
+				}
 
-			a.rwnd -= dataLen
+				if dataLen > a.rwnd {
+					break // no more rwnd
+				}
 
-			a.movePendingDataChunkToInflightQueue(c)
-			chunks = append(chunks, c)
-		}
+				a.rwnd -= dataLen
 
-		// the data sender can always have one DATA chunk in flight to the receiver
-		if len(chunks) == 0 && a.inflightQueue.size() == 0 {
-			// Send zero window probe
-			c := a.pendingQueue.peek()
-			if c != nil {
 				a.movePendingDataChunkToInflightQueue(c)
 				chunks = append(chunks, c)
+			}
+
+			// the data sender can always have one DATA chunk in flight to the receiver
+			if len(chunks) == 0 && a.inflightQueue.size() == 0 {
+				// Send zero window probe
+				c := s.pendingQueue.peek()
+				if c != nil {
+					a.movePendingDataChunkToInflightQueue(c)
+					chunks = append(chunks, c)
+				}
 			}
 		}
 	}

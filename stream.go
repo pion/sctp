@@ -59,6 +59,7 @@ type Stream struct {
 	defaultPayloadType  PayloadProtocolIdentifier
 	reassemblyQueue     *reassemblyQueue
 	sequenceNumber      uint16
+	pendingQueue        *pendingQueue
 	readNotifier        *sync.Cond
 	readErr             error
 	readTimeoutCancel   chan struct{}
@@ -266,10 +267,14 @@ func (s *Stream) WriteSCTP(p []byte, ppi PayloadProtocolIdentifier) (int, error)
 
 	chunks := s.packetize(p, ppi)
 	n := len(p)
-	err := s.association.sendPayloadData(chunks)
-	if err != nil {
-		return n, errStreamClosed
+	for _, c := range chunks {
+		s.pendingQueue.push(c)
 	}
+	s.association.awakeWriteLoop()
+	//err := s.association.sendPayloadData(chunks)
+	//if err != nil {
+	//	return n, errStreamClosed
+	//}
 	return n, nil
 }
 
@@ -433,7 +438,7 @@ func (s *Stream) getNumBytesInReassemblyQueue() int {
 func (s *Stream) onInboundStreamReset() {
 	s.lock.Lock()
 	defer s.lock.Unlock()
-
+	s.pendingQueue = newPendingQueue()
 	s.log.Debugf("[%s] onInboundStreamReset: state=%s", s.name, s.state.String())
 
 	// No more inbound data to read. Unblock the read with io.EOF.
