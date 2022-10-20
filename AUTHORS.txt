@@ -19,6 +19,7 @@ Lukas Herman <lherman.cs@gmail.com>
 Luke Curley <lcurley@twitch.tv>
 Michael MacDonald <github@macdonald.cx>
 ronan <ronan.jezequel@gmail.com>
+Sam Lancia <sam@vaion.com>
 Sean DuBois <seaduboi@amazon.com>
 Sean DuBois <sean@siobud.com>
 Teddy <richardgeorgeoff@gmail.com>
