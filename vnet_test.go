@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/pion/logging"
-	"github.com/pion/transport/test"
-	"github.com/pion/transport/vnet"
+	"github.com/pion/transport/v2/test"
+	"github.com/pion/transport/v2/vnet"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -122,17 +122,25 @@ func buildVNetEnv(cfg *vNetEnvConfig) (*vNetEnv, error) {
 	}
 	wan.AddChunkFilter(tsnAutoLockOnFilter())
 
-	net0 := vnet.NewNet(&vnet.NetConfig{
+	net0, err := vnet.NewNet(&vnet.NetConfig{
 		StaticIPs: []string{serverIP},
 	})
+	if err != nil {
+		return nil, err
+	}
+
 	err = wan.AddNet(net0)
 	if err != nil {
 		return nil, err
 	}
 
-	net1 := vnet.NewNet(&vnet.NetConfig{
+	net1, err := vnet.NewNet(&vnet.NetConfig{
 		StaticIPs: []string{clientIP},
 	})
+	if err != nil {
+		return nil, err
+	}
+
 	err = wan.AddNet(net1)
 	if err != nil {
 		return nil, err
