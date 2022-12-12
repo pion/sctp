@@ -24,12 +24,12 @@ const (
 
 // StreamState is an enum for SCTP Stream state field
 // This field identifies the state of stream.
-type StreamState int32
+type StreamState int
 
 // StreamState enums
 const (
 	StreamStateOpen    StreamState = iota // Stream object starts with StreamStateOpen
-	StreamStateClosing                    // Stream is closed by remote
+	StreamStateClosing                    // Outgoing stream is being reset
 	StreamStateClosed                     // Stream has been closed
 )
 
@@ -71,7 +71,6 @@ type Stream struct {
 	state               StreamState
 	log                 logging.LeveledLogger
 	name                string
-	version             uint32
 }
 
 // StreamIdentifier returns the Stream identifier associated to the stream.
@@ -297,7 +296,6 @@ func (s *Stream) packetize(raw []byte, ppi PayloadProtocolIdentifier) []*chunkPa
 		copy(userData, raw[i:i+fragmentSize])
 
 		chunk := &chunkPayloadData{
-			streamVersion:        s.version,
 			streamIdentifier:     s.streamIdentifier,
 			userData:             userData,
 			unordered:            unordered,
@@ -340,22 +338,16 @@ func (s *Stream) Close() error {
 		s.lock.Lock()
 		defer s.lock.Unlock()
 
-		state := s.State()
-		s.log.Debugf("[%s] Close: state=%s", s.name, state.String())
+		s.log.Debugf("[%s] Close: state=%s", s.name, s.state.String())
 
-		switch state {
-		case StreamStateOpen:
-			s.SetState(StreamStateClosed)
-			s.log.Debugf("[%s] state change: open => closed", s.name)
-			s.readErr = io.EOF
-			s.readNotifier.Broadcast()
+		if s.state == StreamStateOpen {
+			if s.readErr == nil {
+				s.state = StreamStateClosing
+			} else {
+				s.state = StreamStateClosed
+			}
+			s.log.Debugf("[%s] state change: open => %s", s.name, s.state.String())
 			return s.streamIdentifier, true
-		case StreamStateClosing:
-			s.SetState(StreamStateClosed)
-			s.log.Debugf("[%s] state change: closing => closed", s.name)
-			return s.streamIdentifier, true
-		case StreamStateClosed:
-			return s.streamIdentifier, false
 		}
 		return s.streamIdentifier, false
 	}(); resetOutbound {
@@ -442,8 +434,7 @@ func (s *Stream) onInboundStreamReset() {
 	s.lock.Lock()
 	defer s.lock.Unlock()
 
-	state := s.State()
-	s.log.Debugf("[%s] onInboundStreamReset: state=%s", s.name, state.String())
+	s.log.Debugf("[%s] onInboundStreamReset: state=%s", s.name, s.state.String())
 
 	// No more inbound data to read. Unblock the read with io.EOF.
 	// This should cause DCEP layer (datachannel package) to call Close() which
@@ -454,21 +445,19 @@ func (s *Stream) onInboundStreamReset() {
 	//	outgoing stream.  When the peer sees that an incoming stream was
 	//	reset, it also resets its corresponding outgoing stream.  Once this
 	//	is completed, the data channel is closed.
-	if state == StreamStateOpen {
-		s.log.Debugf("[%s] state change: open => closing", s.name)
-		s.SetState(StreamStateClosing)
-	}
 
 	s.readErr = io.EOF
 	s.readNotifier.Broadcast()
+
+	if s.state == StreamStateClosing {
+		s.log.Debugf("[%s] state change: closing => closed", s.name)
+		s.state = StreamStateClosed
+	}
 }
 
-// State atomically returns the stream state.
+// State return the stream state.
 func (s *Stream) State() StreamState {
-	return StreamState(atomic.LoadInt32((*int32)(&s.state)))
-}
-
-// SetState atomically sets the stream state.
-func (s *Stream) SetState(newState StreamState) {
-	atomic.StoreInt32((*int32)(&s.state), int32(newState))
+	s.lock.RLock()
+	defer s.lock.RUnlock()
+	return s.state
 }
