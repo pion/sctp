@@ -71,8 +71,7 @@ type chunkPayloadData struct {
 	// chunk is still in the inflight queue
 	retransmit bool
 
-	head          *chunkPayloadData // link to the head of the fragment
-	streamVersion uint32
+	head *chunkPayloadData // link to the head of the fragment
 }
 
 const (
