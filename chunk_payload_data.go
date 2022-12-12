@@ -10,8 +10,9 @@ import (
 /*
 chunkPayloadData represents an SCTP Chunk of type DATA
 
- 0                   1                   2                   3
- 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+	0                   1                   2                   3
+	0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |   Type = 0    | Reserved|U|B|E|    Length                     |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -26,11 +27,12 @@ chunkPayloadData represents an SCTP Chunk of type DATA
 |                                                               |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 
-
 An unfragmented user message shall have both the B and E bits set to
 '1'.  Setting both B and E bits to '0' indicates a middle fragment of
 a multi-fragment user message, as summarized in the following table:
-   B E                  Description
+
+	B E                  Description
+
 ============================================================
 |  1 0 | First piece of a fragmented user message          |
 +----------------------------------------------------------+
@@ -71,8 +73,7 @@ type chunkPayloadData struct {
 	// chunk is still in the inflight queue
 	retransmit bool
 
-	head          *chunkPayloadData // link to the head of the fragment
-	streamVersion uint32
+	head *chunkPayloadData // link to the head of the fragment
 }
 
 const (

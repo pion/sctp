@@ -124,12 +124,13 @@ func getAssociationStateString(a uint32) string {
 //
 // Tag         :
 // State       : A state variable indicating what state the association
-//             : is in, i.e., COOKIE-WAIT, COOKIE-ECHOED, ESTABLISHED,
-//             : SHUTDOWN-PENDING, SHUTDOWN-SENT, SHUTDOWN-RECEIVED,
-//             : SHUTDOWN-ACK-SENT.
 //
-//               Note: No "CLOSED" state is illustrated since if a
-//               association is "CLOSED" its TCB SHOULD be removed.
+//	: is in, i.e., COOKIE-WAIT, COOKIE-ECHOED, ESTABLISHED,
+//	: SHUTDOWN-PENDING, SHUTDOWN-SENT, SHUTDOWN-RECEIVED,
+//	: SHUTDOWN-ACK-SENT.
+//
+//	  Note: No "CLOSED" state is illustrated since if a
+//	  association is "CLOSED" its TCB SHOULD be removed.
 type Association struct {
 	bytesReceived uint64
 	bytesSent     uint64
@@ -221,9 +222,8 @@ type Association struct {
 	delayedAckTriggered   bool
 	immediateAckTriggered bool
 
-	name          string
-	log           logging.LeveledLogger
-	streamVersion uint32
+	name string
+	log  logging.LeveledLogger
 }
 
 // Config collects the arguments to createAssociation construction into
@@ -1369,7 +1369,6 @@ func (a *Association) createStream(streamIdentifier uint16, accept bool) *Stream
 		streamIdentifier: streamIdentifier,
 		reassemblyQueue:  newReassemblyQueue(streamIdentifier),
 		log:              a.log,
-		version:          atomic.AddUint32(&a.streamVersion, 1),
 		name:             fmt.Sprintf("%d:%s", streamIdentifier, a.name),
 	}
 
@@ -2070,7 +2069,7 @@ func (a *Association) movePendingDataChunkToInflightQueue(c *chunkPayloadData) {
 // The caller should hold the lock.
 func (a *Association) popPendingDataChunksToSend() ([]*chunkPayloadData, []uint16) {
 	chunks := []*chunkPayloadData{}
-	var sisToReset []uint16 // stream identifieres to reset
+	var sisToReset []uint16 // stream identifiers to reset
 
 	if a.pendingQueue.size() > 0 {
 		// RFC 4960 sec 6.1.  Transmission of DATA Chunks
@@ -2096,7 +2095,7 @@ func (a *Association) popPendingDataChunksToSend() ([]*chunkPayloadData, []uint1
 
 			s, ok := a.streams[c.streamIdentifier]
 
-			if !ok || s.State() > StreamStateOpen || s.version != c.streamVersion {
+			if !ok || s.State() == StreamStateClosed {
 				a.popPendingDataChunksToDrop(c)
 				continue
 			}

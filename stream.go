@@ -71,7 +71,6 @@ type Stream struct {
 	state               StreamState
 	log                 logging.LeveledLogger
 	name                string
-	version             uint32
 }
 
 // StreamIdentifier returns the Stream identifier associated to the stream.
@@ -297,7 +296,6 @@ func (s *Stream) packetize(raw []byte, ppi PayloadProtocolIdentifier) []*chunkPa
 		copy(userData, raw[i:i+fragmentSize])
 
 		chunk := &chunkPayloadData{
-			streamVersion:        s.version,
 			streamIdentifier:     s.streamIdentifier,
 			userData:             userData,
 			unordered:            unordered,
@@ -345,7 +343,7 @@ func (s *Stream) Close() error {
 
 		switch state {
 		case StreamStateOpen:
-			s.SetState(StreamStateClosed)
+			s.SetState(StreamStateClosing)
 			s.log.Debugf("[%s] state change: open => closed", s.name)
 			s.readErr = io.EOF
 			s.readNotifier.Broadcast()
