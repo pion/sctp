@@ -221,9 +221,8 @@ type Association struct {
 	delayedAckTriggered   bool
 	immediateAckTriggered bool
 
-	name          string
-	log           logging.LeveledLogger
-	streamVersion uint32
+	name string
+	log  logging.LeveledLogger
 }
 
 // Config collects the arguments to createAssociation construction into
@@ -1369,7 +1368,6 @@ func (a *Association) createStream(streamIdentifier uint16, accept bool) *Stream
 		streamIdentifier: streamIdentifier,
 		reassemblyQueue:  newReassemblyQueue(streamIdentifier),
 		log:              a.log,
-		version:          atomic.AddUint32(&a.streamVersion, 1),
 		name:             fmt.Sprintf("%d:%s", streamIdentifier, a.name),
 	}
 
@@ -2090,14 +2088,10 @@ func (a *Association) popPendingDataChunksToSend() ([]*chunkPayloadData, []uint1
 			dataLen := uint32(len(c.userData))
 			if dataLen == 0 {
 				sisToReset = append(sisToReset, c.streamIdentifier)
-				a.popPendingDataChunksToDrop(c)
-				continue
-			}
-
-			s, ok := a.streams[c.streamIdentifier]
-
-			if !ok || s.State() > StreamStateOpen || s.version != c.streamVersion {
-				a.popPendingDataChunksToDrop(c)
+				err := a.pendingQueue.pop(c)
+				if err != nil {
+					a.log.Errorf("failed to pop from pending queue: %s", err.Error())
+				}
 				continue
 			}
 
@@ -2127,13 +2121,6 @@ func (a *Association) popPendingDataChunksToSend() ([]*chunkPayloadData, []uint1
 	}
 
 	return chunks, sisToReset
-}
-
-func (a *Association) popPendingDataChunksToDrop(c *chunkPayloadData) {
-	err := a.pendingQueue.pop(c)
-	if err != nil {
-		a.log.Errorf("failed to pop from pending queue: %s", err.Error())
-	}
 }
 
 // bundleDataChunksIntoPackets packs DATA chunks into packets. It tries to bundle
