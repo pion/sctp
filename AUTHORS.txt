@@ -9,6 +9,7 @@ Atsushi Watanabe <atsushi.w@ieee.org>
 backkem <mail@backkem.me>
 Cecylia Bocovich <cohosh@torproject.org>
 chenkaiC4 <chenkaic4@gmail.com>
+Eric Daniels <eric@erdaniels.com>
 Hugo Arregui <hugo.arregui@gmail.com>
 Hugo Arregui <hugo@decentraland.org>
 Jerko Steiner <jerko.steiner@gmail.com>
