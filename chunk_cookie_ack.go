@@ -18,7 +18,10 @@ type chunkCookieAck struct {
 	chunkHeader
 }
 
-var errChunkTypeNotCookieAck = errors.New("ChunkType is not of type COOKIEACK")
+// Cookie ack chunk errors
+var (
+	ErrChunkTypeNotCookieAck = errors.New("ChunkType is not of type COOKIEACK")
+)
 
 func (c *chunkCookieAck) unmarshal(raw []byte) error {
 	if err := c.chunkHeader.unmarshal(raw); err != nil {
@@ -26,7 +29,7 @@ func (c *chunkCookieAck) unmarshal(raw []byte) error {
 	}
 
 	if c.typ != ctCookieAck {
-		return fmt.Errorf("%w: actually is %s", errChunkTypeNotCookieAck, c.typ.String())
+		return fmt.Errorf("%w: actually is %s", ErrChunkTypeNotCookieAck, c.typ.String())
 	}
 
 	return nil

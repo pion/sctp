@@ -97,7 +97,10 @@ const (
 	PayloadTypeWebRTCBinaryEmpty PayloadProtocolIdentifier = 57
 )
 
-var errChunkPayloadSmall = errors.New("packet is smaller than the header size")
+// Data chunk errors
+var (
+	ErrChunkPayloadSmall = errors.New("packet is smaller than the header size")
+)
 
 func (p PayloadProtocolIdentifier) String() string {
 	switch p {
@@ -127,7 +130,7 @@ func (p *chunkPayloadData) unmarshal(raw []byte) error {
 	p.endingFragment = p.flags&payloadDataEndingFragmentBitmask != 0
 
 	if len(raw) < payloadDataHeaderSize {
-		return errChunkPayloadSmall
+		return ErrChunkPayloadSmall
 	}
 	p.tsn = binary.BigEndian.Uint32(p.raw[0:])
 	p.streamIdentifier = binary.BigEndian.Uint16(p.raw[4:])

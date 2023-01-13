@@ -45,10 +45,11 @@ func (ss StreamState) String() string {
 	return "unknown"
 }
 
+// SCTP stream errors
 var (
-	errOutboundPacketTooLarge = errors.New("outbound packet larger than maximum message size")
-	errStreamClosed           = errors.New("stream closed")
-	errReadDeadlineExceeded   = fmt.Errorf("read deadline exceeded: %w", os.ErrDeadlineExceeded)
+	ErrOutboundPacketTooLarge = errors.New("outbound packet larger than maximum message size")
+	ErrStreamClosed           = errors.New("stream closed")
+	ErrReadDeadlineExceeded   = fmt.Errorf("read deadline exceeded: %w", os.ErrDeadlineExceeded)
 )
 
 // Stream represents an SCTP stream
@@ -155,7 +156,7 @@ func (s *Stream) SetReadDeadline(deadline time.Time) error {
 	}
 
 	if s.readErr != nil {
-		if !errors.Is(s.readErr, errReadDeadlineExceeded) {
+		if !errors.Is(s.readErr, ErrReadDeadlineExceeded) {
 			return nil
 		}
 		s.readErr = nil
@@ -173,7 +174,7 @@ func (s *Stream) SetReadDeadline(deadline time.Time) error {
 			case <-t.C:
 				s.lock.Lock()
 				if s.readErr == nil {
-					s.readErr = errReadDeadlineExceeded
+					s.readErr = ErrReadDeadlineExceeded
 				}
 				s.readTimeoutCancel = nil
 				s.lock.Unlock()
@@ -257,18 +258,18 @@ func (s *Stream) Write(p []byte) (n int, err error) {
 func (s *Stream) WriteSCTP(p []byte, ppi PayloadProtocolIdentifier) (int, error) {
 	maxMessageSize := s.association.MaxMessageSize()
 	if len(p) > int(maxMessageSize) {
-		return 0, fmt.Errorf("%w: %v", errOutboundPacketTooLarge, math.MaxUint16)
+		return 0, fmt.Errorf("%w: %v", ErrOutboundPacketTooLarge, math.MaxUint16)
 	}
 
 	if s.State() != StreamStateOpen {
-		return 0, errStreamClosed
+		return 0, ErrStreamClosed
 	}
 
 	chunks := s.packetize(p, ppi)
 	n := len(p)
 	err := s.association.sendPayloadData(chunks)
 	if err != nil {
-		return n, errStreamClosed
+		return n, ErrStreamClosed
 	}
 	return n, nil
 }
