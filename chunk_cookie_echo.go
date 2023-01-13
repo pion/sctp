@@ -22,7 +22,10 @@ type chunkCookieEcho struct {
 	cookie []byte
 }
 
-var errChunkTypeNotCookieEcho = errors.New("ChunkType is not of type COOKIEECHO")
+// Cookie echo chunk errors
+var (
+	ErrChunkTypeNotCookieEcho = errors.New("ChunkType is not of type COOKIEECHO")
+)
 
 func (c *chunkCookieEcho) unmarshal(raw []byte) error {
 	if err := c.chunkHeader.unmarshal(raw); err != nil {
@@ -30,7 +33,7 @@ func (c *chunkCookieEcho) unmarshal(raw []byte) error {
 	}
 
 	if c.typ != ctCookieEcho {
-		return fmt.Errorf("%w: actually is %s", errChunkTypeNotCookieEcho, c.typ.String())
+		return fmt.Errorf("%w: actually is %s", ErrChunkTypeNotCookieEcho, c.typ.String())
 	}
 	c.cookie = c.raw
 

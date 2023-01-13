@@ -38,9 +38,10 @@ type chunkError struct {
 	errorCauses []errorCause
 }
 
+// Error chunk errors
 var (
-	errChunkTypeNotCtError   = errors.New("ChunkType is not of type ctError")
-	errBuildErrorChunkFailed = errors.New("failed build Error Chunk")
+	ErrChunkTypeNotCtError   = errors.New("ChunkType is not of type ctError")
+	ErrBuildErrorChunkFailed = errors.New("failed build Error Chunk")
 )
 
 func (a *chunkError) unmarshal(raw []byte) error {
@@ -49,7 +50,7 @@ func (a *chunkError) unmarshal(raw []byte) error {
 	}
 
 	if a.typ != ctError {
-		return fmt.Errorf("%w, actually is %s", errChunkTypeNotCtError, a.typ.String())
+		return fmt.Errorf("%w, actually is %s", ErrChunkTypeNotCtError, a.typ.String())
 	}
 
 	offset := chunkHeaderSize
@@ -60,7 +61,7 @@ func (a *chunkError) unmarshal(raw []byte) error {
 
 		e, err := buildErrorCause(raw[offset:])
 		if err != nil {
-			return fmt.Errorf("%w: %v", errBuildErrorChunkFailed, err)
+			return fmt.Errorf("%w: %v", ErrBuildErrorChunkFailed, err)
 		}
 
 		offset += int(e.length())

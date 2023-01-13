@@ -542,7 +542,7 @@ func TestStreamClose(t *testing.T) {
 
 		_, err = stream.Write([]byte{1})
 
-		assert.Equal(t, err, errStreamClosed, "after closed should not allow write")
+		assert.Equal(t, err, ErrStreamClosed, "after closed should not allow write")
 		// Check if RECONFIG was actually dropped
 		assert.Equal(t, 0, venv.numToDropReconfig, "should be zero")
 

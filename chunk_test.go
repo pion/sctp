@@ -102,9 +102,9 @@ func TestInitMarshalUnmarshal(t *testing.T) {
 	initAck.numInboundStreams = 1
 	initAck.initiateTag = 123
 	initAck.advertisedReceiverWindowCredit = 1024
-	cookie, errRand := newRandomStateCookie()
-	if errRand != nil {
-		t.Fatalf("Failed to generate random state cookie: %v", errRand)
+	cookie, ErrRand := newRandomStateCookie()
+	if ErrRand != nil {
+		t.Fatalf("Failed to generate random state cookie: %v", ErrRand)
 	}
 	initAck.params = []param{cookie}
 

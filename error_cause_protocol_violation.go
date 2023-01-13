@@ -27,7 +27,10 @@ type errorCauseProtocolViolation struct {
 	additionalInformation []byte
 }
 
-var errProtocolViolationUnmarshal = errors.New("unable to unmarshal Protocol Violation error")
+// Abort chunk errors
+var (
+	ErrProtocolViolationUnmarshal = errors.New("unable to unmarshal Protocol Violation error")
+)
 
 func (e *errorCauseProtocolViolation) marshal() ([]byte, error) {
 	e.raw = e.additionalInformation
@@ -37,7 +40,7 @@ func (e *errorCauseProtocolViolation) marshal() ([]byte, error) {
 func (e *errorCauseProtocolViolation) unmarshal(raw []byte) error {
 	err := e.errorCauseHeader.unmarshal(raw)
 	if err != nil {
-		return fmt.Errorf("%w: %v", errProtocolViolationUnmarshal, err)
+		return fmt.Errorf("%w: %v", ErrProtocolViolationUnmarshal, err)
 	}
 
 	e.additionalInformation = e.raw

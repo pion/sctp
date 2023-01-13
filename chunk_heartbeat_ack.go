@@ -38,34 +38,35 @@ type chunkHeartbeatAck struct {
 	params []param
 }
 
+// Heartbeat ack chunk errors
 var (
-	errUnimplemented                = errors.New("unimplemented")
-	errHeartbeatAckParams           = errors.New("heartbeat Ack must have one param")
-	errHeartbeatAckNotHeartbeatInfo = errors.New("heartbeat Ack must have one param, and it should be a HeartbeatInfo")
-	errHeartbeatAckMarshalParam     = errors.New("unable to marshal parameter for Heartbeat Ack")
+	ErrUnimplemented                = errors.New("unimplemented")
+	ErrHeartbeatAckParams           = errors.New("heartbeat Ack must have one param")
+	ErrHeartbeatAckNotHeartbeatInfo = errors.New("heartbeat Ack must have one param, and it should be a HeartbeatInfo")
+	ErrHeartbeatAckMarshalParam     = errors.New("unable to marshal parameter for Heartbeat Ack")
 )
 
 func (h *chunkHeartbeatAck) unmarshal(raw []byte) error {
-	return errUnimplemented
+	return ErrUnimplemented
 }
 
 func (h *chunkHeartbeatAck) marshal() ([]byte, error) {
 	if len(h.params) != 1 {
-		return nil, errHeartbeatAckParams
+		return nil, ErrHeartbeatAckParams
 	}
 
 	switch h.params[0].(type) {
 	case *paramHeartbeatInfo:
 		// ParamHeartbeatInfo is valid
 	default:
-		return nil, errHeartbeatAckNotHeartbeatInfo
+		return nil, ErrHeartbeatAckNotHeartbeatInfo
 	}
 
 	out := make([]byte, 0)
 	for idx, p := range h.params {
 		pp, err := p.marshal()
 		if err != nil {
-			return nil, fmt.Errorf("%w: %v", errHeartbeatAckMarshalParam, err)
+			return nil, fmt.Errorf("%w: %v", ErrHeartbeatAckMarshalParam, err)
 		}
 
 		out = append(out, pp...)
