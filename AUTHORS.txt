@@ -26,3 +26,6 @@ Sean DuBois <sean@siobud.com>
 Teddy <richardgeorgeoff@gmail.com>
 Yutaka Takeda <yt0916@gmail.com>
 ZHENK <chengzhenyang@gmail.com>
+
+# List of contributors not appearing in Git history
+
