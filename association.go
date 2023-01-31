@@ -126,12 +126,13 @@ func getAssociationStateString(a uint32) string {
 //
 // Tag         :
 // State       : A state variable indicating what state the association
-//             : is in, i.e., COOKIE-WAIT, COOKIE-ECHOED, ESTABLISHED,
-//             : SHUTDOWN-PENDING, SHUTDOWN-SENT, SHUTDOWN-RECEIVED,
-//             : SHUTDOWN-ACK-SENT.
 //
-//               Note: No "CLOSED" state is illustrated since if a
-//               association is "CLOSED" its TCB SHOULD be removed.
+//	: is in, i.e., COOKIE-WAIT, COOKIE-ECHOED, ESTABLISHED,
+//	: SHUTDOWN-PENDING, SHUTDOWN-SENT, SHUTDOWN-RECEIVED,
+//	: SHUTDOWN-ACK-SENT.
+//
+//	  Note: No "CLOSED" state is illustrated since if a
+//	  association is "CLOSED" its TCB SHOULD be removed.
 type Association struct {
 	bytesReceived uint64
 	bytesSent     uint64
@@ -173,7 +174,8 @@ type Association struct {
 	pendingQueue            *pendingQueue
 	controlQueue            *controlQueue
 	mtu                     uint32
-	maxPayloadSize          uint32 // max DATA chunk payload size
+	maxPayloadSize          uint32       // max DATA chunk payload size
+	srtt                    atomic.Value // type float64
 	cumulativeTSNAckPoint   uint32
 	advancedPeerTSNAckPoint uint32
 	useForwardTSN           bool
@@ -327,6 +329,7 @@ func createAssociation(config Config) *Association {
 	a.log.Tracef("[%s] updated cwnd=%d ssthresh=%d inflight=%d (INI)",
 		a.name, a.cwnd, a.ssthresh, a.inflightQueue.getNumBytes())
 
+	a.srtt.Store(float64(0))
 	a.t1Init = newRTXTimer(timerT1Init, a, maxInitRetrans)
 	a.t1Cookie = newRTXTimer(timerT1Cookie, a, maxInitRetrans)
 	a.t2Shutdown = newRTXTimer(timerT2Shutdown, a, noMaxRetrans) // retransmit forever
@@ -1013,6 +1016,26 @@ func (a *Association) BytesReceived() uint64 {
 	return atomic.LoadUint64(&a.bytesReceived)
 }
 
+// MTU returns the association's current MTU
+func (a *Association) MTU() uint32 {
+	return atomic.LoadUint32(&a.mtu)
+}
+
+// CWND returns the association's current congestion window (cwnd)
+func (a *Association) CWND() uint32 {
+	return atomic.LoadUint32(&a.cwnd)
+}
+
+// RWND returns the association's current receiver window (rwnd)
+func (a *Association) RWND() uint32 {
+	return atomic.LoadUint32(&a.rwnd)
+}
+
+// SRTT returns the latest smoothed round-trip time (srrt)
+func (a *Association) SRTT() float64 {
+	return a.srtt.Load().(float64)
+}
+
 func setSupportedExtensions(init *chunkInitCommon) {
 	// nolint:godox
 	// TODO RFC5061 https://tools.ietf.org/html/rfc6525#section-5.2
@@ -1453,6 +1476,7 @@ func (a *Association) processSelectiveAck(d *chunkSelectiveAck) (map[uint16]int,
 				a.minTSN2MeasureRTT = a.myNextTSN
 				rtt := time.Since(c.since).Seconds() * 1000.0
 				srtt := a.rtoMgr.setNewRTT(rtt)
+				a.srtt.Store(srtt)
 				a.log.Tracef("[%s] SACK: measured-rtt=%f srtt=%f new-rto=%f",
 					a.name, rtt, srtt, a.rtoMgr.getRTO())
 			}
@@ -1491,6 +1515,7 @@ func (a *Association) processSelectiveAck(d *chunkSelectiveAck) (map[uint16]int,
 					a.minTSN2MeasureRTT = a.myNextTSN
 					rtt := time.Since(c.since).Seconds() * 1000.0
 					srtt := a.rtoMgr.setNewRTT(rtt)
+					a.srtt.Store(srtt)
 					a.log.Tracef("[%s] SACK: measured-rtt=%f srtt=%f new-rto=%f",
 						a.name, rtt, srtt, a.rtoMgr.getRTO())
 				}
