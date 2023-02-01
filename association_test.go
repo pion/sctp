@@ -2300,6 +2300,9 @@ func newFakeEchoConn(errClose error) *fakeEchoConn {
 		echo:     make(chan []byte, 1),
 		done:     make(chan struct{}),
 		closed:   make(chan struct{}),
+		mtu:      initialMTU,
+		cwnd:     min32(4*initialMTU, max32(2*initialMTU, 4380)),
+		rwnd:     initialRecvBufSize,
 		errClose: errClose,
 	}
 }
