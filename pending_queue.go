@@ -21,6 +21,9 @@ func (q *pendingBaseQueue) push(c *chunkPayloadData) {
 
 func (q *pendingBaseQueue) pop() *chunkPayloadData {
 	c := q.queue.Front()
+	if c == nil {
+		return nil
+	}
 	q.queue.Remove(c)
 	return c.Value.(*chunkPayloadData)
 }
