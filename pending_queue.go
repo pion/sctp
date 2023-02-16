@@ -1,41 +1,43 @@
 package sctp
 
 import (
+	"container/list"
 	"errors"
 )
 
 // pendingBaseQueue
 
 type pendingBaseQueue struct {
-	queue []*chunkPayloadData
+	queue *list.List
 }
 
 func newPendingBaseQueue() *pendingBaseQueue {
-	return &pendingBaseQueue{queue: []*chunkPayloadData{}}
+	return &pendingBaseQueue{queue: list.New()}
 }
 
 func (q *pendingBaseQueue) push(c *chunkPayloadData) {
-	q.queue = append(q.queue, c)
+	q.queue.PushBack(c)
 }
 
 func (q *pendingBaseQueue) pop() *chunkPayloadData {
-	if len(q.queue) == 0 {
-		return nil
-	}
-	c := q.queue[0]
-	q.queue = q.queue[1:]
-	return c
+	c := q.queue.Front()
+	q.queue.Remove(c)
+	return c.Value.(*chunkPayloadData)
 }
 
 func (q *pendingBaseQueue) get(i int) *chunkPayloadData {
-	if len(q.queue) == 0 || i < 0 || i >= len(q.queue) {
+	if q.queue.Len() == 0 || i < 0 || i >= q.queue.Len() {
 		return nil
 	}
-	return q.queue[i]
+	c := q.queue.Front()
+	for j := 0; j < i; j++ {
+		c = c.Next()
+	}
+	return c.Value.(*chunkPayloadData)
 }
 
 func (q *pendingBaseQueue) size() int {
-	return len(q.queue)
+	return q.queue.Len()
 }
 
 // pendingQueue
