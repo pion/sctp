@@ -1033,7 +1033,7 @@ func (a *Association) RWND() uint32 {
 
 // SRTT returns the latest smoothed round-trip time (srrt)
 func (a *Association) SRTT() float64 {
-	return a.srtt.Load().(float64)
+	return a.srtt.Load().(float64) //nolint:forcetypeassert
 }
 
 func setSupportedExtensions(init *chunkInitCommon) {
