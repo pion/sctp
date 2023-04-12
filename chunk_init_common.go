@@ -90,11 +90,11 @@ func (i *chunkInitCommon) unmarshal(raw []byte) error {
 		if remaining > initOptionalVarHeaderLength {
 			pType, err := parseParamType(raw[offset:])
 			if err != nil {
-				return fmt.Errorf("%w: %v", ErrInitChunkParseParamTypeFailed, err)
+				return fmt.Errorf("%w: %v", ErrInitChunkParseParamTypeFailed, err) //nolint:errorlint
 			}
 			p, err := buildParam(pType, raw[offset:])
 			if err != nil {
-				return fmt.Errorf("%w: %v", ErrInitChunkUnmarshalParam, err)
+				return fmt.Errorf("%w: %v", ErrInitChunkUnmarshalParam, err) //nolint:errorlint
 			}
 			i.params = append(i.params, p)
 			padding := getPadding(p.length())
@@ -118,7 +118,7 @@ func (i *chunkInitCommon) marshal() ([]byte, error) {
 	for idx, p := range i.params {
 		pp, err := p.marshal()
 		if err != nil {
-			return nil, fmt.Errorf("%w: %v", ErrInitAckMarshalParam, err)
+			return nil, fmt.Errorf("%w: %v", ErrInitAckMarshalParam, err) //nolint:errorlint
 		}
 
 		out = append(out, pp...)

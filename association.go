@@ -117,22 +117,17 @@ func getAssociationStateString(a uint32) string {
 
 // Association represents an SCTP association
 // 13.2.  Parameters Necessary per Association (i.e., the TCB)
-// Peer        : Tag value to be sent in every packet and is received
-// Verification: in the INIT or INIT ACK chunk.
-// Tag         :
 //
-// My          : Tag expected in every inbound packet and sent in the
-// Verification: INIT or INIT ACK chunk.
+//	Peer        : Tag value to be sent in every packet and is received
+//	Verification: in the INIT or INIT ACK chunk.
+//	Tag         :
+//	State       : A state variable indicating what state the association
+//	            : is in, i.e., COOKIE-WAIT, COOKIE-ECHOED, ESTABLISHED,
+//	            : SHUTDOWN-PENDING, SHUTDOWN-SENT, SHUTDOWN-RECEIVED,
+//	            : SHUTDOWN-ACK-SENT.
 //
-// Tag         :
-// State       : A state variable indicating what state the association
-//
-//	: is in, i.e., COOKIE-WAIT, COOKIE-ECHOED, ESTABLISHED,
-//	: SHUTDOWN-PENDING, SHUTDOWN-SENT, SHUTDOWN-RECEIVED,
-//	: SHUTDOWN-ACK-SENT.
-//
-//	  Note: No "CLOSED" state is illustrated since if a
-//	  association is "CLOSED" its TCB SHOULD be removed.
+// Note: No "CLOSED" state is illustrated since if a
+// association is "CLOSED" its TCB SHOULD be removed.
 type Association struct {
 	bytesReceived uint64
 	bytesSent     uint64

@@ -16,15 +16,15 @@ SHUTDOWN COMPLETE) MAY be bundled with an ABORT, but they MUST be
 placed before the ABORT in the SCTP packet or they will be ignored by
 the receiver.
 
- 0                   1                   2                   3
- 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|   Type = 6    |Reserved     |T|           Length              |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                                                               |
-|                   zero or more Error Causes                   |
-|                                                               |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+	 0                   1                   2                   3
+	 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+	+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+	|   Type = 6    |Reserved     |T|           Length              |
+	+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+	|                                                               |
+	|                   zero or more Error Causes                   |
+	|                                                               |
+	+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 */
 type chunkAbort struct {
 	chunkHeader
@@ -54,7 +54,7 @@ func (a *chunkAbort) unmarshal(raw []byte) error {
 
 		e, err := buildErrorCause(raw[offset:])
 		if err != nil {
-			return fmt.Errorf("%w: %v", ErrBuildAbortChunkFailed, err)
+			return fmt.Errorf("%w: %v", ErrBuildAbortChunkFailed, err) //nolint:errorlint
 		}
 
 		offset += int(e.length())
