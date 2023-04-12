@@ -10,38 +10,38 @@ import (
 /*
 chunkPayloadData represents an SCTP Chunk of type DATA
 
- 0                   1                   2                   3
- 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|   Type = 0    | Reserved|U|B|E|    Length                     |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                              TSN                              |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|      Stream Identifier S      |   Stream Sequence Number n    |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                  Payload Protocol Identifier                  |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                                                               |
-|                 User Data (seq n of Stream S)                 |
-|                                                               |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-
+	 0                   1                   2                   3
+	 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+	+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+	|   Type = 0    | Reserved|U|B|E|    Length                     |
+	+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+	|                              TSN                              |
+	+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+	|      Stream Identifier S      |   Stream Sequence Number n    |
+	+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+	|                  Payload Protocol Identifier                  |
+	+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+	|                                                               |
+	|                 User Data (seq n of Stream S)                 |
+	|                                                               |
+	+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 
 An unfragmented user message shall have both the B and E bits set to
 '1'.  Setting both B and E bits to '0' indicates a middle fragment of
 a multi-fragment user message, as summarized in the following table:
-   B E                  Description
-============================================================
-|  1 0 | First piece of a fragmented user message          |
-+----------------------------------------------------------+
-|  0 0 | Middle piece of a fragmented user message         |
-+----------------------------------------------------------+
-|  0 1 | Last piece of a fragmented user message           |
-+----------------------------------------------------------+
-|  1 1 | Unfragmented message                              |
-============================================================
-|             Table 1: Fragment Description Flags          |
-============================================================
+
+	   B E                  Description
+	============================================================
+	|  1 0 | First piece of a fragmented user message          |
+	+----------------------------------------------------------+
+	|  0 0 | Middle piece of a fragmented user message         |
+	+----------------------------------------------------------+
+	|  0 1 | Last piece of a fragmented user message           |
+	+----------------------------------------------------------+
+	|  1 1 | Unfragmented message                              |
+	============================================================
+	|             Table 1: Fragment Description Flags          |
+	============================================================
 */
 type chunkPayloadData struct {
 	chunkHeader
