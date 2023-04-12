@@ -51,7 +51,7 @@ func (p *paramHeader) unmarshal(raw []byte) error {
 
 	typ, err := parseParamType(raw[0:])
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrParamHeaderParseFailed, err)
+		return fmt.Errorf("%w: %v", ErrParamHeaderParseFailed, err) //nolint:errorlint
 	}
 	p.typ = typ
 	p.raw = raw[paramHeaderLength:paramLengthPlusHeader]

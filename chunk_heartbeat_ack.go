@@ -15,16 +15,15 @@ HEARTBEAT chunk to which this ack is responding.
 
 The parameter field contains a variable-length opaque data structure.
 
- 0                   1                   2                   3
- 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|   Type = 5    | Chunk  Flags  |    Heartbeat Ack Length       |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                                                               |
-|            Heartbeat Information TLV (Variable-Length)        |
-|                                                               |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-
+	 0                   1                   2                   3
+	 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+	+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+	|   Type = 5    | Chunk  Flags  |    Heartbeat Ack Length       |
+	+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+	|                                                               |
+	|            Heartbeat Information TLV (Variable-Length)        |
+	|                                                               |
+	+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 
 Defined as a variable-length parameter using the format described
 in Section 3.2.1, i.e.:
@@ -46,7 +45,7 @@ var (
 	ErrHeartbeatAckMarshalParam     = errors.New("unable to marshal parameter for Heartbeat Ack")
 )
 
-func (h *chunkHeartbeatAck) unmarshal(raw []byte) error {
+func (h *chunkHeartbeatAck) unmarshal([]byte) error {
 	return ErrUnimplemented
 }
 
@@ -66,7 +65,7 @@ func (h *chunkHeartbeatAck) marshal() ([]byte, error) {
 	for idx, p := range h.params {
 		pp, err := p.marshal()
 		if err != nil {
-			return nil, fmt.Errorf("%w: %v", ErrHeartbeatAckMarshalParam, err)
+			return nil, fmt.Errorf("%w: %v", ErrHeartbeatAckMarshalParam, err) //nolint:errorlint
 		}
 
 		out = append(out, pp...)

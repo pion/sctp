@@ -1,3 +1,4 @@
+// Package main implements a simple ping-pong example
 package main
 
 import (
@@ -57,16 +58,16 @@ func (c *disconnectedPacketConn) RemoteAddr() net.Addr { //nolint:unused
 }
 
 // SetDeadline is a stub
-func (c *disconnectedPacketConn) SetDeadline(t time.Time) error { //nolint:unused
+func (c *disconnectedPacketConn) SetDeadline(time.Time) error { //nolint:unused
 	return nil
 }
 
 // SetReadDeadline is a stub
-func (c *disconnectedPacketConn) SetReadDeadline(t time.Time) error { //nolint:unused
+func (c *disconnectedPacketConn) SetReadDeadline(time.Time) error { //nolint:unused
 	return nil
 }
 
 // SetWriteDeadline is a stub
-func (c *disconnectedPacketConn) SetWriteDeadline(t time.Time) error { //nolint:unused
+func (c *disconnectedPacketConn) SetWriteDeadline(time.Time) error { //nolint:unused
 	return nil
 }
