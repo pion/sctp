@@ -775,7 +775,7 @@ func (a *Association) gatherOutboundSackPackets(rawPackets [][]byte) [][]byte {
 	if a.ackState == ackStateImmediate {
 		a.ackState = ackStateIdle
 		sack := a.createSelectiveAckChunk()
-		a.log.Debugf("[%s] sending SACK: %s", a.name, sack.String())
+		a.log.Debugf("[%s] sending SACK: %s", a.name, sack)
 		raw, err := a.createPacket([]chunk{sack}).marshal()
 		if err != nil {
 			a.log.Warnf("[%s] failed to serialize a SACK packet", a.name)
