@@ -10,14 +10,14 @@ chunkInitAck represents an SCTP Chunk of type INIT ACK
 
 See chunkInitCommon for the fixed headers
 
-Variable Parameters                  Status     Type Value
--------------------------------------------------------------
-State Cookie                        Mandatory   7
-IPv4 IP (Note 1)               Optional    5
-IPv6 IP (Note 1)               Optional    6
-Unrecognized Parameter              Optional    8
-Reserved for ECN Capable (Note 2)   Optional    32768 (0x8000)
-Host Name IP (Note 3)          Optional    11<Paste>
+	Variable Parameters                  Status     Type Value
+	-------------------------------------------------------------
+	State Cookie                        Mandatory   7
+	IPv4 IP (Note 1)               		Optional    5
+	IPv6 IP (Note 1)               		Optional    6
+	Unrecognized Parameter              Optional    8
+	Reserved for ECN Capable (Note 2)   Optional    32768 (0x8000)
+	Host Name IP (Note 3)          		Optional    11<Paste>
 */
 type chunkInitAck struct {
 	chunkHeader
@@ -56,7 +56,7 @@ func (i *chunkInitAck) unmarshal(raw []byte) error {
 	}
 
 	if err := i.chunkInitCommon.unmarshal(i.raw); err != nil {
-		return fmt.Errorf("%w: %v", ErrInitAckUnmarshalFailed, err)
+		return fmt.Errorf("%w: %v", ErrInitAckUnmarshalFailed, err) //nolint:errorlint
 	}
 
 	return nil
@@ -65,7 +65,7 @@ func (i *chunkInitAck) unmarshal(raw []byte) error {
 func (i *chunkInitAck) marshal() ([]byte, error) {
 	initShared, err := i.chunkInitCommon.marshal()
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInitCommonDataMarshalFailed, err)
+		return nil, fmt.Errorf("%w: %v", ErrInitCommonDataMarshalFailed, err) //nolint:errorlint
 	}
 
 	i.chunkHeader.typ = ctInitAck

@@ -15,16 +15,15 @@ the present association.
 The parameter field contains the Heartbeat Information, which is a
 variable-length opaque data structure understood only by the sender.
 
-
- 0                   1                   2                   3
- 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|   Type = 4    | Chunk  Flags  |      Heartbeat Length         |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                                                               |
-|            Heartbeat Information TLV (Variable-Length)        |
-|                                                               |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+	 0                   1                   2                   3
+	 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+	+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+	|   Type = 4    | Chunk  Flags  |      Heartbeat Length         |
+	+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+	|                                                               |
+	|            Heartbeat Information TLV (Variable-Length)        |
+	|                                                               |
+	+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 
 Defined as a variable-length parameter using the format described
 in Section 3.2.1, i.e.:
@@ -60,7 +59,7 @@ func (h *chunkHeartbeat) unmarshal(raw []byte) error {
 
 	pType, err := parseParamType(raw[chunkHeaderSize:])
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrParseParamTypeFailed, err)
+		return fmt.Errorf("%w: %v", ErrParseParamTypeFailed, err) //nolint:errorlint
 	}
 	if pType != heartbeatInfo {
 		return fmt.Errorf("%w: instead have %s", ErrHeartbeatParam, pType.String())
@@ -68,7 +67,7 @@ func (h *chunkHeartbeat) unmarshal(raw []byte) error {
 
 	p, err := buildParam(pType, raw[chunkHeaderSize:])
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrHeartbeatChunkUnmarshal, err)
+		return fmt.Errorf("%w: %v", ErrHeartbeatChunkUnmarshal, err) //nolint:errorlint
 	}
 	h.params = append(h.params, p)
 

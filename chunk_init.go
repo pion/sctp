@@ -10,14 +10,14 @@ Init represents an SCTP Chunk of type INIT
 
 See chunkInitCommon for the fixed headers
 
-Variable Parameters                  Status     Type Value
--------------------------------------------------------------
-IPv4 IP (Note 1)               Optional    5
-IPv6 IP (Note 1)               Optional    6
-Cookie Preservative                 Optional    9
-Reserved for ECN Capable (Note 2)   Optional    32768 (0x8000)
-Host Name IP (Note 3)          Optional    11
-Supported IP Types (Note 4)    Optional    12
+	Variable Parameters               	Status     	Type Value
+	-------------------------------------------------------------
+	IPv4 IP (Note 1)               		Optional    5
+	IPv6 IP (Note 1)               		Optional    6
+	Cookie Preservative                 Optional    9
+	Reserved for ECN Capable (Note 2)   Optional    32768 (0x8000)
+	Host Name IP (Note 3)          		Optional    11
+	Supported IP Types (Note 4)    		Optional    12
 */
 type chunkInit struct {
 	chunkHeader
@@ -56,7 +56,7 @@ func (i *chunkInit) unmarshal(raw []byte) error {
 	}
 
 	if err := i.chunkInitCommon.unmarshal(i.raw); err != nil {
-		return fmt.Errorf("%w: %v", ErrChunkTypeInitUnmarshalFailed, err)
+		return fmt.Errorf("%w: %v", ErrChunkTypeInitUnmarshalFailed, err) //nolint:errorlint
 	}
 
 	return nil
@@ -65,7 +65,7 @@ func (i *chunkInit) unmarshal(raw []byte) error {
 func (i *chunkInit) marshal() ([]byte, error) {
 	initShared, err := i.chunkInitCommon.marshal()
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrChunkTypeInitMarshalFailed, err)
+		return nil, fmt.Errorf("%w: %v", ErrChunkTypeInitMarshalFailed, err) //nolint:errorlint
 	}
 
 	i.chunkHeader.typ = ctInit

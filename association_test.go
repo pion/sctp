@@ -230,17 +230,17 @@ func (c *dumbConn) RemoteAddr() net.Addr {
 }
 
 // SetDeadline is a stub
-func (c *dumbConn) SetDeadline(t time.Time) error {
+func (c *dumbConn) SetDeadline(time.Time) error {
 	return nil
 }
 
 // SetReadDeadline is a stub
-func (c *dumbConn) SetReadDeadline(t time.Time) error {
+func (c *dumbConn) SetReadDeadline(time.Time) error {
 	return nil
 }
 
 // SetWriteDeadline is a stub
-func (c *dumbConn) SetWriteDeadline(t time.Time) error {
+func (c *dumbConn) SetWriteDeadline(time.Time) error {
 	return nil
 }
 
@@ -2288,6 +2288,11 @@ type fakeEchoConn struct {
 
 	bytesSent     uint64
 	bytesReceived uint64
+
+	mtu  uint32
+	cwnd uint32
+	rwnd uint32
+	srtt float64
 }
 
 func newFakeEchoConn(errClose error) *fakeEchoConn {
@@ -2295,6 +2300,9 @@ func newFakeEchoConn(errClose error) *fakeEchoConn {
 		echo:     make(chan []byte, 1),
 		done:     make(chan struct{}),
 		closed:   make(chan struct{}),
+		mtu:      initialMTU,
+		cwnd:     min32(4*initialMTU, max32(2*initialMTU, 4380)),
+		rwnd:     initialRecvBufSize,
 		errClose: errClose,
 	}
 }
@@ -2334,11 +2342,11 @@ func (c *fakeEchoConn) Close() error {
 	close(c.closed)
 	return c.errClose
 }
-func (c *fakeEchoConn) LocalAddr() net.Addr                { return nil }
-func (c *fakeEchoConn) RemoteAddr() net.Addr               { return nil }
-func (c *fakeEchoConn) SetDeadline(t time.Time) error      { return nil }
-func (c *fakeEchoConn) SetReadDeadline(t time.Time) error  { return nil }
-func (c *fakeEchoConn) SetWriteDeadline(t time.Time) error { return nil }
+func (c *fakeEchoConn) LocalAddr() net.Addr              { return nil }
+func (c *fakeEchoConn) RemoteAddr() net.Addr             { return nil }
+func (c *fakeEchoConn) SetDeadline(time.Time) error      { return nil }
+func (c *fakeEchoConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *fakeEchoConn) SetWriteDeadline(time.Time) error { return nil }
 
 func TestRoutineLeak(t *testing.T) {
 	loggerFactory := logging.NewDefaultLoggerFactory()
@@ -2410,6 +2418,10 @@ func TestStats(t *testing.T) {
 	defer conn.mu.Unlock()
 	assert.Equal(t, conn.bytesReceived, a.BytesReceived())
 	assert.Equal(t, conn.bytesSent, a.BytesSent())
+	assert.Equal(t, conn.mtu, a.MTU())
+	assert.Equal(t, conn.cwnd, a.CWND())
+	assert.Equal(t, conn.rwnd, a.RWND())
+	assert.Equal(t, conn.srtt, a.SRTT())
 }
 
 func TestAssocHandleInit(t *testing.T) {
