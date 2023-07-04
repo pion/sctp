@@ -1622,7 +1622,7 @@ func TestAssocT1CookieTimer(t *testing.T) {
 		// Drop all COOKIE-ECHO
 		br.Filter(0, func(raw []byte) bool {
 			p := &packet{}
-			err := p.unmarshal(raw)
+			err := p.unmarshal(true, raw)
 			if !assert.Nil(t, err, "failed to parse packet") {
 				return false // drop
 			}
@@ -2285,7 +2285,7 @@ func TestAssocAbort(t *testing.T) {
 			errorCauseHeader: errorCauseHeader{code: protocolViolation},
 		}},
 	}
-	packet, err := a0.createPacket([]chunk{abort}).marshal()
+	packet, err := a0.marshalPacket(a0.createPacket([]chunk{abort}))
 	assert.NoError(t, err)
 
 	_, _, err = establishSessionPair(br, a0, a1, si)
@@ -2964,7 +2964,7 @@ func TestAssociation_HandlePacketInCookieWaitState(t *testing.T) {
 				}()
 			}
 
-			packet, err := testCase.inputPacket.marshal()
+			packet, err := a.marshalPacket(testCase.inputPacket)
 			assert.NoError(t, err)
 			_, err = charlieConn.Write(packet)
 			assert.NoError(t, err)
@@ -3071,4 +3071,88 @@ loop:
 
 	assert.Error(t, err1, "context canceled")
 	assert.Error(t, err2, "context canceled")
+}
+
+type customLogger struct {
+	expectZeroChecksum bool
+	t                  *testing.T
+}
+
+func (c customLogger) Trace(string)                  {}
+func (c customLogger) Tracef(string, ...interface{}) {}
+func (c customLogger) Debug(string)                  {}
+func (c customLogger) Debugf(format string, args ...interface{}) {
+	if format == "[%s] useZeroChecksum=%t (on initAck)" {
+		assert.Equal(c.t, args[1], c.expectZeroChecksum)
+	}
+}
+func (c customLogger) Info(string)                   {}
+func (c customLogger) Infof(string, ...interface{})  {}
+func (c customLogger) Warn(string)                   {}
+func (c customLogger) Warnf(string, ...interface{})  {}
+func (c customLogger) Error(string)                  {}
+func (c customLogger) Errorf(string, ...interface{}) {}
+
+func (c customLogger) NewLogger(string) logging.LeveledLogger {
+	return c
+}
+
+func TestAssociation_ZeroChecksum(t *testing.T) {
+	checkGoroutineLeaks(t)
+
+	lim := test.TimeOut(time.Second * 10)
+	defer lim.Stop()
+
+	for _, testCase := range []struct {
+		clientZeroChecksum, serverZeroChecksum, expectChecksumEnabled bool
+	}{
+		{true, true, true},
+		{false, false, false},
+		{true, false, true},
+		{false, true, false},
+	} {
+		a1chan, a2chan := make(chan *Association), make(chan *Association)
+
+		udp1, udp2 := createUDPConnPair()
+
+		go func() {
+			a1, err := Client(Config{
+				NetConn:            udp1,
+				LoggerFactory:      &customLogger{testCase.expectChecksumEnabled, t},
+				EnableZeroChecksum: testCase.clientZeroChecksum,
+			})
+			assert.NoError(t, err)
+			a1chan <- a1
+		}()
+
+		go func() {
+			a2, err := Server(Config{
+				NetConn:            udp2,
+				LoggerFactory:      &customLogger{testCase.expectChecksumEnabled, t},
+				EnableZeroChecksum: testCase.serverZeroChecksum,
+			})
+			assert.NoError(t, err)
+			a2chan <- a2
+		}()
+
+		a1, a2 := <-a1chan, <-a2chan
+
+		writeStream, err := a1.OpenStream(1, PayloadTypeWebRTCString)
+		require.NoError(t, err)
+
+		readStream, err := a2.OpenStream(1, PayloadTypeWebRTCString)
+		require.NoError(t, err)
+
+		testData := []byte("test")
+		_, err = writeStream.Write(testData)
+		require.NoError(t, err)
+
+		buf := make([]byte, len(testData))
+		_, err = readStream.Read(buf)
+		assert.NoError(t, err)
+		assert.Equal(t, testData, buf)
+
+		require.NoError(t, a1.Close())
+		require.NoError(t, a2.Close())
+	}
 }
