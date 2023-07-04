@@ -76,7 +76,7 @@ func buildVNetEnv(cfg *vNetEnvConfig) (*vNetEnv, error) {
 		return func(c vnet.Chunk) bool {
 			var toDrop bool
 			p := &packet{}
-			if err2 := p.unmarshal(c.UserData()); err2 != nil {
+			if err2 := p.unmarshal(true, c.UserData()); err2 != nil {
 				panic(errSCTPPacketParse)
 			}
 

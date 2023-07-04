@@ -11,12 +11,12 @@ import (
 func TestPacketUnmarshal(t *testing.T) {
 	pkt := &packet{}
 
-	if err := pkt.unmarshal([]byte{}); err == nil {
+	if err := pkt.unmarshal(true, []byte{}); err == nil {
 		t.Errorf("Unmarshal should fail when a packet is too small to be SCTP")
 	}
 
 	headerOnly := []byte{0x13, 0x88, 0x13, 0x88, 0x00, 0x00, 0x00, 0x00, 0x06, 0xa9, 0x00, 0xe1}
-	err := pkt.unmarshal(headerOnly)
+	err := pkt.unmarshal(true, headerOnly)
 	switch {
 	case err != nil:
 		t.Errorf("Unmarshal failed for SCTP packet with no chunks: %v", err)
@@ -36,7 +36,7 @@ func TestPacketUnmarshal(t *testing.T) {
 		0x5d, 0x5b, 0x09, 0x47, 0xe2, 0x22, 0x06, 0x80, 0x04, 0x00, 0x06, 0x00, 0x01, 0x00, 0x00, 0x80, 0x03, 0x00, 0x06, 0x80, 0xc1, 0x00, 0x00,
 	}
 
-	if err := pkt.unmarshal(rawChunk); err != nil {
+	if err := pkt.unmarshal(true, rawChunk); err != nil {
 		t.Errorf("Unmarshal failed, has chunk: %v", err)
 	}
 }
@@ -45,11 +45,11 @@ func TestPacketMarshal(t *testing.T) {
 	pkt := &packet{}
 
 	headerOnly := []byte{0x13, 0x88, 0x13, 0x88, 0x00, 0x00, 0x00, 0x00, 0x06, 0xa9, 0x00, 0xe1}
-	if err := pkt.unmarshal(headerOnly); err != nil {
+	if err := pkt.unmarshal(true, headerOnly); err != nil {
 		t.Errorf("Unmarshal failed for SCTP packet with no chunks: %v", err)
 	}
 
-	headerOnlyMarshaled, err := pkt.marshal()
+	headerOnlyMarshaled, err := pkt.marshal(true)
 	if err != nil {
 		t.Errorf("Marshal failed for SCTP packet with no chunks: %v", err)
 	} else if !bytes.Equal(headerOnly, headerOnlyMarshaled) {
