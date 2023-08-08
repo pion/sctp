@@ -18,7 +18,7 @@ import (
 func main() {
 	addr := net.UDPAddr{
 		IP:   net.IPv4(127, 0, 0, 1),
-		Port: 5678,
+		Port: 9899,
 	}
 
 	conn, err := net.ListenUDP("udp", &addr)

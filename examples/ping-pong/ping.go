@@ -16,7 +16,7 @@ import (
 )
 
 func main() {
-	conn, err := net.Dial("udp", "127.0.0.1:5678")
+	conn, err := net.Dial("udp", "127.0.0.1:9899")
 	if err != nil {
 		log.Panic(err)
 	}
