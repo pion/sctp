@@ -202,6 +202,7 @@ type Association struct {
 	storedCookieEcho *chunkCookieEcho
 
 	streams              map[uint16]*Stream
+	streamsClosedErr     error
 	acceptCh             chan *Stream
 	readLoopCloseCh      chan struct{}
 	awakeWriteLoopCh     chan struct{}
@@ -516,6 +517,7 @@ func (a *Association) readLoop() {
 		for _, s := range a.streams {
 			a.unregisterStream(s, closeErr)
 		}
+		a.streamsClosedErr = closeErr
 		a.lock.Unlock()
 		close(a.acceptCh)
 		close(a.readLoopCloseCh)
@@ -555,9 +557,13 @@ func (a *Association) readLoop() {
 
 func (a *Association) writeLoop() {
 	a.log.Debugf("[%s] writeLoop entered", a.name)
-	defer a.log.Debugf("[%s] writeLoop exited", a.name)
+	defer func() {
+		if err := a.close(); err != nil {
+			a.log.Warnf("[%s] failed to close association: %v", a.name, err)
+		}
+		a.log.Debugf("[%s] writeLoop exited", a.name)
+	}()
 
-loop:
 	for {
 		rawPackets, ok := a.gatherOutbound()
 
@@ -568,28 +574,21 @@ loop:
 					a.log.Warnf("[%s] failed to write packets on netConn: %v", a.name, err)
 				}
 				a.log.Debugf("[%s] writeLoop ended", a.name)
-				break loop
+				return
 			}
 			atomic.AddUint64(&a.bytesSent, uint64(len(raw)))
 		}
 
 		if !ok {
-			if err := a.close(); err != nil {
-				a.log.Warnf("[%s] failed to close association: %v", a.name, err)
-			}
-
 			return
 		}
 
 		select {
 		case <-a.awakeWriteLoopCh:
 		case <-a.closeWriteLoopCh:
-			break loop
+			return
 		}
 	}
-
-	a.setState(closed)
-	a.closeAllTimers()
 }
 
 func (a *Association) awakeWriteLoop() {
@@ -1380,6 +1379,10 @@ func (a *Association) OpenStream(streamIdentifier uint16, defaultPayloadType Pay
 	a.lock.Lock()
 	defer a.lock.Unlock()
 
+	if a.streamsClosedErr != nil {
+		return nil, a.streamsClosedErr
+	}
+
 	return a.getOrCreateStream(streamIdentifier, false, defaultPayloadType), nil
 }
 
@@ -1394,6 +1397,11 @@ func (a *Association) AcceptStream() (*Stream, error) {
 
 // createStream creates a stream. The caller should hold the lock and check no stream exists for this id.
 func (a *Association) createStream(streamIdentifier uint16, accept bool) *Stream {
+	if a.streamsClosedErr != nil {
+		a.log.Debugf("[%s] dropped a new stream (streamsClosedErr: %s)", a.name, a.streamsClosedErr)
+		return nil
+	}
+
 	s := &Stream{
 		association:      a,
 		streamIdentifier: streamIdentifier,

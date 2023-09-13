@@ -2223,6 +2223,7 @@ func TestAssocReset(t *testing.T) {
 				_, _, err = s0.ReadSCTP(buf)
 				assert.Equal(t, io.EOF, err, "should be EOF")
 				doneCh <- err
+				return
 			}
 		}()
 
@@ -2341,6 +2342,11 @@ func (c *fakeEchoConn) Write(b []byte) (int, error) {
 func (c *fakeEchoConn) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	select {
+	case <-c.closed:
+		return c.errClose
+	default:
+	}
 	close(c.echo)
 	close(c.closed)
 	return c.errClose
@@ -2903,4 +2909,69 @@ func TestAssociation_Abort(t *testing.T) {
 	i, err = s21.Read(buf)
 	assert.Equal(t, i, 0, "expected no data read")
 	assert.Error(t, err, "User Initiated Abort: 1234", "expected abort reason")
+
+	// Ensure a1 has closed down as well (avoid goroutine leak).
+	select {
+	case <-a1.readLoopCloseCh:
+	case <-time.After(1 * time.Second):
+		assert.Fail(t, "timed out waiting for a1 read loop to close")
+	}
+
+	time.Sleep(time.Millisecond) // give readLoop a ms to completely exit.
+}
+
+func TestAssociation_OpenStreamAfterCloseMustNotHang(t *testing.T) {
+	runtime.GC()
+	n0 := runtime.NumGoroutine()
+
+	defer func() {
+		runtime.GC()
+		assert.Equal(t, n0, runtime.NumGoroutine(), "goroutine is leaked")
+	}()
+
+	a1, a2 := createAssocs(t)
+
+	s11, err := a1.OpenStream(1, PayloadTypeWebRTCString)
+	require.NoError(t, err)
+
+	startOpenStream := make(chan struct{})
+	go func() {
+		_ = a2.close() // trigger close of read loop.
+		close(startOpenStream)
+	}()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+
+		<-startOpenStream
+		s21, err := a2.OpenStream(1, PayloadTypeWebRTCString)
+		if err == nil {
+			// If stream opened, ensure ReadSCTP doesn't hang.
+			_, _, err = s21.ReadSCTP(make([]byte, 1))
+			assert.Error(t, err, "read did not exit with error")
+		}
+	}()
+
+	timeout := time.After(2 * time.Second)
+
+	select {
+	case <-done:
+	case <-timeout:
+		assert.Fail(t, "timed out waiting for a2.OpenStream test goroutine")
+	}
+
+	_ = s11.Close()
+	select {
+	case <-a1.readLoopCloseCh:
+	case <-timeout:
+		assert.Fail(t, "timed out waiting for a1 read loop to close")
+	}
+	select {
+	case <-a2.readLoopCloseCh:
+	case <-timeout:
+		assert.Fail(t, "timed out waiting for a2 read loop to close")
+	}
+
+	time.Sleep(time.Millisecond) // give readLoop a ms to completely exit.
 }
