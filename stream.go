@@ -175,6 +175,11 @@ func (s *Stream) SetReadDeadline(deadline time.Time) error {
 				t.Stop()
 				return
 			case <-t.C:
+				select {
+				case <-readTimeoutCancel:
+					return
+				default:
+				}
 				s.lock.Lock()
 				if s.readErr == nil {
 					s.readErr = ErrReadDeadlineExceeded
