@@ -2093,8 +2093,28 @@ func TestAssocDelayedAck(t *testing.T) {
 	})
 }
 
+func checkGoroutineLeaks(t *testing.T) {
+	// Get the count of goroutines at the start of the test.
+	initialGoroutines := runtime.NumGoroutine()
+	// Register a cleanup function to run after the test completes.
+	t.Cleanup(func() {
+		// Allow for up to 1 second for all goroutines to finish.
+		for i := 0; i < 10; i++ {
+			time.Sleep(100 * time.Millisecond)
+			if goroutines := runtime.NumGoroutine(); goroutines <= initialGoroutines {
+				return
+			}
+		}
+
+		// If we've gotten this far, not all goroutines have finished.
+		t.Errorf("leaked %d goroutines", runtime.NumGoroutine()-initialGoroutines)
+	})
+}
+
 func TestAssocReset(t *testing.T) {
 	t.Run("Close one way", func(t *testing.T) {
+		checkGoroutineLeaks(t)
+
 		lim := test.TimeOut(time.Second * 10)
 		defer lim.Stop()
 
@@ -2156,6 +2176,8 @@ func TestAssocReset(t *testing.T) {
 	})
 
 	t.Run("Close both ways", func(t *testing.T) {
+		checkGoroutineLeaks(t)
+
 		lim := test.TimeOut(time.Second * 10)
 		defer lim.Stop()
 
@@ -2173,6 +2195,7 @@ func TestAssocReset(t *testing.T) {
 
 		assert.Equal(t, 0, a0.bufferedAmount(), "incorrect bufferedAmount")
 
+		// send a message from s0 to s1
 		n, err := s0.WriteSCTP([]byte(msg), PayloadTypeWebRTCBinary)
 		if err != nil {
 			assert.FailNow(t, "failed due to earlier error")
@@ -2180,7 +2203,8 @@ func TestAssocReset(t *testing.T) {
 		assert.Equal(t, len(msg), n, "unexpected length of received data")
 		assert.Equal(t, len(msg), a0.bufferedAmount(), "incorrect bufferedAmount")
 
-		err = s0.Close() // send reset
+		// close s0 as soon as the message is sent
+		err = s0.Close()
 		if err != nil {
 			t.Error(err)
 		}
@@ -2213,7 +2237,8 @@ func TestAssocReset(t *testing.T) {
 			}
 		}
 
-		err = s1.Close() // send reset
+		// send reset from s1
+		err = s1.Close()
 		if err != nil {
 			t.Error(err)
 		}
@@ -2222,7 +2247,10 @@ func TestAssocReset(t *testing.T) {
 			for {
 				_, _, err = s0.ReadSCTP(buf)
 				assert.Equal(t, io.EOF, err, "should be EOF")
-				doneCh <- err
+				if err != nil {
+					doneCh <- err
+					return
+				}
 			}
 		}()
 
