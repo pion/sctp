@@ -254,10 +254,17 @@ func Server(config Config) (*Association, error) {
 
 // Client opens a SCTP stream over a conn
 func Client(config Config) (*Association, error) {
+	return createClientWithContext(context.Background(), config)
+}
+
+func createClientWithContext(ctx context.Context, config Config) (*Association, error) {
 	a := createAssociation(config)
 	a.init(true)
 
 	select {
+	case <-ctx.Done():
+		a.log.Errorf("[%s] client handshake canceled: state=%s", a.name, getAssociationStateString(a.getState()))
+		return nil, ctx.Err()
 	case err := <-a.handshakeCompletedCh:
 		if err != nil {
 			return nil, err
