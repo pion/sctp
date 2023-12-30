@@ -2382,8 +2382,7 @@ func (c *fakeEchoConn) SetWriteDeadline(time.Time) error { return nil }
 func TestRoutineLeak(t *testing.T) {
 	loggerFactory := logging.NewDefaultLoggerFactory()
 	t.Run("Close failed", func(t *testing.T) {
-		runtime.GC()
-		n0 := runtime.NumGoroutine()
+		checkGoroutineLeaks(t)
 
 		conn := newFakeEchoConn(io.EOF)
 		a, err := Client(Config{NetConn: conn, LoggerFactory: loggerFactory})
@@ -2403,12 +2402,9 @@ func TestRoutineLeak(t *testing.T) {
 			t.Errorf("closeWriteLoopCh is expected to be closed, but not")
 		}
 		_ = a
-		runtime.GC()
-		assert.Equal(t, n0, runtime.NumGoroutine(), "goroutine is leaked")
 	})
 	t.Run("Connection closed by remote host", func(t *testing.T) {
-		runtime.GC()
-		n0 := runtime.NumGoroutine()
+		checkGoroutineLeaks(t)
 
 		conn := newFakeEchoConn(nil)
 		a, err := Client(Config{NetConn: conn, LoggerFactory: loggerFactory})
@@ -2429,8 +2425,6 @@ func TestRoutineLeak(t *testing.T) {
 		default:
 			t.Errorf("closeWriteLoopCh is expected to be closed, but not")
 		}
-		runtime.GC()
-		assert.Equal(t, n0, runtime.NumGoroutine(), "goroutine is leaked")
 	})
 }
 
@@ -2673,13 +2667,7 @@ loop:
 }
 
 func TestAssociation_Shutdown(t *testing.T) {
-	runtime.GC()
-	n0 := runtime.NumGoroutine()
-
-	defer func() {
-		runtime.GC()
-		assert.Equal(t, n0, runtime.NumGoroutine(), "goroutine is leaked")
-	}()
+	checkGoroutineLeaks(t)
 
 	a1, a2, err := createAssocs(t)
 	require.NoError(t, err)
@@ -2717,13 +2705,7 @@ func TestAssociation_Shutdown(t *testing.T) {
 }
 
 func TestAssociation_ShutdownDuringWrite(t *testing.T) {
-	runtime.GC()
-	n0 := runtime.NumGoroutine()
-
-	defer func() {
-		runtime.GC()
-		assert.Equal(t, n0, runtime.NumGoroutine(), "goroutine is leaked")
-	}()
+	checkGoroutineLeaks(t)
 
 	a1, a2, err := createAssocs(t)
 	require.NoError(t, err)
@@ -2934,13 +2916,7 @@ func TestAssociation_HandlePacketInCookieWaitState(t *testing.T) {
 }
 
 func TestAssociation_Abort(t *testing.T) {
-	runtime.GC()
-	n0 := runtime.NumGoroutine()
-
-	defer func() {
-		runtime.GC()
-		assert.Equal(t, n0, runtime.NumGoroutine(), "goroutine is leaked")
-	}()
+	checkGoroutineLeaks(t)
 
 	a1, a2, err := createAssocs(t)
 	require.NoError(t, err)
