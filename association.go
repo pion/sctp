@@ -264,6 +264,7 @@ func createClientWithContext(ctx context.Context, config Config) (*Association, 
 	select {
 	case <-ctx.Done():
 		a.log.Errorf("[%s] client handshake canceled: state=%s", a.name, getAssociationStateString(a.getState()))
+		a.Close() // nolint:errcheck,gosec
 		return nil, ctx.Err()
 	case err := <-a.handshakeCompletedCh:
 		if err != nil {
