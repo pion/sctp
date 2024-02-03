@@ -9,21 +9,17 @@ In this example, there are 2 types of peers: **ping** and **pong**.
 
 ## Instruction
 
-### Build ping and pong
-
-```sh
-make
-```
+### Run ping and pong
 
 ### Run pong
 
 ```sh
-./pong
+go run github.com/pion/sctp/examples/ping-pong/pong@latest
 ```
 
 
 ### Run ping
 
 ```sh
-./ping
+go run github.com/pion/sctp/examples/ping-pong/ping@latest
 ```
