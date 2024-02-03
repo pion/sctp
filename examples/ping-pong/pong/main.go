@@ -1,8 +1,6 @@
 // SPDX-FileCopyrightText: 2023 The Pion community <https://pion.ly>
 // SPDX-License-Identifier: MIT
 
-// +build pong
-
 package main
 
 import (
@@ -25,7 +23,11 @@ func main() {
 	if err != nil {
 		log.Panic(err)
 	}
-	defer conn.Close()
+	defer func() {
+		if closeErr := conn.Close(); closeErr != nil {
+			log.Panic(closeErr)
+		}
+	}()
 	fmt.Println("created a udp listener")
 
 	config := sctp.Config{
@@ -36,14 +38,22 @@ func main() {
 	if err != nil {
 		log.Panic(err)
 	}
-	defer a.Close()
-	fmt.Println("created a server")
+	defer func() {
+		if closeErr := a.Close(); closeErr != nil {
+			log.Panic(closeErr)
+		}
+	}()
+	defer fmt.Println("created a server")
 
 	stream, err := a.AcceptStream()
 	if err != nil {
 		log.Panic(err)
 	}
-	defer stream.Close()
+	defer func() {
+		if closeErr := stream.Close(); closeErr != nil {
+			log.Panic(closeErr)
+		}
+	}()
 	fmt.Println("accepted a stream")
 
 	// set unordered = true and 10ms treshold for dropping packets
@@ -58,7 +68,11 @@ func main() {
 		pingMsg := string(buff)
 		fmt.Println("received:", pingMsg)
 
-		fmt.Sscanf(pingMsg, "ping %d", &pongSeqNum)
+		_, err = fmt.Sscanf(pingMsg, "ping %d", &pongSeqNum)
+		if err != nil {
+			log.Panic(err)
+		}
+
 		pongMsg := fmt.Sprintf("pong %d", pongSeqNum)
 		_, err = stream.Write([]byte(pongMsg))
 		if err != nil {

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"time"
 
 	"github.com/pion/logging"
 	"github.com/pion/sctp"
@@ -22,7 +23,7 @@ func main() {
 	}
 	defer func() {
 		if closeErr := conn.Close(); closeErr != nil {
-			panic(err)
+			log.Panic(err)
 		}
 	}()
 	fmt.Println("dialed udp ponger")
@@ -37,7 +38,7 @@ func main() {
 	}
 	defer func() {
 		if closeErr := a.Close(); closeErr != nil {
-			panic(err)
+			log.Panic(err)
 		}
 	}()
 	fmt.Println("created a client")
@@ -48,7 +49,7 @@ func main() {
 	}
 	defer func() {
 		if closeErr := stream.Close(); closeErr != nil {
-			panic(err)
+			log.Panic(err)
 		}
 	}()
 	fmt.Println("opened a stream")
@@ -66,6 +67,7 @@ func main() {
 			}
 			fmt.Println("sent:", pingMsg)
 			pingSeqNum++
+			time.Sleep(time.Second)
 		}
 	}()
 
