@@ -22,9 +22,10 @@ func TestParamECNCapabale_Success(t *testing.T) {
 			testParamECNCapabale(),
 			&paramECNCapable{
 				paramHeader: paramHeader{
-					typ: ecnCapable,
-					len: 4,
-					raw: []byte{},
+					typ:                ecnCapable,
+					unrecognizedAction: paramHeaderUnrecognizedActionSkip,
+					len:                4,
+					raw:                []byte{},
 				},
 			},
 		},

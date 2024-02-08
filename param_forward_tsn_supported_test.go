@@ -22,9 +22,10 @@ func TestParamForwardTSNSupported_Success(t *testing.T) {
 			testParamForwardTSNSupported(),
 			&paramForwardTSNSupported{
 				paramHeader: paramHeader{
-					typ: forwardTSNSupp,
-					len: 4,
-					raw: []byte{},
+					typ:                forwardTSNSupp,
+					len:                4,
+					unrecognizedAction: paramHeaderUnrecognizedActionSkipAndReport,
+					raw:                []byte{},
 				},
 			},
 		},
