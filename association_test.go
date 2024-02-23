@@ -3156,3 +3156,19 @@ func TestAssociation_ZeroChecksum(t *testing.T) {
 		require.NoError(t, a2.Close())
 	}
 }
+
+func TestDataChunkBundlingIntoPacket(t *testing.T) {
+	a := &Association{mtu: initialMTU}
+	chunks := make([]*chunkPayloadData, 300)
+	for i := 0; i < 300; i++ {
+		chunks[i] = &chunkPayloadData{userData: []byte{1}}
+	}
+	packets := a.bundleDataChunksIntoPackets(chunks)
+	for _, p := range packets {
+		raw, err := p.marshal(false)
+		require.NoError(t, err)
+		if len(raw) > int(initialMTU) {
+			t.Error("packet too long: ", len(raw))
+		}
+	}
+}
