@@ -126,8 +126,8 @@ func (p *packet) unmarshal(doChecksum bool, raw []byte) error {
 		offset += chunkHeaderSize + c.valueLength() + chunkValuePadding
 	}
 
-	if doChecksum {
-		theirChecksum := binary.LittleEndian.Uint32(raw[8:])
+	theirChecksum := binary.LittleEndian.Uint32(raw[8:])
+	if theirChecksum != 0 || doChecksum {
 		ourChecksum := generatePacketChecksum(raw)
 		if theirChecksum != ourChecksum {
 			return fmt.Errorf("%w: %d ours: %d", ErrChecksumMismatch, theirChecksum, ourChecksum)
