@@ -6,9 +6,11 @@ package sctp
 import (
 	"fmt"
 	"sort"
+	"sync"
 )
 
 type payloadQueue struct {
+	mu       sync.RWMutex
 	chunkMap map[uint32]*chunkPayloadData
 	sorted   []uint32
 	dupTSN   []uint32
@@ -19,7 +21,15 @@ func newPayloadQueue() *payloadQueue {
 	return &payloadQueue{chunkMap: map[uint32]*chunkPayloadData{}}
 }
 
+//nolint:unused
 func (q *payloadQueue) updateSortedKeys() {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	q.updateSortedKeysWithLock()
+}
+
+func (q *payloadQueue) updateSortedKeysWithLock() {
 	if q.sorted != nil {
 		return
 	}
@@ -37,6 +47,9 @@ func (q *payloadQueue) updateSortedKeys() {
 }
 
 func (q *payloadQueue) canPush(p *chunkPayloadData, cumulativeTSN uint32) bool {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+
 	_, ok := q.chunkMap[p.tsn]
 	if ok || sna32LTE(p.tsn, cumulativeTSN) {
 		return false
@@ -45,6 +58,9 @@ func (q *payloadQueue) canPush(p *chunkPayloadData, cumulativeTSN uint32) bool {
 }
 
 func (q *payloadQueue) pushNoCheck(p *chunkPayloadData) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
 	q.chunkMap[p.tsn] = p
 	q.nBytes += len(p.userData)
 	q.sorted = nil
@@ -54,6 +70,9 @@ func (q *payloadQueue) pushNoCheck(p *chunkPayloadData) {
 // older than our cumulativeTSN marker, it will be recored as duplications,
 // which can later be retrieved using popDuplicates.
 func (q *payloadQueue) push(p *chunkPayloadData, cumulativeTSN uint32) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
 	_, ok := q.chunkMap[p.tsn]
 	if ok || sna32LTE(p.tsn, cumulativeTSN) {
 		// Found the packet, log in dups
@@ -69,7 +88,10 @@ func (q *payloadQueue) push(p *chunkPayloadData, cumulativeTSN uint32) bool {
 
 // pop pops only if the oldest chunk's TSN matches the given TSN.
 func (q *payloadQueue) pop(tsn uint32) (*chunkPayloadData, bool) {
-	q.updateSortedKeys()
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	q.updateSortedKeysWithLock()
 
 	if len(q.chunkMap) > 0 && tsn == q.sorted[0] {
 		q.sorted = q.sorted[1:]
@@ -85,25 +107,34 @@ func (q *payloadQueue) pop(tsn uint32) (*chunkPayloadData, bool) {
 
 // get returns reference to chunkPayloadData with the given TSN value.
 func (q *payloadQueue) get(tsn uint32) (*chunkPayloadData, bool) {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+
 	c, ok := q.chunkMap[tsn]
 	return c, ok
 }
 
 // popDuplicates returns an array of TSN values that were found duplicate.
 func (q *payloadQueue) popDuplicates() []uint32 {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
 	dups := q.dupTSN
 	q.dupTSN = []uint32{}
 	return dups
 }
 
 func (q *payloadQueue) getGapAckBlocks(cumulativeTSN uint32) (gapAckBlocks []gapAckBlock) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
 	var b gapAckBlock
 
 	if len(q.chunkMap) == 0 {
 		return []gapAckBlock{}
 	}
 
-	q.updateSortedKeys()
+	q.updateSortedKeysWithLock()
 
 	for i, tsn := range q.sorted {
 		if i == 0 {
@@ -155,7 +186,10 @@ func (q *payloadQueue) markAsAcked(tsn uint32) int {
 }
 
 func (q *payloadQueue) getLastTSNReceived() (uint32, bool) {
-	q.updateSortedKeys()
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	q.updateSortedKeysWithLock()
 
 	qlen := len(q.sorted)
 	if qlen == 0 {
@@ -165,6 +199,9 @@ func (q *payloadQueue) getLastTSNReceived() (uint32, bool) {
 }
 
 func (q *payloadQueue) markAllToRetrasmit() {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
 	for _, c := range q.chunkMap {
 		if c.acked || c.abandoned() {
 			continue
@@ -174,9 +211,15 @@ func (q *payloadQueue) markAllToRetrasmit() {
 }
 
 func (q *payloadQueue) getNumBytes() int {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+
 	return q.nBytes
 }
 
 func (q *payloadQueue) size() int {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+
 	return len(q.chunkMap)
 }

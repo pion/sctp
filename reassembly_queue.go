@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"sort"
+	"sync"
 	"sync/atomic"
 )
 
@@ -100,6 +101,7 @@ func (set *chunkSet) isComplete() bool {
 }
 
 type reassemblyQueue struct {
+	mu              sync.RWMutex
 	si              uint16
 	nextSSN         uint16 // expected SSN for next ordered chunk
 	ordered         []*chunkSet
@@ -125,6 +127,9 @@ func newReassemblyQueue(si uint16) *reassemblyQueue {
 }
 
 func (r *reassemblyQueue) push(chunk *chunkPayloadData) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	var cset *chunkSet
 
 	if chunk.streamIdentifier != r.si {
@@ -156,10 +161,19 @@ func (r *reassemblyQueue) push(chunk *chunkPayloadData) bool {
 	}
 
 	// Check if a chunkSet with the SSN already exists
-	for _, set := range r.ordered {
-		if set.ssn == chunk.streamSequenceNumber {
-			cset = set
-			break
+	if chunk.isFragmented() {
+		for _, set := range r.ordered {
+			// nolint:godox
+			// TODO: add caution around SSN wrapping here... this helps a little bit
+			// by ensuring we don't add to an unfragmented cset (1 chunk).
+
+			// nolint:godox
+			// TODO: this slice can get pretty big; it may be worth maintaining a map
+			// for O(1) lookups at the cost of 2x memory.
+			if set.ssn == chunk.streamSequenceNumber && set.chunks[0].isFragmented() {
+				cset = set
+				break
+			}
 		}
 	}
 
@@ -177,6 +191,7 @@ func (r *reassemblyQueue) push(chunk *chunkPayloadData) bool {
 	return cset.push(chunk)
 }
 
+// assumes lock is held
 func (r *reassemblyQueue) findCompleteUnorderedChunkSet() *chunkSet {
 	startIdx := -1
 	nChunks := 0
@@ -235,6 +250,9 @@ func (r *reassemblyQueue) findCompleteUnorderedChunkSet() *chunkSet {
 }
 
 func (r *reassemblyQueue) isReadable() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
 	// Check unordered first
 	if len(r.unordered) > 0 {
 		// The chunk sets in r.unordered should all be complete.
@@ -254,6 +272,9 @@ func (r *reassemblyQueue) isReadable() bool {
 }
 
 func (r *reassemblyQueue) read(buf []byte) (int, PayloadProtocolIdentifier, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	var cset *chunkSet
 	// Check unordered first
 	switch {
@@ -297,6 +318,9 @@ func (r *reassemblyQueue) read(buf []byte) (int, PayloadProtocolIdentifier, erro
 }
 
 func (r *reassemblyQueue) forwardTSNForOrdered(lastSSN uint16) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	// Use lastSSN to locate a chunkSet then remove it if the set has
 	// not been complete
 	keep := []*chunkSet{}
@@ -321,6 +345,9 @@ func (r *reassemblyQueue) forwardTSNForOrdered(lastSSN uint16) {
 }
 
 func (r *reassemblyQueue) forwardTSNForUnordered(newCumulativeTSN uint32) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	// Remove all fragments in the unordered sets that contains chunks
 	// equal to or older than `newCumulativeTSN`.
 	// We know all sets in the r.unordered are complete ones.

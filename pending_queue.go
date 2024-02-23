@@ -5,11 +5,14 @@ package sctp
 
 import (
 	"errors"
+	"sync"
+	"sync/atomic"
 )
 
 // pendingBaseQueue
 
 type pendingBaseQueue struct {
+	mu    sync.RWMutex
 	queue []*chunkPayloadData
 }
 
@@ -18,10 +21,14 @@ func newPendingBaseQueue() *pendingBaseQueue {
 }
 
 func (q *pendingBaseQueue) push(c *chunkPayloadData) {
+	q.mu.Lock()
 	q.queue = append(q.queue, c)
+	q.mu.Unlock()
 }
 
 func (q *pendingBaseQueue) pop() *chunkPayloadData {
+	q.mu.Lock()
+	defer q.mu.Unlock()
 	if len(q.queue) == 0 {
 		return nil
 	}
@@ -31,6 +38,8 @@ func (q *pendingBaseQueue) pop() *chunkPayloadData {
 }
 
 func (q *pendingBaseQueue) get(i int) *chunkPayloadData {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
 	if len(q.queue) == 0 || i < 0 || i >= len(q.queue) {
 		return nil
 	}
@@ -38,6 +47,8 @@ func (q *pendingBaseQueue) get(i int) *chunkPayloadData {
 }
 
 func (q *pendingBaseQueue) size() int {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
 	return len(q.queue)
 }
 
@@ -46,7 +57,7 @@ func (q *pendingBaseQueue) size() int {
 type pendingQueue struct {
 	unorderedQueue      *pendingBaseQueue
 	orderedQueue        *pendingBaseQueue
-	nBytes              int
+	nBytes              uint64
 	selected            bool
 	unorderedIsSelected bool
 }
@@ -71,7 +82,7 @@ func (q *pendingQueue) push(c *chunkPayloadData) {
 	} else {
 		q.orderedQueue.push(c)
 	}
-	q.nBytes += len(c.userData)
+	atomic.AddUint64(&q.nBytes, uint64(len(c.userData)))
 }
 
 func (q *pendingQueue) peek() *chunkPayloadData {
@@ -129,12 +140,12 @@ func (q *pendingQueue) pop(c *chunkPayloadData) error {
 			}
 		}
 	}
-	q.nBytes -= len(c.userData)
+	atomic.AddUint64(&q.nBytes, -uint64(len(c.userData)))
 	return nil
 }
 
 func (q *pendingQueue) getNumBytes() int {
-	return q.nBytes
+	return int(atomic.LoadUint64(&q.nBytes))
 }
 
 func (q *pendingQueue) size() int {
