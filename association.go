@@ -2238,14 +2238,15 @@ func (a *Association) bundleDataChunksIntoPackets(chunks []*chunkPayloadData) []
 		//   single packet.  Furthermore, DATA chunks being retransmitted MAY be
 		//   bundled with new DATA chunks, as long as the resulting packet size
 		//   does not exceed the path MTU.
-		if bytesInPacket+len(c.userData) > int(a.MTU()) {
+		chunkSizeInPacket := int(dataChunkHeaderSize) + len(c.userData)
+		chunkSizeInPacket += getPadding(chunkSizeInPacket)
+		if bytesInPacket+chunkSizeInPacket > int(a.MTU()) {
 			packets = append(packets, a.createPacket(chunksToSend))
 			chunksToSend = []chunk{}
 			bytesInPacket = int(commonHeaderSize)
 		}
-
 		chunksToSend = append(chunksToSend, c)
-		bytesInPacket += int(dataChunkHeaderSize) + len(c.userData)
+		bytesInPacket += chunkSizeInPacket
 	}
 
 	if len(chunksToSend) > 0 {
