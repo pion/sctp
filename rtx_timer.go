@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	rtoInitial     float64 = 3.0 * 1000  // msec
+	rtoInitial     float64 = 1.0 * 1000  // msec
 	rtoMin         float64 = 1.0 * 1000  // msec
 	rtoMax         float64 = 60.0 * 1000 // msec
 	rtoAlpha       float64 = 0.125
