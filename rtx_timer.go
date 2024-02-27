@@ -41,7 +41,6 @@ func newRTOManager(rtoMax float64) *rtoManager {
 		mgr.rtoMax = defaultRTOMax
 	}
 	return &mgr
-
 }
 
 // setNewRTT takes a newly measured RTT then adjust the RTO in msec.
@@ -122,8 +121,8 @@ type stopTimerLoop func()
 // if maxRetrans is set to 0, it will keep retransmitting until stop() is called.
 // (it will never make onRetransmissionFailure() callback.
 func newRTXTimer(id int, observer rtxTimerObserver, maxRetrans uint,
-	rtoMax float64) *rtxTimer {
-
+	rtoMax float64,
+) *rtxTimer {
 	timer := rtxTimer{
 		id:         id,
 		observer:   observer,
