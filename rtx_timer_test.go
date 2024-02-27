@@ -14,7 +14,7 @@ import (
 
 func TestRTOManager(t *testing.T) {
 	t.Run("initial values", func(t *testing.T) {
-		m := newRTOManager()
+		m := newRTOManager(0)
 		assert.Equal(t, rtoInitial, m.rto, "should be rtoInitial")
 		assert.Equal(t, rtoInitial, m.getRTO(), "should be rtoInitial")
 		assert.Equal(t, float64(0), m.srtt, "should be 0")
@@ -23,7 +23,7 @@ func TestRTOManager(t *testing.T) {
 
 	t.Run("RTO calculation (small RTT)", func(t *testing.T) {
 		var rto float64
-		m := newRTOManager()
+		m := newRTOManager(0)
 		exp := []int32{
 			1800,
 			1500,
@@ -41,7 +41,7 @@ func TestRTOManager(t *testing.T) {
 
 	t.Run("RTO calculation (large RTT)", func(t *testing.T) {
 		var rto float64
-		m := newRTOManager()
+		m := newRTOManager(0)
 		exp := []int32{
 			60000, // capped at RTO.Max
 			60000, // capped at RTO.Max
@@ -59,22 +59,33 @@ func TestRTOManager(t *testing.T) {
 
 	t.Run("calculateNextTimeout", func(t *testing.T) {
 		var rto float64
-		rto = calculateNextTimeout(1.0, 0)
+		rto = calculateNextTimeout(1.0, 0, defaultRTOMax)
 		assert.Equal(t, float64(1), rto, "should match")
-		rto = calculateNextTimeout(1.0, 1)
+		rto = calculateNextTimeout(1.0, 1, defaultRTOMax)
 		assert.Equal(t, float64(2), rto, "should match")
-		rto = calculateNextTimeout(1.0, 2)
+		rto = calculateNextTimeout(1.0, 2, defaultRTOMax)
 		assert.Equal(t, float64(4), rto, "should match")
-		rto = calculateNextTimeout(1.0, 30)
+		rto = calculateNextTimeout(1.0, 30, defaultRTOMax)
 		assert.Equal(t, float64(60000), rto, "should match")
-		rto = calculateNextTimeout(1.0, 63)
+		rto = calculateNextTimeout(1.0, 63, defaultRTOMax)
 		assert.Equal(t, float64(60000), rto, "should match")
-		rto = calculateNextTimeout(1.0, 64)
+		rto = calculateNextTimeout(1.0, 64, defaultRTOMax)
 		assert.Equal(t, float64(60000), rto, "should match")
+	})
+	t.Run("calculateNextTimeout w/ RTOMax", func(t *testing.T) {
+		var rto float64
+		rto = calculateNextTimeout(1.0, 0, 2.0)
+		assert.Equal(t, 1.0, rto, "should match")
+		rto = calculateNextTimeout(1.5, 1, 2.0)
+		assert.Equal(t, 2.0, rto, "should match")
+		rto = calculateNextTimeout(1.0, 10, 2.0)
+		assert.Equal(t, 2.0, rto, "should match")
+		rto = calculateNextTimeout(1.0, 31, 1000.0)
+		assert.Equal(t, 1000.0, rto, "should match")
 	})
 
 	t.Run("reset", func(t *testing.T) {
-		m := newRTOManager()
+		m := newRTOManager(0)
 		for i := 0; i < 10; i++ {
 			m.setNewRTT(200)
 		}
@@ -118,7 +129,7 @@ func TestRtxTimer(t *testing.T) {
 				assert.Equal(t, timerID, id, "unexpted timer ID: %d", id)
 			},
 			onRtxFailure: func(id int) {},
-		}, pathMaxRetrans)
+		}, pathMaxRetrans, 0)
 
 		assert.False(t, rt.isRunning(), "should not be running")
 
@@ -144,7 +155,7 @@ func TestRtxTimer(t *testing.T) {
 				assert.Equal(t, timerID, id, "unexpted timer ID: %d", id)
 			},
 			onRtxFailure: func(id int) {},
-		}, pathMaxRetrans)
+		}, pathMaxRetrans, 0)
 
 		interval := float64(30.0)
 		ok := rt.start(interval)
@@ -171,7 +182,7 @@ func TestRtxTimer(t *testing.T) {
 				assert.Equal(t, timerID, id, "unexpted timer ID: %d", id)
 			},
 			onRtxFailure: func(id int) {},
-		}, pathMaxRetrans)
+		}, pathMaxRetrans, 0)
 
 		interval := float64(30.0)
 		ok := rt.start(interval)
@@ -194,7 +205,7 @@ func TestRtxTimer(t *testing.T) {
 				assert.Equal(t, timerID, id, "unexpted timer ID: %d", id)
 			},
 			onRtxFailure: func(id int) {},
-		}, pathMaxRetrans)
+		}, pathMaxRetrans, 0)
 
 		interval := float64(30.0)
 		ok := rt.start(interval)
@@ -221,7 +232,7 @@ func TestRtxTimer(t *testing.T) {
 				assert.Equal(t, timerID, id, "unexpted timer ID: %d", id)
 			},
 			onRtxFailure: func(id int) {},
-		}, pathMaxRetrans)
+		}, pathMaxRetrans, 0)
 
 		for i := 0; i < 1000; i++ {
 			ok := rt.start(30)
@@ -253,7 +264,7 @@ func TestRtxTimer(t *testing.T) {
 				t.Logf("onRtxFailure: elapsed=%.03f\n", elapsed)
 				doneCh <- true
 			},
-		}, pathMaxRetrans)
+		}, pathMaxRetrans, 0)
 
 		// RTO(msec) Total(msec)
 		//  10          10    1st RTO
@@ -297,7 +308,7 @@ func TestRtxTimer(t *testing.T) {
 			onRtxFailure: func(id int) {
 				assert.Fail(t, "timer should not fail")
 			},
-		}, 0)
+		}, 0, 0)
 
 		// RTO(msec) Total(msec)
 		//  10          10    1st RTO
@@ -332,7 +343,7 @@ func TestRtxTimer(t *testing.T) {
 				doneCh <- true
 			},
 			onRtxFailure: func(id int) {},
-		}, pathMaxRetrans)
+		}, pathMaxRetrans, 0)
 
 		for i := 0; i < 10; i++ {
 			rt.stop()
@@ -355,7 +366,7 @@ func TestRtxTimer(t *testing.T) {
 				rtoCount++
 			},
 			onRtxFailure: func(id int) {},
-		}, pathMaxRetrans)
+		}, pathMaxRetrans, 0)
 
 		ok := rt.start(20)
 		assert.True(t, ok, "should be accepted")
