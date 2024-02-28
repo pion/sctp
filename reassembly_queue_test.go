@@ -464,6 +464,44 @@ func TestReassemblyQueue(t *testing.T) {
 		assert.Equal(t, 1, len(rq.unorderedChunks), "there should be one chunk kept")
 		assert.Equal(t, 3, rq.getNumBytes(), "num bytes mismatch")
 	})
+
+	t.Run("fragmented and unfragmented chunks with the same ssn", func(t *testing.T) {
+		rq := newReassemblyQueue(0)
+
+		orgPpi := PayloadTypeWebRTCBinary
+
+		var chunk *chunkPayloadData
+		var complete bool
+		var ssn uint16 = 6
+
+		chunk = &chunkPayloadData{
+			payloadType:          orgPpi,
+			tsn:                  12,
+			beginningFragment:    true,
+			endingFragment:       true,
+			streamSequenceNumber: ssn,
+			userData:             []byte("DEF"),
+		}
+
+		complete = rq.push(chunk)
+		assert.True(t, complete, "chunk set should be complete")
+		assert.Equal(t, 3, rq.getNumBytes(), "num bytes mismatch")
+
+		chunk = &chunkPayloadData{
+			payloadType:          orgPpi,
+			beginningFragment:    true,
+			tsn:                  11,
+			streamSequenceNumber: ssn,
+			userData:             []byte("ABC"),
+		}
+
+		complete = rq.push(chunk)
+		assert.False(t, complete, "chunk set should not be complete yet")
+		assert.Equal(t, 6, rq.getNumBytes(), "num bytes mismatch")
+
+		assert.Equal(t, 2, len(rq.ordered), "there should be two chunks")
+		assert.Equal(t, 6, rq.getNumBytes(), "num bytes mismatch")
+	})
 }
 
 func TestChunkSet(t *testing.T) {

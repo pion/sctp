@@ -265,7 +265,10 @@ func createNewAssociationPair(br *test.Bridge, ackMode int, recvBufSize uint32) 
 		handshake0Ch <- true
 	}()
 	go func() {
-		a1, err1 = Client(Config{
+		// we could have two "client"s here but it's more
+		// standard to have one peer starting initialization and
+		// another waiting for the initialization to be requested (INIT).
+		a1, err1 = Server(Config{
 			Name:                 "a1",
 			NetConn:              br.GetConn1(),
 			MaxReceiveBufferSize: recvBufSize,
