@@ -237,6 +237,8 @@ type Config struct {
 	MaxMessageSize       uint32
 	EnableZeroChecksum   bool
 	LoggerFactory        logging.LoggerFactory
+	// RTOMax is the maximum retransmission timeout in milliseconds
+	RTOMax float64
 }
 
 // Server accepts a SCTP stream over a conn
@@ -312,7 +314,7 @@ func createAssociation(config Config) *Association {
 		myNextRSN:               tsn,
 		minTSN2MeasureRTT:       tsn,
 		state:                   closed,
-		rtoMgr:                  newRTOManager(),
+		rtoMgr:                  newRTOManager(config.RTOMax),
 		streams:                 map[uint16]*Stream{},
 		reconfigs:               map[uint32]*chunkReconfig{},
 		reconfigRequests:        map[uint32]*paramOutgoingResetRequest{},
@@ -340,11 +342,11 @@ func createAssociation(config Config) *Association {
 		a.name, a.CWND(), a.ssthresh, a.inflightQueue.getNumBytes())
 
 	a.srtt.Store(float64(0))
-	a.t1Init = newRTXTimer(timerT1Init, a, maxInitRetrans)
-	a.t1Cookie = newRTXTimer(timerT1Cookie, a, maxInitRetrans)
-	a.t2Shutdown = newRTXTimer(timerT2Shutdown, a, noMaxRetrans) // retransmit forever
-	a.t3RTX = newRTXTimer(timerT3RTX, a, noMaxRetrans)           // retransmit forever
-	a.tReconfig = newRTXTimer(timerReconfig, a, noMaxRetrans)    // retransmit forever
+	a.t1Init = newRTXTimer(timerT1Init, a, maxInitRetrans, config.RTOMax)
+	a.t1Cookie = newRTXTimer(timerT1Cookie, a, maxInitRetrans, config.RTOMax)
+	a.t2Shutdown = newRTXTimer(timerT2Shutdown, a, noMaxRetrans, config.RTOMax)
+	a.t3RTX = newRTXTimer(timerT3RTX, a, noMaxRetrans, config.RTOMax)
+	a.tReconfig = newRTXTimer(timerReconfig, a, noMaxRetrans, config.RTOMax)
 	a.ackTimer = newAckTimer(a)
 
 	return a
@@ -643,22 +645,9 @@ func (a *Association) marshalPacket(p *packet) ([]byte, error) {
 
 func (a *Association) unmarshalPacket(raw []byte) (*packet, error) {
 	p := &packet{}
-	if !a.useZeroChecksum {
-		if err := p.unmarshal(true, raw); err != nil {
-			return nil, err
-		}
-		return p, nil
-	}
-
-	if err := p.unmarshal(false, raw); err != nil {
+	if err := p.unmarshal(!a.useZeroChecksum, raw); err != nil {
 		return nil, err
 	}
-	if chunkMandatoryChecksum(p.chunks) {
-		if err := p.unmarshal(true, raw); err != nil {
-			return nil, err
-		}
-	}
-
 	return p, nil
 }
 
