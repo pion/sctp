@@ -476,8 +476,11 @@ func (a *Association) Close() error {
 	<-a.readLoopCloseCh
 
 	a.log.Debugf("[%s] association closed", a.name)
+	a.log.Debugf("[%s] stats nPackets (in) : %d", a.name, a.stats.getNumPacketsReceived())
+	a.log.Debugf("[%s] stats nPackets (out) : %d", a.name, a.stats.getNumPacketsSent())
 	a.log.Debugf("[%s] stats nDATAs (in) : %d", a.name, a.stats.getNumDATAs())
-	a.log.Debugf("[%s] stats nSACKs (in) : %d", a.name, a.stats.getNumSACKs())
+	a.log.Debugf("[%s] stats nSACKs (in) : %d", a.name, a.stats.getNumSACKsReceived())
+	a.log.Debugf("[%s] stats nSACKs (out) : %d\n", a.name, a.stats.getNumSACKsSent())
 	a.log.Debugf("[%s] stats nT3Timeouts : %d", a.name, a.stats.getNumT3Timeouts())
 	a.log.Debugf("[%s] stats nAckTimeouts: %d", a.name, a.stats.getNumAckTimeouts())
 	a.log.Debugf("[%s] stats nFastRetrans: %d", a.name, a.stats.getNumFastRetrans())
@@ -547,7 +550,7 @@ func (a *Association) readLoop() {
 
 		a.log.Debugf("[%s] association closed", a.name)
 		a.log.Debugf("[%s] stats nDATAs (in) : %d", a.name, a.stats.getNumDATAs())
-		a.log.Debugf("[%s] stats nSACKs (in) : %d", a.name, a.stats.getNumSACKs())
+		a.log.Debugf("[%s] stats nSACKs (in) : %d", a.name, a.stats.getNumSACKsReceived())
 		a.log.Debugf("[%s] stats nT3Timeouts : %d", a.name, a.stats.getNumT3Timeouts())
 		a.log.Debugf("[%s] stats nAckTimeouts: %d", a.name, a.stats.getNumAckTimeouts())
 		a.log.Debugf("[%s] stats nFastRetrans: %d", a.name, a.stats.getNumFastRetrans())
@@ -596,6 +599,7 @@ loop:
 				break loop
 			}
 			atomic.AddUint64(&a.bytesSent, uint64(len(raw)))
+			a.stats.incPacketsSent()
 		}
 
 		if !ok {
@@ -670,7 +674,7 @@ func (a *Association) handleInbound(raw []byte) error {
 		return nil
 	}
 
-	a.handleChunkStart()
+	a.handleChunksStart()
 
 	for _, c := range p.chunks {
 		if err := a.handleChunk(p, c); err != nil {
@@ -678,7 +682,7 @@ func (a *Association) handleInbound(raw []byte) error {
 		}
 	}
 
-	a.handleChunkEnd()
+	a.handleChunksEnd()
 
 	return nil
 }
@@ -825,6 +829,7 @@ func (a *Association) gatherOutboundSackPackets(rawPackets [][]byte) [][]byte {
 	if a.ackState == ackStateImmediate {
 		a.ackState = ackStateIdle
 		sack := a.createSelectiveAckChunk()
+		a.stats.incSACKsSent()
 		a.log.Debugf("[%s] sending SACK: %s", a.name, sack)
 		raw, err := a.marshalPacket(a.createPacket([]chunk{sack}))
 		if err != nil {
@@ -1718,7 +1723,7 @@ func (a *Association) handleSack(d *chunkSelectiveAck) error {
 		return nil
 	}
 
-	a.stats.incSACKs()
+	a.stats.incSACKsReceived()
 
 	if sna32GT(a.cumulativeTSNAckPoint, d.cumulativeTSNAck) {
 		// RFC 4960 sec 6.2.1.  Processing a Received SACK
@@ -2377,15 +2382,17 @@ func pack(p *packet) []*packet {
 	return []*packet{p}
 }
 
-func (a *Association) handleChunkStart() {
+func (a *Association) handleChunksStart() {
 	a.lock.Lock()
 	defer a.lock.Unlock()
+
+	a.stats.incPacketsReceived()
 
 	a.delayedAckTriggered = false
 	a.immediateAckTriggered = false
 }
 
-func (a *Association) handleChunkEnd() {
+func (a *Association) handleChunksEnd() {
 	a.lock.Lock()
 	defer a.lock.Unlock()
 
