@@ -411,8 +411,8 @@ func establishSessionPair(br *test.Bridge, a0, a1 *Association, si uint16) (*Str
 }
 
 func TestAssocReliable(t *testing.T) {
-	// sbuf - small enogh not to be fragmented
-	//        large enobh not to be bundled
+	// sbuf - small enough not to be fragmented
+	//        large enough not to be bundled
 	sbuf := make([]byte, 1000)
 	for i := 0; i < len(sbuf); i++ {
 		sbuf[i] = byte(i & 0xff)
@@ -420,8 +420,8 @@ func TestAssocReliable(t *testing.T) {
 	rand.Seed(time.Now().UnixNano())
 	rand.Shuffle(len(sbuf), func(i, j int) { sbuf[i], sbuf[j] = sbuf[j], sbuf[i] })
 
-	// sbufL - large enogh to be fragmented into two chunks and each chunks are
-	//        large enobh not to be bundled
+	// sbufL - large enough to be fragmented into two chunks and each chunks are
+	//        large enough not to be bundled
 	sbufL := make([]byte, 2000)
 	for i := 0; i < len(sbufL); i++ {
 		sbufL[i] = byte(i & 0xff)
@@ -821,8 +821,8 @@ func TestAssocReliable(t *testing.T) {
 
 func TestAssocUnreliable(t *testing.T) {
 	// sbuf1, sbuf2:
-	//    large enogh to be fragmented into two chunks and each chunks are
-	//    large enobh not to be bundled
+	//    large enough to be fragmented into two chunks and each chunks are
+	//    large enough not to be bundled
 	sbuf1 := make([]byte, 2000)
 	sbuf2 := make([]byte, 2000)
 	for i := 0; i < len(sbuf1); i++ {
@@ -836,8 +836,8 @@ func TestAssocUnreliable(t *testing.T) {
 	rand.Seed(time.Now().UnixNano())
 	rand.Shuffle(len(sbuf2), func(i, j int) { sbuf2[i], sbuf2[j] = sbuf2[j], sbuf2[i] })
 
-	// sbuf - small enogh not to be fragmented
-	//        large enobh not to be bundled
+	// sbuf - small enough not to be fragmented
+	//        large enough not to be bundled
 	sbuf := make([]byte, 1000)
 	for i := 0; i < len(sbuf); i++ {
 		sbuf[i] = byte(i & 0xff)
@@ -1752,7 +1752,7 @@ func TestAssocT3RtxTimer(t *testing.T) {
 }
 
 func TestAssocCongestionControl(t *testing.T) {
-	// sbuf - large enobh not to be bundled
+	// sbuf - large enough not to be bundled
 	sbuf := make([]byte, 1000)
 	for i := 0; i < len(sbuf); i++ {
 		sbuf[i] = byte(i & 0xcc)

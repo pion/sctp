@@ -10,14 +10,28 @@ import (
 )
 
 const (
-	rtoInitial     float64 = 1.0 * 1000  // msec
-	rtoMin         float64 = 1.0 * 1000  // msec
-	defaultRTOMax  float64 = 60.0 * 1000 // msec
-	rtoAlpha       float64 = 0.125
-	rtoBeta        float64 = 0.25
-	maxInitRetrans uint    = 8
-	pathMaxRetrans uint    = 5
-	noMaxRetrans   uint    = 0
+	// RTO.Initial in msec
+	rtoInitial float64 = 1.0 * 1000
+
+	// RTO.Min in msec
+	rtoMin float64 = 1.0 * 1000
+
+	// RTO.Max in msec
+	defaultRTOMax float64 = 60.0 * 1000
+
+	// RTO.Alpha
+	rtoAlpha float64 = 0.125
+
+	// RTO.Beta
+	rtoBeta float64 = 0.25
+
+	// Max.Init.Retransmits:
+	maxInitRetrans uint = 8
+
+	// Path.Max.Retrans
+	pathMaxRetrans uint = 5
+
+	noMaxRetrans uint = 0
 )
 
 // rtoManager manages Rtx timeout values.
