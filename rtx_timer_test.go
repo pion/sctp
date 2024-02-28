@@ -120,7 +120,7 @@ func TestRtxTimer(t *testing.T) {
 		timerID := 0
 		var nCbs int32
 		rt := newRTXTimer(timerID, &testTimerObserver{
-			onRTO: func(id int, nRtos uint) {
+			onRTO: func(id int, _ uint) {
 				atomic.AddInt32(&nCbs, 1)
 				// 30 : 1 (30)
 				// 60 : 2 (90)
@@ -128,7 +128,7 @@ func TestRtxTimer(t *testing.T) {
 				// 240: 4 (550) <== expected in 650 msec
 				assert.Equal(t, timerID, id, "unexpted timer ID: %d", id)
 			},
-			onRtxFailure: func(id int) {},
+			onRtxFailure: func(_ int) {},
 		}, pathMaxRetrans, 0)
 
 		assert.False(t, rt.isRunning(), "should not be running")
@@ -150,11 +150,11 @@ func TestRtxTimer(t *testing.T) {
 		var nCbs int32
 
 		rt := newRTXTimer(timerID, &testTimerObserver{
-			onRTO: func(id int, nRtos uint) {
+			onRTO: func(id int, _ uint) {
 				atomic.AddInt32(&nCbs, 1)
 				assert.Equal(t, timerID, id, "unexpted timer ID: %d", id)
 			},
-			onRtxFailure: func(id int) {},
+			onRtxFailure: func(_ int) {},
 		}, pathMaxRetrans, 0)
 
 		interval := float64(30.0)
@@ -177,11 +177,11 @@ func TestRtxTimer(t *testing.T) {
 		var nCbs int32
 
 		rt := newRTXTimer(timerID, &testTimerObserver{
-			onRTO: func(id int, nRtos uint) {
+			onRTO: func(id int, _ uint) {
 				atomic.AddInt32(&nCbs, 1)
 				assert.Equal(t, timerID, id, "unexpted timer ID: %d", id)
 			},
-			onRtxFailure: func(id int) {},
+			onRtxFailure: func(_ int) {},
 		}, pathMaxRetrans, 0)
 
 		interval := float64(30.0)
@@ -200,11 +200,11 @@ func TestRtxTimer(t *testing.T) {
 		timerID := 1
 		var nCbs int32
 		rt := newRTXTimer(timerID, &testTimerObserver{
-			onRTO: func(id int, nRtos uint) {
+			onRTO: func(id int, _ uint) {
 				atomic.AddInt32(&nCbs, 1)
 				assert.Equal(t, timerID, id, "unexpted timer ID: %d", id)
 			},
-			onRtxFailure: func(id int) {},
+			onRtxFailure: func(_ int) {},
 		}, pathMaxRetrans, 0)
 
 		interval := float64(30.0)
@@ -226,12 +226,12 @@ func TestRtxTimer(t *testing.T) {
 		timerID := 2
 		var nCbs int32
 		rt := newRTXTimer(timerID, &testTimerObserver{
-			onRTO: func(id int, nRtos uint) {
+			onRTO: func(id int, _ uint) {
 				atomic.AddInt32(&nCbs, 1)
 				t.Log("onRTO() called")
 				assert.Equal(t, timerID, id, "unexpted timer ID: %d", id)
 			},
-			onRtxFailure: func(id int) {},
+			onRtxFailure: func(_ int) {},
 		}, pathMaxRetrans, 0)
 
 		for i := 0; i < 1000; i++ {
@@ -305,7 +305,7 @@ func TestRtxTimer(t *testing.T) {
 					doneCh <- true
 				}
 			},
-			onRtxFailure: func(id int) {
+			onRtxFailure: func(_ int) {
 				assert.Fail(t, "timer should not fail")
 			},
 		}, 0, 0)
@@ -338,11 +338,11 @@ func TestRtxTimer(t *testing.T) {
 		doneCh := make(chan bool)
 
 		rt := newRTXTimer(timerID, &testTimerObserver{
-			onRTO: func(id int, nRtos uint) {
+			onRTO: func(id int, _ uint) {
 				assert.Equal(t, timerID, id, "unexpted timer ID: %d", id)
 				doneCh <- true
 			},
-			onRtxFailure: func(id int) {},
+			onRtxFailure: func(_ int) {},
 		}, pathMaxRetrans, 0)
 
 		for i := 0; i < 10; i++ {
@@ -362,10 +362,10 @@ func TestRtxTimer(t *testing.T) {
 		var rtoCount int
 		timerID := 6
 		rt := newRTXTimer(timerID, &testTimerObserver{
-			onRTO: func(id int, nRtos uint) {
+			onRTO: func(_ int, _ uint) {
 				rtoCount++
 			},
-			onRtxFailure: func(id int) {},
+			onRtxFailure: func(_ int) {},
 		}, pathMaxRetrans, 0)
 
 		ok := rt.start(20)

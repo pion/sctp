@@ -202,8 +202,8 @@ func testRwndFull(t *testing.T, unordered bool) {
 		defer close(serverShutDown)
 		// connected UDP conn for server
 		conn, err := venv.net0.DialUDP("udp4",
-			&net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 5000},
-			&net.UDPAddr{IP: net.ParseIP("2.2.2.2"), Port: 5000},
+			&net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: defaultSCTPSrcDstPort},
+			&net.UDPAddr{IP: net.ParseIP("2.2.2.2"), Port: defaultSCTPSrcDstPort},
 		)
 		if !assert.NoError(t, err, "should succeed") {
 			return
@@ -277,8 +277,8 @@ func testRwndFull(t *testing.T, unordered bool) {
 		defer close(clientShutDown)
 		// connected UDP conn for client
 		conn, err := venv.net1.DialUDP("udp4",
-			&net.UDPAddr{IP: net.ParseIP("2.2.2.2"), Port: 5000},
-			&net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 5000},
+			&net.UDPAddr{IP: net.ParseIP("2.2.2.2"), Port: defaultSCTPSrcDstPort},
+			&net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: defaultSCTPSrcDstPort},
 		)
 		if !assert.NoError(t, err, "should succeed") {
 			return
@@ -435,8 +435,8 @@ func TestStreamClose(t *testing.T) {
 			defer close(serverShutDown)
 			// connected UDP conn for server
 			conn, innerErr := venv.net0.DialUDP("udp4",
-				&net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 5000},
-				&net.UDPAddr{IP: net.ParseIP("2.2.2.2"), Port: 5000},
+				&net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: defaultSCTPSrcDstPort},
+				&net.UDPAddr{IP: net.ParseIP("2.2.2.2"), Port: defaultSCTPSrcDstPort},
 			)
 			if !assert.NoError(t, innerErr, "should succeed") {
 				return
@@ -485,8 +485,8 @@ func TestStreamClose(t *testing.T) {
 
 		// connected UDP conn for client
 		conn, err := venv.net1.DialUDP("udp4",
-			&net.UDPAddr{IP: net.ParseIP("2.2.2.2"), Port: 5000},
-			&net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 5000},
+			&net.UDPAddr{IP: net.ParseIP("2.2.2.2"), Port: defaultSCTPSrcDstPort},
+			&net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: defaultSCTPSrcDstPort},
 		)
 		if !assert.NoError(t, err, "should succeed") {
 			return
@@ -620,8 +620,8 @@ func TestCookieEchoRetransmission(t *testing.T) {
 		defer close(serverShutDown)
 		// connected UDP conn for server
 		conn, err := venv.net0.DialUDP("udp4",
-			&net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 5000},
-			&net.UDPAddr{IP: net.ParseIP("2.2.2.2"), Port: 5000},
+			&net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: defaultSCTPSrcDstPort},
+			&net.UDPAddr{IP: net.ParseIP("2.2.2.2"), Port: defaultSCTPSrcDstPort},
 		)
 		if !assert.NoError(t, err, "should succeed") {
 			return
@@ -650,8 +650,8 @@ func TestCookieEchoRetransmission(t *testing.T) {
 		defer close(clientShutDown)
 		// connected UDP conn for client
 		conn, err := venv.net1.DialUDP("udp4",
-			&net.UDPAddr{IP: net.ParseIP("2.2.2.2"), Port: 5000},
-			&net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 5000},
+			&net.UDPAddr{IP: net.ParseIP("2.2.2.2"), Port: defaultSCTPSrcDstPort},
+			&net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: defaultSCTPSrcDstPort},
 		)
 		if !assert.NoError(t, err, "should succeed") {
 			return
