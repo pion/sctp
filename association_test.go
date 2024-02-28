@@ -1823,7 +1823,7 @@ func TestAssocCongestionControl(t *testing.T) {
 		assert.False(t, inFastRecovery, "should not be in fast-recovery")
 
 		t.Logf("nDATAs      : %d\n", a1.stats.getNumDATAs())
-		t.Logf("nSACKs      : %d\n", a0.stats.getNumSACKs())
+		t.Logf("nSACKs      : %d\n", a0.stats.getNumSACKsReceived())
 		t.Logf("nAckTimeouts: %d\n", a1.stats.getNumAckTimeouts())
 		t.Logf("nFastRetrans: %d\n", a0.stats.getNumFastRetrans())
 
@@ -1907,11 +1907,11 @@ func TestAssocCongestionControl(t *testing.T) {
 		assert.Equal(t, 0, s1.getNumBytesInReassemblyQueue(), "reassembly queue should be empty")
 
 		t.Logf("nDATAs      : %d\n", a1.stats.getNumDATAs())
-		t.Logf("nSACKs      : %d\n", a0.stats.getNumSACKs())
+		t.Logf("nSACKs      : %d\n", a0.stats.getNumSACKsReceived())
 		t.Logf("nT3Timeouts : %d\n", a0.stats.getNumT3Timeouts())
 
 		assert.Equal(t, uint64(nPacketsToSend), a1.stats.getNumDATAs(), "packet count mismatch")
-		assert.True(t, a0.stats.getNumSACKs() <= nPacketsToSend/2, "too many sacks")
+		assert.True(t, a0.stats.getNumSACKsReceived() <= nPacketsToSend/2, "too many sacks")
 		assert.Equal(t, uint64(0), a0.stats.getNumT3Timeouts(), "should be no retransmit")
 
 		closeAssociationPair(br, a0, a1)
@@ -2002,7 +2002,7 @@ func TestAssocCongestionControl(t *testing.T) {
 		assert.Equal(t, 0, s1.getNumBytesInReassemblyQueue(), "reassembly queue should be empty")
 
 		t.Logf("nDATAs      : %d\n", a1.stats.getNumDATAs())
-		t.Logf("nSACKs      : %d\n", a0.stats.getNumSACKs())
+		t.Logf("nSACKs      : %d\n", a0.stats.getNumSACKsReceived())
 		t.Logf("nAckTimeouts: %d\n", a1.stats.getNumAckTimeouts())
 
 		closeAssociationPair(br, a0, a1)
@@ -2081,11 +2081,11 @@ func TestAssocDelayedAck(t *testing.T) {
 		assert.Equal(t, 0, s1.getNumBytesInReassemblyQueue(), "reassembly queue should be empty")
 
 		t.Logf("nDATAs      : %d\n", a1.stats.getNumDATAs())
-		t.Logf("nSACKs      : %d\n", a0.stats.getNumSACKs())
+		t.Logf("nSACKs      : %d\n", a0.stats.getNumSACKsReceived())
 		t.Logf("nAckTimeouts: %d\n", a1.stats.getNumAckTimeouts())
 
 		assert.Equal(t, uint64(1), a1.stats.getNumDATAs(), "DATA chunk count mismatch")
-		assert.Equal(t, a0.stats.getNumSACKs(), a1.stats.getNumDATAs(), "sack count should be equal to the number of data chunks")
+		assert.Equal(t, a0.stats.getNumSACKsReceived(), a1.stats.getNumDATAs(), "sack count should be equal to the number of data chunks")
 		assert.Equal(t, uint64(1), a1.stats.getNumAckTimeouts(), "ackTimeout count mismatch")
 		assert.Equal(t, uint64(0), a0.stats.getNumT3Timeouts(), "should be no retransmit")
 
