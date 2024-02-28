@@ -257,6 +257,7 @@ func createNewAssociationPair(br *test.Bridge, ackMode int, recvBufSize uint32) 
 
 	go func() {
 		a0, err0 = Client(Config{
+			Name:                 "a0",
 			NetConn:              br.GetConn0(),
 			MaxReceiveBufferSize: recvBufSize,
 			LoggerFactory:        loggerFactory,
@@ -265,6 +266,7 @@ func createNewAssociationPair(br *test.Bridge, ackMode int, recvBufSize uint32) 
 	}()
 	go func() {
 		a1, err1 = Client(Config{
+			Name:                 "a1",
 			NetConn:              br.GetConn1(),
 			MaxReceiveBufferSize: recvBufSize,
 			LoggerFactory:        loggerFactory,

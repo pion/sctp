@@ -232,6 +232,7 @@ type Association struct {
 // Config collects the arguments to createAssociation construction into
 // a single structure
 type Config struct {
+	Name                 string
 	NetConn              net.Conn
 	MaxReceiveBufferSize uint32
 	MaxMessageSize       uint32
@@ -329,9 +330,12 @@ func createAssociation(config Config) *Association {
 		silentError:             ErrSilentlyDiscard,
 		stats:                   &associationStats{},
 		log:                     config.LoggerFactory.NewLogger("sctp"),
+		name:                    config.Name,
 	}
 
-	a.name = fmt.Sprintf("%p", a)
+	if a.name == "" {
+		a.name = fmt.Sprintf("%p", a)
+	}
 
 	// RFC 4690 Sec 7.2.1
 	//  o  The initial cwnd before DATA transmission or after a sufficiently
