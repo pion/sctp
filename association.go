@@ -378,7 +378,6 @@ func (a *Association) init(isClient bool) {
 	go a.writeLoop()
 
 	if isClient {
-		a.setState(cookieWait)
 		init := &chunkInit{}
 		init.initialTSN = a.myNextTSN
 		init.numOutboundStreams = a.myMaxNumOutboundStreams
@@ -398,6 +397,11 @@ func (a *Association) init(isClient bool) {
 			a.log.Errorf("[%s] failed to send init: %s", a.name, err.Error())
 		}
 
+		// After sending the INIT chunk, "A" starts the T1-init timer and enters the COOKIE-WAIT state.
+		// Note: ideally we would set state after the timer starts but since we don't do this in an atomic
+		// set + timer-start, it's safer to just set the state first so that we don't have a timer expiration
+		// race.
+		a.setState(cookieWait)
 		a.t1Init.start(a.rtoMgr.getRTO())
 	}
 }
@@ -1175,6 +1179,7 @@ func (a *Association) handleInit(p *packet, i *chunkInit) ([]*packet, error) {
 	outbound.destinationPort = a.destinationPort
 
 	initAck := &chunkInitAck{}
+	a.log.Debug("sending INIT ACK")
 
 	initAck.initialTSN = a.myNextTSN
 	initAck.numOutboundStreams = a.myMaxNumOutboundStreams
