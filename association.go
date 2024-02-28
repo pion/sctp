@@ -19,6 +19,12 @@ import (
 	"github.com/pion/randutil"
 )
 
+// Port 5000 shows up in examples for SDPs used by WebRTC. Since this implementation
+// assumes it will be used by DTLS over UDP, the port is only meaningful for de-multiplexing
+// but more-so verification.
+// Example usage: https://www.rfc-editor.org/rfc/rfc8841.html#section-13.1-2
+const defaultSCTPSrcDstPort = 5000
+
 // Use global random generator to properly seed by crypto grade random.
 var globalMathRandomGenerator = randutil.NewMathRandomGenerator() // nolint:gochecknoglobals
 
@@ -393,8 +399,8 @@ func (a *Association) sendInit() error {
 
 	outbound := &packet{}
 	outbound.verificationTag = a.peerVerificationTag
-	a.sourcePort = 5000      // Spec??
-	a.destinationPort = 5000 // Spec??
+	a.sourcePort = defaultSCTPSrcDstPort
+	a.destinationPort = defaultSCTPSrcDstPort
 	outbound.sourcePort = a.sourcePort
 	outbound.destinationPort = a.destinationPort
 

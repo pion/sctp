@@ -20,10 +20,10 @@ func TestPacketUnmarshal(t *testing.T) {
 	switch {
 	case err != nil:
 		t.Errorf("Unmarshal failed for SCTP packet with no chunks: %v", err)
-	case pkt.sourcePort != 5000:
-		t.Errorf("Unmarshal passed for SCTP packet, but got incorrect source port exp: %d act: %d", 5000, pkt.sourcePort)
-	case pkt.destinationPort != 5000:
-		t.Errorf("Unmarshal passed for SCTP packet, but got incorrect destination port exp: %d act: %d", 5000, pkt.destinationPort)
+	case pkt.sourcePort != defaultSCTPSrcDstPort:
+		t.Errorf("Unmarshal passed for SCTP packet, but got incorrect source port exp: %d act: %d", defaultSCTPSrcDstPort, pkt.sourcePort)
+	case pkt.destinationPort != defaultSCTPSrcDstPort:
+		t.Errorf("Unmarshal passed for SCTP packet, but got incorrect destination port exp: %d act: %d", defaultSCTPSrcDstPort, pkt.destinationPort)
 	case pkt.verificationTag != 0:
 		t.Errorf("Unmarshal passed for SCTP packet, but got incorrect verification tag exp: %d act: %d", 0, pkt.verificationTag)
 	}
