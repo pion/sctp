@@ -137,6 +137,8 @@ func getAssociationStateString(a uint32) string {
 //
 // Note: No "CLOSED" state is illustrated since if a
 // association is "CLOSED" its TCB SHOULD be removed.
+// Note: By nature of an Association being constructed with one net.Conn,
+// it is not a multi-home supporting implementation of SCTP.
 type Association struct {
 	bytesReceived uint64
 	bytesSent     uint64
@@ -304,11 +306,17 @@ func createAssociation(config Config) *Association {
 
 	tsn := globalMathRandomGenerator.Uint32()
 	a := &Association{
-		netConn:                 config.NetConn,
-		maxReceiveBufferSize:    maxReceiveBufferSize,
-		maxMessageSize:          maxMessageSize,
+		netConn:              config.NetConn,
+		maxReceiveBufferSize: maxReceiveBufferSize,
+		maxMessageSize:       maxMessageSize,
+
+		// These two max values have us not need to follow
+		// 5.1.1 where this peer may be incapable of supporting
+		// the requested amount of outbound streams from the other
+		// peer.
 		myMaxNumOutboundStreams: math.MaxUint16,
 		myMaxNumInboundStreams:  math.MaxUint16,
+
 		payloadQueue:            newPayloadQueue(),
 		inflightQueue:           newPayloadQueue(),
 		pendingQueue:            newPendingQueue(),
@@ -1123,7 +1131,10 @@ func (a *Association) handleInit(p *packet, i *chunkInit) ([]*packet, error) {
 		return nil, fmt.Errorf("%w: %s", ErrHandleInitState, getAssociationStateString(state))
 	}
 
-	// Should we be setting any of these permanently until we've ACKed further?
+	// NOTE: Setting these prior to a reception of a COOKIE ECHO chunk containing
+	// our cookie is not compliant with https://www.rfc-editor.org/rfc/rfc9260#section-5.1-2.2.3.
+	// It makes us more vulnerable to resource attacks, albeit minimally so.
+	//  https://www.rfc-editor.org/rfc/rfc9260#sec_handle_stream_parameters
 	a.myMaxNumInboundStreams = min16(i.numInboundStreams, a.myMaxNumInboundStreams)
 	a.myMaxNumOutboundStreams = min16(i.numOutboundStreams, a.myMaxNumOutboundStreams)
 	a.peerVerificationTag = i.initiateTag
@@ -1169,6 +1180,8 @@ func (a *Association) handleInit(p *packet, i *chunkInit) ([]*packet, error) {
 
 	if a.myCookie == nil {
 		var err error
+		// NOTE: This generation process is not compliant with
+		// 5.1.3.  Generating State Cookie (https://www.rfc-editor.org/rfc/rfc4960#section-5.1.3)
 		if a.myCookie, err = newRandomStateCookie(); err != nil {
 			return nil, err
 		}
@@ -1308,6 +1321,8 @@ func (a *Association) handleCookieEcho(c *chunkCookieEcho) []*packet {
 			return nil
 		}
 
+		// RFC wise, these do not seem to belong here, but removing them
+		// causes TestCookieEchoRetransmission to break
 		a.t1Init.stop()
 		a.storedInit = nil
 
@@ -1315,6 +1330,7 @@ func (a *Association) handleCookieEcho(c *chunkCookieEcho) []*packet {
 		a.storedCookieEcho = nil
 
 		a.setState(established)
+		// Note: This is a future place where the user could be notified (COMMUNICATION UP)
 		a.handshakeCompletedCh <- nil
 	}
 
@@ -1343,6 +1359,7 @@ func (a *Association) handleCookieAck() {
 	a.storedCookieEcho = nil
 
 	a.setState(established)
+	// Note: This is a future place where the user could be notified (COMMUNICATION UP)
 	a.handshakeCompletedCh <- nil
 }
 
@@ -1356,9 +1373,9 @@ func (a *Association) handleData(d *chunkPayloadData) []*packet {
 	if canPush {
 		s := a.getOrCreateStream(d.streamIdentifier, true, PayloadTypeUnknown)
 		if s == nil {
-			// silentely discard the data. (sender will retry on T3-rtx timeout)
+			// silently discard the data. (sender will retry on T3-rtx timeout)
 			// see pion/sctp#30
-			a.log.Debugf("discard %d", d.streamSequenceNumber)
+			a.log.Debugf("[%s] discard %d", a.name, d.streamSequenceNumber)
 			return nil
 		}
 
@@ -2415,13 +2432,18 @@ func (a *Association) handleChunk(p *packet, c chunk) error {
 	var err error
 
 	if _, err = c.check(); err != nil {
-		a.log.Errorf("[ %s ] failed validating chunk: %s ", a.name, err)
+		a.log.Errorf("[%s] failed validating chunk: %s ", a.name, err)
 		return nil
 	}
 
 	isAbort := false
 
 	switch c := c.(type) {
+	// Note: We do not do the following for chunkInit, chunkInitAck, and chunkCookieEcho:
+	// If an endpoint receives an INIT, INIT ACK, or COOKIE ECHO chunk but decides not to establish the
+	// new association due to missing mandatory parameters in the received INIT or INIT ACK chunk, invalid
+	// parameter values, or lack of local resources, it SHOULD respond with an ABORT chunk.
+
 	case *chunkInit:
 		packets, err = a.handleInit(p, c)
 
@@ -2439,6 +2461,7 @@ func (a *Association) handleChunk(p *packet, c chunk) error {
 		}
 		a.log.Debugf("[%s] Error chunk, with following errors: %s", a.name, errStr)
 
+	// Note: chunkHeartbeatAck not handled?
 	case *chunkHeartbeat:
 		packets = a.handleHeartbeat(c)
 
