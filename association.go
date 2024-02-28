@@ -645,22 +645,9 @@ func (a *Association) marshalPacket(p *packet) ([]byte, error) {
 
 func (a *Association) unmarshalPacket(raw []byte) (*packet, error) {
 	p := &packet{}
-	if !a.useZeroChecksum {
-		if err := p.unmarshal(true, raw); err != nil {
-			return nil, err
-		}
-		return p, nil
-	}
-
-	if err := p.unmarshal(false, raw); err != nil {
+	if err := p.unmarshal(!a.useZeroChecksum, raw); err != nil {
 		return nil, err
 	}
-	if chunkMandatoryChecksum(p.chunks) {
-		if err := p.unmarshal(true, raw); err != nil {
-			return nil, err
-		}
-	}
-
 	return p, nil
 }
 
