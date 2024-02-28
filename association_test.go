@@ -3084,7 +3084,7 @@ func (c customLogger) Trace(string)                  {}
 func (c customLogger) Tracef(string, ...interface{}) {}
 func (c customLogger) Debug(string)                  {}
 func (c customLogger) Debugf(format string, args ...interface{}) {
-	if format == "[%s] useZeroChecksum=%t (on initAck)" {
+	if format == "[%s] sendZeroChecksum=%t (on initAck)" {
 		assert.Equal(c.t, args[1], c.expectZeroChecksum)
 	}
 }
@@ -3110,8 +3110,8 @@ func TestAssociation_ZeroChecksum(t *testing.T) {
 	}{
 		{true, true, true},
 		{false, false, false},
-		{true, false, true},
-		{false, true, false},
+		{true, false, false},
+		{false, true, true},
 	} {
 		a1chan, a2chan := make(chan *Association), make(chan *Association)
 

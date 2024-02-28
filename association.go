@@ -19,6 +19,12 @@ import (
 	"github.com/pion/randutil"
 )
 
+// Port 5000 shows up in examples for SDPs used by WebRTC. Since this implementation
+// assumes it will be used by DTLS over UDP, the port is only meaningful for de-multiplexing
+// but more-so verification.
+// Example usage: https://www.rfc-editor.org/rfc/rfc8841.html#section-13.1-2
+const defaultSCTPSrcDstPort = 5000
+
 // Use global random generator to properly seed by crypto grade random.
 var globalMathRandomGenerator = randutil.NewMathRandomGenerator() // nolint:gochecknoglobals
 
@@ -177,8 +183,8 @@ type Association struct {
 	cumulativeTSNAckPoint   uint32
 	advancedPeerTSNAckPoint uint32
 	useForwardTSN           bool
-	useZeroChecksum         bool
-	requestZeroChecksum     bool
+	sendZeroChecksum        bool
+	recvZeroChecksum        bool
 
 	// Congestion control parameters
 	maxReceiveBufferSize uint32
@@ -326,7 +332,7 @@ func createAssociation(config Config) *Association {
 		handshakeCompletedCh:    make(chan error),
 		cumulativeTSNAckPoint:   tsn - 1,
 		advancedPeerTSNAckPoint: tsn - 1,
-		requestZeroChecksum:     config.EnableZeroChecksum,
+		recvZeroChecksum:        config.EnableZeroChecksum,
 		silentError:             ErrSilentlyDiscard,
 		stats:                   &associationStats{},
 		log:                     config.LoggerFactory.NewLogger("sctp"),
@@ -373,7 +379,7 @@ func (a *Association) init(isClient bool) {
 		init.advertisedReceiverWindowCredit = a.maxReceiveBufferSize
 		setSupportedExtensions(&init.chunkInitCommon)
 
-		if a.requestZeroChecksum {
+		if a.recvZeroChecksum {
 			init.params = append(init.params, &paramZeroChecksumAcceptable{edmid: dtlsErrorDetectionMethod})
 		}
 
@@ -397,8 +403,8 @@ func (a *Association) sendInit() error {
 
 	outbound := &packet{}
 	outbound.verificationTag = a.peerVerificationTag
-	a.sourcePort = 5000      // Spec??
-	a.destinationPort = 5000 // Spec??
+	a.sourcePort = defaultSCTPSrcDstPort
+	a.destinationPort = defaultSCTPSrcDstPort
 	outbound.sourcePort = a.sourcePort
 	outbound.destinationPort = a.destinationPort
 
@@ -636,7 +642,7 @@ func (a *Association) unregisterStream(s *Stream, err error) {
 func chunkMandatoryChecksum(cc []chunk) bool {
 	for _, c := range cc {
 		switch c.(type) {
-		case *chunkInit, *chunkInitAck, *chunkCookieEcho:
+		case *chunkInit, *chunkCookieEcho:
 			return true
 		}
 	}
@@ -644,12 +650,12 @@ func chunkMandatoryChecksum(cc []chunk) bool {
 }
 
 func (a *Association) marshalPacket(p *packet) ([]byte, error) {
-	return p.marshal(!a.useZeroChecksum || chunkMandatoryChecksum(p.chunks))
+	return p.marshal(!a.sendZeroChecksum || chunkMandatoryChecksum(p.chunks))
 }
 
 func (a *Association) unmarshalPacket(raw []byte) (*packet, error) {
 	p := &packet{}
-	if err := p.unmarshal(!a.useZeroChecksum, raw); err != nil {
+	if err := p.unmarshal(!a.recvZeroChecksum, raw); err != nil {
 		return nil, err
 	}
 	return p, nil
@@ -1129,7 +1135,6 @@ func (a *Association) handleInit(p *packet, i *chunkInit) ([]*packet, error) {
 	// subtracting one from it.
 	a.peerLastTSN = i.initialTSN - 1
 
-	peerHasZeroChecksum := false
 	for _, param := range i.params {
 		switch v := param.(type) { // nolint:gocritic
 		case *paramSupportedExtensions:
@@ -1140,7 +1145,7 @@ func (a *Association) handleInit(p *packet, i *chunkInit) ([]*packet, error) {
 				}
 			}
 		case *paramZeroChecksumAcceptable:
-			peerHasZeroChecksum = v.edmid == dtlsErrorDetectionMethod
+			a.sendZeroChecksum = v.edmid == dtlsErrorDetectionMethod
 		}
 	}
 
@@ -1170,11 +1175,10 @@ func (a *Association) handleInit(p *packet, i *chunkInit) ([]*packet, error) {
 
 	initAck.params = []param{a.myCookie}
 
-	if peerHasZeroChecksum {
+	if a.recvZeroChecksum {
 		initAck.params = append(initAck.params, &paramZeroChecksumAcceptable{edmid: dtlsErrorDetectionMethod})
-		a.useZeroChecksum = true
 	}
-	a.log.Debugf("[%s] useZeroChecksum=%t (on init)", a.name, a.useZeroChecksum)
+	a.log.Debugf("[%s] sendZeroChecksum=%t (on init)", a.name, a.sendZeroChecksum)
 
 	setSupportedExtensions(&initAck.chunkInitCommon)
 
@@ -1234,11 +1238,11 @@ func (a *Association) handleInitAck(p *packet, i *chunkInitAck) error {
 				}
 			}
 		case *paramZeroChecksumAcceptable:
-			a.useZeroChecksum = v.edmid == dtlsErrorDetectionMethod
+			a.sendZeroChecksum = v.edmid == dtlsErrorDetectionMethod
 		}
 	}
 
-	a.log.Debugf("[%s] useZeroChecksum=%t (on initAck)", a.name, a.useZeroChecksum)
+	a.log.Debugf("[%s] sendZeroChecksum=%t (on initAck)", a.name, a.sendZeroChecksum)
 
 	if !a.useForwardTSN {
 		a.log.Warnf("[%s] not using ForwardTSN (on initAck)", a.name)
