@@ -99,6 +99,12 @@ const (
 // other constants
 const (
 	acceptChSize = 16
+	// maxTSNOffset is the maximum offset of a received chunk TSN from the cummulative TSN
+	// we have seen so far that we will enqueue.
+	// For a chunk to be enqueued chunk.tsn < cummulativeTSN + maxTSNOffset
+	// This allows us to not enqueue too many bytes over the receive window in case of out
+	// of order delivery. A buffer of 1000 TSNs implies an excess of roughly 2MB.
+	maxTSNOffset = 2000
 )
 
 func getAssociationStateString(a uint32) string {
