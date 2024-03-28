@@ -99,12 +99,17 @@ const (
 // other constants
 const (
 	acceptChSize = 16
-	// maxTSNOffset is the maximum offset of a received chunk TSN from the cummulative TSN
-	// we have seen so far that we will enqueue.
-	// For a chunk to be enqueued chunk.tsn < cummulativeTSN + maxTSNOffset
-	// This allows us to not enqueue too many bytes over the receive window in case of out
-	// of order delivery. A buffer of 1000 TSNs implies an excess of roughly 2MB.
-	maxTSNOffset = 2000
+	// avgChunkSize is an estimate of the average chunk size. There is no theory behind
+	// this estimate.
+	avgChunkSize = 500
+	// minTSNOffset is the minimum offset over the cummulative TSN that we will enqueue
+	// irrespective of the receive buffer size
+	// see Association.getMaxTSNOffset
+	minTSNOffset = 2000
+	// maxTSNOffset is the maximum offset over the cummulative TSN that we will enqueue
+	// irrespective of the receive buffer size
+	// see Association.getMaxTSNOffset
+	maxTSNOffset = 40000
 )
 
 func getAssociationStateString(a uint32) string {
@@ -1116,6 +1121,23 @@ func (a *Association) SRTT() float64 {
 	return a.srtt.Load().(float64) //nolint:forcetypeassert
 }
 
+// getMaxTSNOffset returns the maximum offset over the current cummulative TSN that
+// we are willing to enqueue. Limiting the maximum offset limits the number of
+// tsns we have in the payloadQueue map. This ensures that we don't use too much space in
+// the map itself. This also ensures that we keep the bytes utilised in the receive
+// buffer within a small multiple of the user provided max receive buffer size.
+func (a *Association) getMaxTSNOffset() uint32 {
+	// 4 is a magic number here. There is no theory behind this.
+	offset := (a.maxReceiveBufferSize * 4) / avgChunkSize
+	if offset < minTSNOffset {
+		offset = minTSNOffset
+	}
+	if offset > maxTSNOffset {
+		offset = maxTSNOffset
+	}
+	return offset
+}
+
 func setSupportedExtensions(init *chunkInitCommon) {
 	// nolint:godox
 	// TODO RFC5061 https://tools.ietf.org/html/rfc6525#section-5.2
@@ -1384,7 +1406,7 @@ func (a *Association) handleData(d *chunkPayloadData) []*packet {
 		a.name, d.tsn, d.immediateSack, len(d.userData))
 	a.stats.incDATAs()
 
-	canPush := a.payloadQueue.canPush(d, a.peerLastTSN)
+	canPush := a.payloadQueue.canPush(d, a.peerLastTSN, a.getMaxTSNOffset())
 	if canPush {
 		s := a.getOrCreateStream(d.streamIdentifier, true, PayloadTypeUnknown)
 		if s == nil {
