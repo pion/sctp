@@ -2879,6 +2879,122 @@ func TestAssociationReceiveWindow(t *testing.T) {
 	cancel()
 }
 
+func TestAssociationMaxTSNOffset(t *testing.T) {
+	udp1, udp2 := createUDPConnPair()
+	createAssociations := func() (*Association, *Association, error) {
+		loggerFactory := logging.NewDefaultLoggerFactory()
+
+		a1Chan := make(chan interface{})
+		a2Chan := make(chan interface{})
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		go func() {
+			a, err2 := createClientWithContext(ctx, Config{
+				NetConn:       udp1,
+				LoggerFactory: loggerFactory,
+			})
+			if err2 != nil {
+				a1Chan <- err2
+			} else {
+				a1Chan <- a
+			}
+		}()
+
+		go func() {
+			a, err2 := createClientWithContext(ctx, Config{
+				NetConn:              udp2,
+				LoggerFactory:        loggerFactory,
+				MaxReceiveBufferSize: 100_000,
+			})
+			if err2 != nil {
+				a2Chan <- err2
+			} else {
+				a2Chan <- a
+			}
+		}()
+
+		var a1 *Association
+		var a2 *Association
+
+	loop:
+		for {
+			select {
+			case v1 := <-a1Chan:
+				switch v := v1.(type) {
+				case *Association:
+					a1 = v
+					if a2 != nil {
+						break loop
+					}
+				case error:
+					return nil, nil, v
+				}
+			case v2 := <-a2Chan:
+				switch v := v2.(type) {
+				case *Association:
+					a2 = v
+					if a1 != nil {
+						break loop
+					}
+				case error:
+					return nil, nil, v
+				}
+			}
+		}
+		return a1, a2, nil
+	}
+	// a1 is the association used for sending data
+	// a2 is the association with receive window of 100kB which we will
+	// try to bypass
+	a1, a2, err := createAssociations()
+
+	require.NoError(t, err)
+	defer a2.Close()
+	defer a1.Close()
+	s1, err := a1.OpenStream(1, PayloadTypeWebRTCBinary)
+	require.NoError(t, err)
+	defer s1.Close()
+	s1.WriteSCTP([]byte("hello"), PayloadTypeWebRTCBinary)
+	s1.WriteSCTP([]byte("hello"), PayloadTypeWebRTCBinary)
+	s2, err := a2.AcceptStream()
+	require.NoError(t, err)
+	require.Equal(t, uint16(1), s2.streamIdentifier)
+
+	chunks := s1.packetize(make([]byte, 1000), PayloadTypeWebRTCBinary)
+	chunks = chunks[:1]
+	sendChunk := func(tsn uint32) {
+		chunk := chunks[0]
+		// Fake the TSN and enqueue 1 chunk with a very high tsn in the payload queue
+		chunk.tsn = tsn
+		pp := a1.bundleDataChunksIntoPackets(chunks)
+		for _, p := range pp {
+			raw, err := p.marshal(true)
+			if err != nil {
+				t.Fatal(err)
+				return
+			}
+			_, err = a1.netConn.Write(raw)
+			if err != nil {
+				t.Fatal(err)
+				return
+			}
+		}
+	}
+	sendChunk(a1.myNextTSN + 100_000)
+	time.Sleep(100 * time.Millisecond)
+	require.Less(t, s2.getNumBytesInReassemblyQueue(), 1000)
+
+	sendChunk(a1.myNextTSN + 10_000)
+	time.Sleep(100 * time.Millisecond)
+	require.Less(t, s2.getNumBytesInReassemblyQueue(), 1000)
+
+	sendChunk(a1.myNextTSN + minTSNOffset - 100)
+	time.Sleep(100 * time.Millisecond)
+	require.Greater(t, s2.getNumBytesInReassemblyQueue(), 1000)
+}
+
 func TestAssociation_Shutdown(t *testing.T) {
 	checkGoroutineLeaks(t)
 
