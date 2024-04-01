@@ -1311,14 +1311,7 @@ func TestHandleForwardTSN(t *testing.T) {
 		prevTSN := a.peerLastTSN
 
 		// this chunk is blocked by the missing chunk at tsn=1
-		a.payloadQueue.push(&chunkPayloadData{
-			beginningFragment:    true,
-			endingFragment:       true,
-			tsn:                  a.peerLastTSN + 2,
-			streamIdentifier:     0,
-			streamSequenceNumber: 1,
-			userData:             []byte("ABC"),
-		}, a.peerLastTSN)
+		a.receivedChunkTracker.push(a.peerLastTSN+2, a.peerLastTSN)
 
 		fwdtsn := &chunkForwardTSN{
 			newCumulativeTSN: a.peerLastTSN + 1,
@@ -1348,14 +1341,7 @@ func TestHandleForwardTSN(t *testing.T) {
 		prevTSN := a.peerLastTSN
 
 		// this chunk is blocked by the missing chunk at tsn=1
-		a.payloadQueue.push(&chunkPayloadData{
-			beginningFragment:    true,
-			endingFragment:       true,
-			tsn:                  a.peerLastTSN + 3,
-			streamIdentifier:     0,
-			streamSequenceNumber: 1,
-			userData:             []byte("ABC"),
-		}, a.peerLastTSN)
+		a.receivedChunkTracker.push(a.peerLastTSN+3, a.peerLastTSN)
 
 		fwdtsn := &chunkForwardTSN{
 			newCumulativeTSN: a.peerLastTSN + 1,

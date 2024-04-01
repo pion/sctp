@@ -36,14 +36,6 @@ func (q *payloadQueue) updateSortedKeys() {
 	})
 }
 
-func (q *payloadQueue) canPush(p *chunkPayloadData, cumulativeTSN uint32, maxTSNOffset uint32) bool {
-	_, ok := q.chunkMap[p.tsn]
-	if ok || sna32LTE(p.tsn, cumulativeTSN) || sna32GTE(p.tsn, cumulativeTSN+maxTSNOffset) {
-		return false
-	}
-	return true
-}
-
 func (q *payloadQueue) pushNoCheck(p *chunkPayloadData) {
 	q.chunkMap[p.tsn] = p
 	q.nBytes += len(p.userData)

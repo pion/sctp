@@ -186,7 +186,7 @@ type Association struct {
 	myMaxNumInboundStreams  uint16
 	myMaxNumOutboundStreams uint16
 	myCookie                *paramStateCookie
-	payloadQueue            *payloadQueue
+	receivedChunkTracker    *receivedChunkTracker
 	inflightQueue           *payloadQueue
 	pendingQueue            *pendingQueue
 	controlQueue            *controlQueue
@@ -329,7 +329,7 @@ func createAssociation(config Config) *Association {
 		myMaxNumOutboundStreams: math.MaxUint16,
 		myMaxNumInboundStreams:  math.MaxUint16,
 
-		payloadQueue:            newPayloadQueue(),
+		receivedChunkTracker:    newReceivedChunkTracker(),
 		inflightQueue:           newPayloadQueue(),
 		pendingQueue:            newPendingQueue(),
 		controlQueue:            newControlQueue(),
@@ -1406,7 +1406,7 @@ func (a *Association) handleData(d *chunkPayloadData) []*packet {
 		a.name, d.tsn, d.immediateSack, len(d.userData))
 	a.stats.incDATAs()
 
-	canPush := a.payloadQueue.canPush(d, a.peerLastTSN, a.getMaxTSNOffset())
+	canPush := a.receivedChunkTracker.canPush(d, a.peerLastTSN, a.getMaxTSNOffset())
 	if canPush {
 		s := a.getOrCreateStream(d.streamIdentifier, true, PayloadTypeUnknown)
 		if s == nil {
@@ -1418,14 +1418,14 @@ func (a *Association) handleData(d *chunkPayloadData) []*packet {
 
 		if a.getMyReceiverWindowCredit() > 0 {
 			// Pass the new chunk to stream level as soon as it arrives
-			a.payloadQueue.push(d, a.peerLastTSN)
+			a.receivedChunkTracker.push(d.tsn, a.peerLastTSN)
 			s.handleData(d)
 		} else {
 			// Receive buffer is full
-			lastTSN, ok := a.payloadQueue.getLastTSNReceived()
+			lastTSN, ok := a.receivedChunkTracker.getLastTSNReceived()
 			if ok && sna32LT(d.tsn, lastTSN) {
 				a.log.Debugf("[%s] receive buffer full, but accepted as this is a missing chunk with tsn=%d ssn=%d", a.name, d.tsn, d.streamSequenceNumber)
-				a.payloadQueue.push(d, a.peerLastTSN)
+				a.receivedChunkTracker.push(d.tsn, a.peerLastTSN)
 				s.handleData(d)
 			} else {
 				a.log.Debugf("[%s] receive buffer full. dropping DATA with tsn=%d ssn=%d", a.name, d.tsn, d.streamSequenceNumber)
@@ -1449,7 +1449,7 @@ func (a *Association) handlePeerLastTSNAndAcknowledgement(sackImmediately bool) 
 	// Meaning, if peerLastTSN+1 points to a chunk that is received,
 	// advance peerLastTSN until peerLastTSN+1 points to unreceived chunk.
 	for {
-		if _, popOk := a.payloadQueue.pop(a.peerLastTSN + 1); !popOk {
+		if popOk := a.receivedChunkTracker.pop(a.peerLastTSN + 1); !popOk {
 			break
 		}
 		a.peerLastTSN++
@@ -1463,9 +1463,9 @@ func (a *Association) handlePeerLastTSNAndAcknowledgement(sackImmediately bool) 
 		}
 	}
 
-	hasPacketLoss := (a.payloadQueue.size() > 0)
+	hasPacketLoss := (a.receivedChunkTracker.size() > 0)
 	if hasPacketLoss {
-		a.log.Tracef("[%s] packetloss: %s", a.name, a.payloadQueue.getGapAckBlocksString(a.peerLastTSN))
+		a.log.Tracef("[%s] packetloss: %s", a.name, a.receivedChunkTracker.getGapAckBlocksString(a.peerLastTSN))
 	}
 
 	if (a.ackState != ackStateImmediate && !sackImmediately && !hasPacketLoss && a.ackMode == ackModeNormal) || a.ackMode == ackModeAlwaysDelay {
@@ -2084,7 +2084,7 @@ func (a *Association) handleForwardTSN(c *chunkForwardTSN) []*packet {
 
 	// Advance peerLastTSN
 	for sna32LT(a.peerLastTSN, c.newCumulativeTSN) {
-		a.payloadQueue.pop(a.peerLastTSN + 1) // may not exist
+		a.receivedChunkTracker.pop(a.peerLastTSN + 1) // may not exist
 		a.peerLastTSN++
 	}
 
@@ -2427,8 +2427,8 @@ func (a *Association) createSelectiveAckChunk() *chunkSelectiveAck {
 	sack := &chunkSelectiveAck{}
 	sack.cumulativeTSNAck = a.peerLastTSN
 	sack.advertisedReceiverWindowCredit = a.getMyReceiverWindowCredit()
-	sack.duplicateTSN = a.payloadQueue.popDuplicates()
-	sack.gapAckBlocks = a.payloadQueue.getGapAckBlocks(a.peerLastTSN)
+	sack.duplicateTSN = a.receivedChunkTracker.popDuplicates()
+	sack.gapAckBlocks = a.receivedChunkTracker.getGapAckBlocks(a.peerLastTSN)
 	return sack
 }
 
