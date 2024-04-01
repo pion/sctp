@@ -2184,7 +2184,7 @@ func (a *Association) movePendingDataChunkToInflightQueue(c *chunkPayloadData) {
 	a.log.Tracef("[%s] sending ppi=%d tsn=%d ssn=%d sent=%d len=%d (%v,%v)",
 		a.name, c.payloadType, c.tsn, c.streamSequenceNumber, c.nSent, len(c.userData), c.beginningFragment, c.endingFragment)
 
-	a.inflightQueue.pushNoCheck(c)
+	a.inflightQueue.push(c)
 }
 
 // popPendingDataChunksToSend pops chunks from the pending queues as many as
