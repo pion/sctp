@@ -1191,7 +1191,7 @@ func TestCreateForwardTSN(t *testing.T) {
 
 		a.cumulativeTSNAckPoint = 9
 		a.advancedPeerTSNAckPoint = 10
-		a.inflightQueue.pushNoCheck(&chunkPayloadData{
+		a.inflightQueue.push(&chunkPayloadData{
 			beginningFragment:    true,
 			endingFragment:       true,
 			tsn:                  10,
@@ -1218,7 +1218,7 @@ func TestCreateForwardTSN(t *testing.T) {
 
 		a.cumulativeTSNAckPoint = 9
 		a.advancedPeerTSNAckPoint = 12
-		a.inflightQueue.pushNoCheck(&chunkPayloadData{
+		a.inflightQueue.push(&chunkPayloadData{
 			beginningFragment:    true,
 			endingFragment:       true,
 			tsn:                  10,
@@ -1228,7 +1228,7 @@ func TestCreateForwardTSN(t *testing.T) {
 			nSent:                1,
 			_abandoned:           true,
 		})
-		a.inflightQueue.pushNoCheck(&chunkPayloadData{
+		a.inflightQueue.push(&chunkPayloadData{
 			beginningFragment:    true,
 			endingFragment:       true,
 			tsn:                  11,
@@ -1238,7 +1238,7 @@ func TestCreateForwardTSN(t *testing.T) {
 			nSent:                1,
 			_abandoned:           true,
 		})
-		a.inflightQueue.pushNoCheck(&chunkPayloadData{
+		a.inflightQueue.push(&chunkPayloadData{
 			beginningFragment:    true,
 			endingFragment:       true,
 			tsn:                  12,
