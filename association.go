@@ -1124,7 +1124,7 @@ func (a *Association) SRTT() float64 {
 // getMaxTSNOffset returns the maximum offset over the current cummulative TSN that
 // we are willing to enqueue. Limiting the maximum offset limits the number of
 // tsns we have in the payloadQueue map. This ensures that we don't use too much space in
-// the map itself. This also ensures that we keep the bytes utilised in the receive
+// the map itself. This also ensures that we keep the bytes utilized in the receive
 // buffer within a small multiple of the user provided max receive buffer size.
 func (a *Association) getMaxTSNOffset() uint32 {
 	// 4 is a magic number here. There is no theory behind this.
