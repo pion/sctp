@@ -2818,6 +2818,14 @@ func noErrorClose(t *testing.T, closeF func() error) {
 	require.NoError(t, closeF())
 }
 
+// readMyNextTSN uses a lock to read the myNextTSN field of the association.
+// Avoids a data race.
+func readMyNextTSN(a *Association) uint32 {
+	a.lock.Lock()
+	defer a.lock.Unlock()
+	return a.myNextTSN
+}
+
 func TestAssociationReceiveWindow(t *testing.T) {
 	udp1, udp2 := createUDPConnPair()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -2848,8 +2856,8 @@ func TestAssociationReceiveWindow(t *testing.T) {
 		chunks = chunks[:1]
 		chunk := chunks[0]
 		// Fake the TSN and enqueue 1 chunk with a very high tsn in the payload queue
-		chunk.tsn = a1.myNextTSN + 1e9
-		for chunk.tsn > a1.myNextTSN {
+		chunk.tsn = readMyNextTSN(a1) + 1e9
+		for chunk.tsn > readMyNextTSN(a1) {
 			select {
 			case <-done:
 				return
@@ -2926,15 +2934,15 @@ func TestAssociationMaxTSNOffset(t *testing.T) {
 			}
 		}
 	}
-	sendChunk(a1.myNextTSN + 100_000)
+	sendChunk(readMyNextTSN(a1) + 100_000)
 	time.Sleep(100 * time.Millisecond)
 	require.Less(t, s2.getNumBytesInReassemblyQueue(), 1000)
 
-	sendChunk(a1.myNextTSN + 10_000)
+	sendChunk(readMyNextTSN(a1) + 10_000)
 	time.Sleep(100 * time.Millisecond)
 	require.Less(t, s2.getNumBytesInReassemblyQueue(), 1000)
 
-	sendChunk(a1.myNextTSN + minTSNOffset - 100)
+	sendChunk(readMyNextTSN(a1) + minTSNOffset - 100)
 	time.Sleep(100 * time.Millisecond)
 	require.Greater(t, s2.getNumBytesInReassemblyQueue(), 1000)
 }
