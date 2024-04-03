@@ -161,6 +161,7 @@ type Association struct {
 	peerVerificationTag    uint32
 	myVerificationTag      uint32
 	state                  uint32
+	initialTSN             uint32
 	myNextTSN              uint32 // nextTSN
 	peerLastTSN            uint32 // lastRcvdTSN
 	minTSN2MeasureRTT      uint32 // for RTT measurement
@@ -336,6 +337,7 @@ func createAssociation(config Config) *Association {
 		mtu:                     initialMTU,
 		maxPayloadSize:          initialMTU - (commonHeaderSize + dataChunkHeaderSize),
 		myVerificationTag:       globalMathRandomGenerator.Uint32(),
+		initialTSN:              tsn,
 		myNextTSN:               tsn,
 		myNextRSN:               tsn,
 		minTSN2MeasureRTT:       tsn,
@@ -2552,6 +2554,12 @@ func (a *Association) handleChunk(p *packet, c chunk) error {
 func (a *Association) onRetransmissionTimeout(id int, nRtos uint) {
 	a.lock.Lock()
 	defer a.lock.Unlock()
+
+	// TSN hasn't been incremented in 3 attempts. Speculatively
+	// disable ZeroChecksum because old Pion versions had a broken implementation
+	if a.cumulativeTSNAckPoint+1 == a.initialTSN && nRtos == 3 {
+		a.sendZeroChecksum = false
+	}
 
 	if id == timerT1Init {
 		err := a.sendInit()
