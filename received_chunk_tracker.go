@@ -10,7 +10,7 @@ import (
 
 // receivedChunkTracker tracks received chunks for maintaining ACK ranges
 type receivedChunkTracker struct {
-	tsns map[uint32]struct{}
+	tsns   map[uint32]struct{}
 	dupTSN []uint32
 	ranges []ackRange
 }
@@ -72,7 +72,7 @@ func (q *receivedChunkTracker) push(tsn uint32, cumulativeTSN uint32) bool {
 	} else {
 		// extended element at pos, check if we can merge it with adjacent elements
 		if pos-1 >= 0 {
-			if q.ranges[pos-1].end+1 >= q.ranges[pos].start {
+			if q.ranges[pos-1].end+1 == q.ranges[pos].start {
 				q.ranges[pos-1] = ackRange{
 					start: q.ranges[pos-1].start,
 					end:   q.ranges[pos].end,
@@ -85,7 +85,7 @@ func (q *receivedChunkTracker) push(tsn uint32, cumulativeTSN uint32) bool {
 			}
 		}
 		if pos+1 < len(q.ranges) {
-			if q.ranges[pos].end+1 >= q.ranges[pos+1].start {
+			if q.ranges[pos].end+1 == q.ranges[pos+1].start {
 				q.ranges[pos+1] = ackRange{
 					start: q.ranges[pos].start,
 					end:   q.ranges[pos+1].end,
