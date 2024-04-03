@@ -3393,3 +3393,78 @@ func TestDataChunkBundlingIntoPacket(t *testing.T) {
 		}
 	}
 }
+
+func TestAssociation_ReconfigRequestsLimited(t *testing.T) {
+	checkGoroutineLeaks(t)
+
+	lim := test.TimeOut(time.Second * 10)
+	defer lim.Stop()
+
+	a1chan, a2chan := make(chan *Association), make(chan *Association)
+
+	udp1, udp2 := createUDPConnPair()
+
+	go func() {
+		a1, err := Client(Config{
+			NetConn:       udp1,
+			LoggerFactory: logging.NewDefaultLoggerFactory(),
+		})
+		assert.NoError(t, err)
+		a1chan <- a1
+	}()
+
+	go func() {
+		a2, err := Server(Config{
+			NetConn:       udp2,
+			LoggerFactory: logging.NewDefaultLoggerFactory(),
+		})
+		assert.NoError(t, err)
+		a2chan <- a2
+	}()
+
+	a1, a2 := <-a1chan, <-a2chan
+	defer a1.Close()
+	defer a2.Close()
+
+	writeStream, err := a1.OpenStream(1, PayloadTypeWebRTCString)
+	require.NoError(t, err)
+
+	readStream, err := a2.OpenStream(1, PayloadTypeWebRTCString)
+	require.NoError(t, err)
+
+	// exchange some data
+	testData := []byte("test")
+	_, err = writeStream.Write(testData)
+	require.NoError(t, err)
+
+	buf := make([]byte, len(testData))
+	_, err = readStream.Read(buf)
+	assert.NoError(t, err)
+	assert.Equal(t, testData, buf)
+
+	a1.lock.RLock()
+	tsn := a1.myNextTSN
+	a1.lock.RUnlock()
+	for i := 0; i < maxReconfigRequests+100; i++ {
+		c := &chunkReconfig{
+			paramA: &paramOutgoingResetRequest{
+				reconfigRequestSequenceNumber: 10 + uint32(i),
+				senderLastTSN:                 tsn + 10, // has to be enqueued
+				streamIdentifiers:             []uint16{uint16(i)},
+			},
+		}
+		p := a1.createPacket([]chunk{c})
+		buf, err := p.marshal(true)
+		require.NoError(t, err)
+		_, err = a1.netConn.Write(buf)
+		require.NoError(t, err)
+		if i%100 == 0 {
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+	// Let a2 process the requests
+	time.Sleep(2 * time.Second)
+	a2.lock.RLock()
+	require.LessOrEqual(t, len(a2.reconfigRequests), maxReconfigRequests)
+	a2.lock.RUnlock()
+}
