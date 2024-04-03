@@ -110,6 +110,8 @@ const (
 	// irrespective of the receive buffer size
 	// see Association.getMaxTSNOffset
 	maxTSNOffset = 40000
+	// maxReconfigRequests is the maximum number of reconfig requests we will keep outstanding
+	maxReconfigRequests = 1000
 )
 
 func getAssociationStateString(a uint32) string {
@@ -2140,15 +2142,39 @@ func (a *Association) handleReconfigParam(raw param) (*packet, error) {
 	switch p := raw.(type) {
 	case *paramOutgoingResetRequest:
 		a.log.Tracef("[%s] handleReconfigParam (OutgoingResetRequest)", a.name)
+		if a.peerLastTSN < p.senderLastTSN && len(a.reconfigRequests) >= maxReconfigRequests {
+			// We have too many reconfig requests outstanding. Drop the request and let
+			// the peer retransmit. A well behaved peer should only have 1 outstanding
+			// reconfig request.
+			//
+			// RFC 6525: https://www.rfc-editor.org/rfc/rfc6525.html#section-5.1.1
+			//    At any given time, there MUST NOT be more than one request in flight.
+			//    So, if the Re-configuration Timer is running and the RE-CONFIG chunk
+			//    contains at least one request parameter, the chunk MUST be buffered.
+			// chrome: https://chromium.googlesource.com/external/webrtc/+/refs/heads/main/net/dcsctp/socket/stream_reset_handler.cc#271
+			return nil, fmt.Errorf("too many outstanding reconfig requests: %d", len(a.reconfigRequests))
+		}
 		a.reconfigRequests[p.reconfigRequestSequenceNumber] = p
 		resp := a.resetStreamsIfAny(p)
 		if resp != nil {
 			return resp, nil
 		}
 		return nil, nil //nolint:nilnil
-
 	case *paramReconfigResponse:
 		a.log.Tracef("[%s] handleReconfigParam (ReconfigResponse)", a.name)
+		if p.result == reconfigResultInProgress {
+			// RFC 6525: https://www.rfc-editor.org/rfc/rfc6525.html#section-5.2.7
+			//
+			//   If the Result field indicates "In progress", the timer for the
+			//   Re-configuration Request Sequence Number is started again.  If
+			//   the timer runs out, the RE-CONFIG chunk MUST be retransmitted
+			//   but the corresponding error counters MUST NOT be incremented.
+			if len(a.reconfigs) == 0 {
+				a.tReconfig.stop()
+				a.tReconfig.start(a.rtoMgr.getRTO())
+			}
+			return nil, nil
+		}
 		delete(a.reconfigs, p.reconfigResponseSequenceNumber)
 		if len(a.reconfigs) == 0 {
 			a.tReconfig.stop()
