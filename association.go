@@ -50,6 +50,7 @@ var (
 	ErrChunkTypeUnhandled            = errors.New("unhandled chunk type")
 	ErrHandshakeInitAck              = errors.New("handshake failed (INIT ACK)")
 	ErrHandshakeCookieEcho           = errors.New("handshake failed (COOKIE ECHO)")
+	ErrTooManyReconfigRequests       = errors.New("too many outstanding reconfig requests")
 )
 
 const (
@@ -2152,7 +2153,7 @@ func (a *Association) handleReconfigParam(raw param) (*packet, error) {
 			//    So, if the Re-configuration Timer is running and the RE-CONFIG chunk
 			//    contains at least one request parameter, the chunk MUST be buffered.
 			// chrome: https://chromium.googlesource.com/external/webrtc/+/refs/heads/main/net/dcsctp/socket/stream_reset_handler.cc#271
-			return nil, fmt.Errorf("too many outstanding reconfig requests: %d", len(a.reconfigRequests))
+			return nil, fmt.Errorf("%w: %d", ErrTooManyReconfigRequests, len(a.reconfigRequests))
 		}
 		a.reconfigRequests[p.reconfigRequestSequenceNumber] = p
 		resp := a.resetStreamsIfAny(p)
