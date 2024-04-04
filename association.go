@@ -2174,7 +2174,7 @@ func (a *Association) handleReconfigParam(raw param) (*packet, error) {
 				a.tReconfig.stop()
 				a.tReconfig.start(a.rtoMgr.getRTO())
 			}
-			return nil, nil
+			return nil, nil //nolint:nilnil
 		}
 		delete(a.reconfigs, p.reconfigResponseSequenceNumber)
 		if len(a.reconfigs) == 0 {
