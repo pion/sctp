@@ -3423,8 +3423,6 @@ func TestAssociation_ReconfigRequestsLimited(t *testing.T) {
 	}()
 
 	a1, a2 := <-a1chan, <-a2chan
-	defer a1.Close()
-	defer a2.Close()
 
 	writeStream, err := a1.OpenStream(1, PayloadTypeWebRTCString)
 	require.NoError(t, err)
@@ -3467,4 +3465,7 @@ func TestAssociation_ReconfigRequestsLimited(t *testing.T) {
 	a2.lock.RLock()
 	require.LessOrEqual(t, len(a2.reconfigRequests), maxReconfigRequests)
 	a2.lock.RUnlock()
+
+	require.NoError(t, a1.Close())
+	require.NoError(t, a2.Close())
 }
