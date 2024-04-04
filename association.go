@@ -2169,7 +2169,7 @@ func (a *Association) handleReconfigParam(raw param) (*packet, error) {
 			//   Re-configuration Request Sequence Number is started again.  If
 			//   the timer runs out, the RE-CONFIG chunk MUST be retransmitted
 			//   but the corresponding error counters MUST NOT be incremented.
-			if len(a.reconfigs) == 0 {
+			if _, ok := a.reconfigs[p.reconfigResponseSequenceNumber]; ok {
 				a.tReconfig.stop()
 				a.tReconfig.start(a.rtoMgr.getRTO())
 			}
