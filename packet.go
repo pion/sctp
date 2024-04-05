@@ -172,8 +172,12 @@ func (p *packet) marshal(doChecksum bool) ([]byte, error) {
 	}
 
 	if doChecksum {
-		// Checksum is already in BigEndian
-		// Using LittleEndian.PutUint32 stops it from being flipped
+		// golang CRC32C uses reflected input and reflected output, the
+		// net result of this is to have the bytes flipped compared to
+		// the non reflected variant that the spec expects.
+		//
+		// Use LittleEndian.PutUint32 to avoid flipping the bytes in to
+		// the spec compliant checksum order
 		binary.LittleEndian.PutUint32(raw[8:], generatePacketChecksum(raw))
 	}
 
