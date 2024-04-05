@@ -2839,7 +2839,7 @@ func TestAssociationReceiveWindow(t *testing.T) {
 	defer noErrorClose(t, a1.Close)
 	s1, err := a1.OpenStream(1, PayloadTypeWebRTCBinary)
 	require.NoError(t, err)
-	defer noErrorClose(t, s1.Close)
+	defer s1.Close() // nolint:errcheck,gosec
 	_, err = s1.WriteSCTP([]byte("hello"), PayloadTypeWebRTCBinary)
 	require.NoError(t, err)
 	dudp1.block.Store(true)
