@@ -175,9 +175,12 @@ func (t *rtxTimer) start(rto float64) bool {
 	go func() {
 		canceling := false
 
+		timer := time.NewTimer(math.MaxInt64)
+		timer.Stop()
+
 		for !canceling {
 			timeout := calculateNextTimeout(rto, nRtos, t.rtoMax)
-			timer := time.NewTimer(time.Duration(timeout) * time.Millisecond)
+			timer.Reset(time.Duration(timeout) * time.Millisecond)
 
 			select {
 			case <-timer.C:

@@ -70,14 +70,16 @@ func TestAckTimer(t *testing.T) {
 			},
 		})
 
-		// should start ok
-		ok := rt.start()
-		assert.True(t, ok, "start() should succeed")
-		assert.True(t, rt.isRunning(), "should be running")
+		for i := 0; i < 2; i++ {
+			// should start ok
+			ok := rt.start()
+			assert.True(t, ok, "start() should succeed")
+			assert.True(t, rt.isRunning(), "should be running")
 
-		// stop immedidately
-		rt.stop()
-		assert.False(t, rt.isRunning(), "should not be running")
+			// stop immedidately
+			rt.stop()
+			assert.False(t, rt.isRunning(), "should not be running")
+		}
 
 		// Sleep more than 200msec of interval to test if it never times out
 		time.Sleep(ackInterval + 50*time.Millisecond)
@@ -86,7 +88,7 @@ func TestAckTimer(t *testing.T) {
 			"should not be timed out (actual: %d)", atomic.LoadUint32(&nCbs))
 
 		// can start again
-		ok = rt.start()
+		ok := rt.start()
 		assert.True(t, ok, "start() should succeed again")
 		assert.True(t, rt.isRunning(), "should be running")
 
