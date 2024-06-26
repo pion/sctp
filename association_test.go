@@ -1283,10 +1283,10 @@ func TestHandleForwardTSN(t *testing.T) {
 			LoggerFactory: loggerFactory,
 		})
 		a.useForwardTSN = true
-		prevTSN := a.peerLastTSN
+		prevTSN := a.peerLastTSN()
 
 		fwdtsn := &chunkForwardTSN{
-			newCumulativeTSN: a.peerLastTSN + 3,
+			newCumulativeTSN: prevTSN + 3,
 			streams:          []chunkForwardTSNStream{{identifier: 0, sequence: 0}},
 		}
 
@@ -1296,7 +1296,7 @@ func TestHandleForwardTSN(t *testing.T) {
 		delayedAckTriggered := a.delayedAckTriggered
 		immediateAckTriggered := a.immediateAckTriggered
 		a.lock.Unlock()
-		assert.Equal(t, a.peerLastTSN, prevTSN+3, "peerLastTSN should advance by 3 ")
+		assert.Equal(t, a.peerLastTSN(), prevTSN+3, "peerLastTSN should advance by 3 ")
 		assert.True(t, delayedAckTriggered, "delayed sack should be triggered")
 		assert.False(t, immediateAckTriggered, "immediate sack should NOT be triggered")
 		assert.Nil(t, p, "should return nil")
@@ -1308,20 +1308,13 @@ func TestHandleForwardTSN(t *testing.T) {
 			LoggerFactory: loggerFactory,
 		})
 		a.useForwardTSN = true
-		prevTSN := a.peerLastTSN
+		prevTSN := a.peerLastTSN()
 
 		// this chunk is blocked by the missing chunk at tsn=1
-		a.payloadQueue.push(&chunkPayloadData{
-			beginningFragment:    true,
-			endingFragment:       true,
-			tsn:                  a.peerLastTSN + 2,
-			streamIdentifier:     0,
-			streamSequenceNumber: 1,
-			userData:             []byte("ABC"),
-		}, a.peerLastTSN)
+		a.payloadQueue.push(a.peerLastTSN() + 2)
 
 		fwdtsn := &chunkForwardTSN{
-			newCumulativeTSN: a.peerLastTSN + 1,
+			newCumulativeTSN: a.peerLastTSN() + 1,
 			streams: []chunkForwardTSNStream{
 				{identifier: 0, sequence: 1},
 			},
@@ -1333,7 +1326,7 @@ func TestHandleForwardTSN(t *testing.T) {
 		delayedAckTriggered := a.delayedAckTriggered
 		immediateAckTriggered := a.immediateAckTriggered
 		a.lock.Unlock()
-		assert.Equal(t, a.peerLastTSN, prevTSN+2, "peerLastTSN should advance by 3")
+		assert.Equal(t, a.peerLastTSN(), prevTSN+2, "peerLastTSN should advance by 3")
 		assert.True(t, delayedAckTriggered, "delayed sack should be triggered")
 		assert.False(t, immediateAckTriggered, "immediate sack should NOT be triggered")
 		assert.Nil(t, p, "should return nil")
@@ -1345,20 +1338,13 @@ func TestHandleForwardTSN(t *testing.T) {
 			LoggerFactory: loggerFactory,
 		})
 		a.useForwardTSN = true
-		prevTSN := a.peerLastTSN
+		prevTSN := a.peerLastTSN()
 
 		// this chunk is blocked by the missing chunk at tsn=1
-		a.payloadQueue.push(&chunkPayloadData{
-			beginningFragment:    true,
-			endingFragment:       true,
-			tsn:                  a.peerLastTSN + 3,
-			streamIdentifier:     0,
-			streamSequenceNumber: 1,
-			userData:             []byte("ABC"),
-		}, a.peerLastTSN)
+		a.payloadQueue.push(a.peerLastTSN() + 3)
 
 		fwdtsn := &chunkForwardTSN{
-			newCumulativeTSN: a.peerLastTSN + 1,
+			newCumulativeTSN: a.peerLastTSN() + 1,
 			streams: []chunkForwardTSNStream{
 				{identifier: 0, sequence: 1},
 			},
@@ -1369,7 +1355,7 @@ func TestHandleForwardTSN(t *testing.T) {
 		a.lock.Lock()
 		immediateAckTriggered := a.immediateAckTriggered
 		a.lock.Unlock()
-		assert.Equal(t, a.peerLastTSN, prevTSN+1, "peerLastTSN should advance by 1")
+		assert.Equal(t, a.peerLastTSN(), prevTSN+1, "peerLastTSN should advance by 1")
 		assert.True(t, immediateAckTriggered, "immediate sack should be triggered")
 
 		assert.Nil(t, p, "should return nil")
@@ -1381,10 +1367,10 @@ func TestHandleForwardTSN(t *testing.T) {
 			LoggerFactory: loggerFactory,
 		})
 		a.useForwardTSN = true
-		prevTSN := a.peerLastTSN
+		prevTSN := a.peerLastTSN()
 
 		fwdtsn := &chunkForwardTSN{
-			newCumulativeTSN: a.peerLastTSN, // old TSN
+			newCumulativeTSN: a.peerLastTSN(), // old TSN
 			streams: []chunkForwardTSNStream{
 				{identifier: 0, sequence: 1},
 			},
@@ -1395,7 +1381,7 @@ func TestHandleForwardTSN(t *testing.T) {
 		a.lock.Lock()
 		ackState := a.ackState
 		a.lock.Unlock()
-		assert.Equal(t, a.peerLastTSN, prevTSN, "peerLastTSN should not advance")
+		assert.Equal(t, a.peerLastTSN(), prevTSN, "peerLastTSN should not advance")
 		assert.Equal(t, ackStateImmediate, ackState, "sack should be requested")
 		assert.Nil(t, p, "should return nil")
 	})
@@ -1690,7 +1676,7 @@ func TestAssocCreateNewStream(t *testing.T) {
 		toBeIgnored := &chunkPayloadData{
 			beginningFragment: true,
 			endingFragment:    true,
-			tsn:               a.peerLastTSN + 1,
+			tsn:               a.peerLastTSN() + 1,
 			streamIdentifier:  newSI,
 			userData:          []byte("ABC"),
 		}
@@ -2482,7 +2468,7 @@ func TestAssocHandleInit(t *testing.T) {
 			return
 		}
 		assert.NoError(t, err, "should succeed")
-		assert.Equal(t, init.initialTSN-1, a.peerLastTSN, "should match")
+		assert.Equal(t, init.initialTSN-1, a.peerLastTSN(), "should match")
 		assert.Equal(t, uint16(1001), a.myMaxNumOutboundStreams, "should match")
 		assert.Equal(t, uint16(1002), a.myMaxNumInboundStreams, "should match")
 		assert.Equal(t, uint32(5678), a.peerVerificationTag, "should match")
