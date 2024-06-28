@@ -127,21 +127,25 @@ func (q *receivePayloadQueue) getGapAckBlocks() (gapAckBlocks []gapAckBlock) {
 			if zeroBit, ok := getFirstZeroBit(q.tsnBitmask[index], offset, 64); ok {
 				b.end = uint16(tsn + uint32(zeroBit-offset) - 1 - q.cumulativeTSN)
 				tsn += uint32(zeroBit - offset)
-				gapAckBlocks = append(gapAckBlocks, gapAckBlock{
-					start: b.start,
-					end:   b.end,
-				})
-				findEnd = false
-			} else {
-				tsn += uint32(64 - offset)
-				if tsn > endTSN {
-					b.end = uint16(endTSN - q.cumulativeTSN)
+				if sna32LTE(tsn, endTSN) {
 					gapAckBlocks = append(gapAckBlocks, gapAckBlock{
 						start: b.start,
 						end:   b.end,
 					})
-					break
 				}
+				findEnd = false
+			} else {
+				tsn += uint32(64 - offset)
+			}
+
+			// no zero bit at the end, close and append the last gap
+			if sna32GT(tsn, endTSN) {
+				b.end = uint16(endTSN - q.cumulativeTSN)
+				gapAckBlocks = append(gapAckBlocks, gapAckBlock{
+					start: b.start,
+					end:   b.end,
+				})
+				break
 			}
 		}
 	}

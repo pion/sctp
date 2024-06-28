@@ -26,22 +26,25 @@ func TestReceivePayloadQueue(t *testing.T) {
 	assert.Zero(t, q.size())
 	assert.Empty(t, q.getGapAckBlocks())
 
-	assert.True(t, q.push(initTSN))
-	assert.False(t, q.canPush(initTSN-1))
-	assert.True(t, q.canPush(initTSN+maxOffset-1))
-	assert.False(t, q.canPush(initTSN+maxOffset))
-	assert.False(t, q.push(initTSN+maxOffset))
-	assert.Equal(t, 1, q.size())
-
-	gaps := q.getGapAckBlocks()
-	assert.EqualValues(t, []gapAckBlock{{start: uint16(1), end: uint16(1)}}, gaps)
-
 	nextTSN := initTSN + maxOffset - 1
 	assert.True(t, q.push(nextTSN))
-	assert.Equal(t, 2, q.size())
+	assert.Equal(t, 1, q.size())
 	lastTSN, ok := q.getLastTSNReceived()
 	assert.True(t, lastTSN == nextTSN && ok, "lastTSN:%d, ok:%t", lastTSN, ok)
 	assert.True(t, q.hasChunk(nextTSN))
+
+	assert.True(t, q.push(initTSN))
+	assert.False(t, q.canPush(initTSN-1))
+	assert.False(t, q.canPush(initTSN+maxOffset))
+	assert.False(t, q.push(initTSN+maxOffset))
+	assert.True(t, q.canPush(nextTSN-1))
+	assert.Equal(t, 2, q.size())
+
+	gaps := q.getGapAckBlocks()
+	assert.EqualValues(t, []gapAckBlock{
+		{start: uint16(1), end: uint16(1)},
+		{start: uint16(maxOffset), end: uint16(maxOffset)},
+	}, gaps)
 
 	assert.True(t, q.pop(false))
 	assert.Equal(t, 1, q.size())
