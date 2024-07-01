@@ -3,8 +3,6 @@
 
 package sctp
 
-import "fmt"
-
 type queue[T any] struct {
 	buf   []T
 	head  int
@@ -37,9 +35,6 @@ func (q *queue[T]) PushBack(ele T) {
 }
 
 func (q *queue[T]) PopFront() T {
-	if q.count <= 0 {
-		panic("PopFront() called on empty queue")
-	}
 	ele := q.buf[q.head]
 	var zeroVal T
 	q.buf[q.head] = zeroVal
@@ -49,16 +44,10 @@ func (q *queue[T]) PopFront() T {
 }
 
 func (q *queue[T]) Front() T {
-	if q.count <= 0 {
-		panic("Front() called on empty queue")
-	}
 	return q.buf[q.head]
 }
 
 func (q *queue[T]) At(i int) T {
-	if i < 0 || i >= q.count {
-		panic(fmt.Sprintf("index %d out of range %d", i, q.count))
-	}
 	return q.buf[(q.head+i)%(len(q.buf))]
 }
 

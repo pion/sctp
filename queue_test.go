@@ -11,8 +11,6 @@ import (
 
 func TestQueue(t *testing.T) {
 	q := newQueue[int](32)
-	assert.Panics(t, func() { q.PopFront() })
-	assert.Panics(t, func() { q.Front() })
 	assert.Zero(t, q.Len())
 
 	// test push & pop
@@ -32,9 +30,6 @@ func TestQueue(t *testing.T) {
 	assert.Equal(t, 2, q.Len())
 	assert.Equal(t, 11, q.At(1))
 	assert.Equal(t, 10, q.Front())
-	assert.Panics(t, func() {
-		q.At(33)
-	})
 	assert.Equal(t, 10, q.PopFront())
 	assert.Equal(t, 11, q.PopFront())
 
