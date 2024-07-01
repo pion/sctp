@@ -1,7 +1,6 @@
 module github.com/pion/sctp
 
 require (
-	github.com/gammazero/deque v0.2.1
 	github.com/pion/logging v0.2.2
 	github.com/pion/randutil v0.1.0
 	github.com/pion/transport/v3 v3.0.2
