@@ -3,15 +3,13 @@
 
 package sctp
 
-import "github.com/gammazero/deque"
-
 type payloadQueue struct {
-	chunks *deque.Deque[*chunkPayloadData]
+	chunks *queue[*chunkPayloadData]
 	nBytes int
 }
 
 func newPayloadQueue() *payloadQueue {
-	return &payloadQueue{chunks: deque.New[*chunkPayloadData](128)}
+	return &payloadQueue{chunks: newQueue[*chunkPayloadData](128)}
 }
 
 func (q *payloadQueue) pushNoCheck(p *chunkPayloadData) {
