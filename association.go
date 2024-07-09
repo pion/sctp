@@ -430,7 +430,7 @@ func (a *Association) sendInit() error {
 	}
 
 	outbound := &packet{}
-	outbound.verificationTag = a.peerVerificationTag
+	outbound.verificationTag = 0
 	a.sourcePort = defaultSCTPSrcDstPort
 	a.destinationPort = defaultSCTPSrcDstPort
 	outbound.sourcePort = a.sourcePort
