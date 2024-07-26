@@ -2389,7 +2389,8 @@ func (a *Association) checkPartialReliabilityStatus(c *chunkPayloadData) {
 		}
 		s.lock.RUnlock()
 	} else {
-		a.log.Errorf("[%s] stream %d not found)", a.name, c.streamIdentifier)
+		// Remote has reset its send side of the stream, we can still send data.
+		a.log.Tracef("[%s] stream %d not found, remote reset", a.name, c.streamIdentifier)
 	}
 }
 
