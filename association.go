@@ -33,6 +33,7 @@ var (
 	ErrChunk                         = errors.New("abort chunk, with following errors")
 	ErrShutdownNonEstablished        = errors.New("shutdown called in non-established state")
 	ErrAssociationClosedBeforeConn   = errors.New("association closed before connecting")
+	ErrAssociationClosed             = errors.New("association closed")
 	ErrSilentlyDiscard               = errors.New("silently discard")
 	ErrInitNotStoredToSend           = errors.New("the init not stored to send")
 	ErrCookieEchoNotStoredToSend     = errors.New("cookieEcho not stored to send")
@@ -1504,6 +1505,11 @@ func (a *Association) getMyReceiverWindowCredit() uint32 {
 func (a *Association) OpenStream(streamIdentifier uint16, defaultPayloadType PayloadProtocolIdentifier) (*Stream, error) {
 	a.lock.Lock()
 	defer a.lock.Unlock()
+
+	switch a.getState() {
+	case shutdownAckSent, shutdownPending, shutdownReceived, shutdownSent, closed:
+		return nil, ErrAssociationClosed
+	}
 
 	return a.getOrCreateStream(streamIdentifier, false, defaultPayloadType), nil
 }
