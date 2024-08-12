@@ -3455,3 +3455,19 @@ func TestAssociation_ReconfigRequestsLimited(t *testing.T) {
 	require.NoError(t, a1.Close())
 	require.NoError(t, a2.Close())
 }
+
+func TestAssociation_OpenStreamAfterClose(t *testing.T) {
+	checkGoroutineLeaks(t)
+
+	a1, a2, err := createAssocs()
+	require.NoError(t, err)
+
+	require.NoError(t, a1.Close())
+	require.NoError(t, a2.Close())
+
+	_, err = a1.OpenStream(1, PayloadTypeWebRTCString)
+	require.ErrorIs(t, err, ErrAssociationClosed)
+
+	_, err = a2.OpenStream(1, PayloadTypeWebRTCString)
+	require.ErrorIs(t, err, ErrAssociationClosed)
+}
