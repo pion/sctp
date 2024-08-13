@@ -1375,8 +1375,9 @@ func (a *Association) handleCookieEcho(c *chunkCookieEcho) []*packet {
 		a.storedCookieEcho = nil
 
 		a.setState(established)
-		// Note: This is a future place where the user could be notified (COMMUNICATION UP)
-		a.handshakeCompletedCh <- nil
+		if !a.completeHandshake(nil) {
+			return nil
+		}
 	}
 
 	p := &packet{
@@ -1404,8 +1405,7 @@ func (a *Association) handleCookieAck() {
 	a.storedCookieEcho = nil
 
 	a.setState(established)
-	// Note: This is a future place where the user could be notified (COMMUNICATION UP)
-	a.handshakeCompletedCh <- nil
+	a.completeHandshake(nil)
 }
 
 // The caller should hold the lock.
@@ -2698,13 +2698,13 @@ func (a *Association) onRetransmissionFailure(id int) {
 
 	if id == timerT1Init {
 		a.log.Errorf("[%s] retransmission failure: T1-init", a.name)
-		a.handshakeCompletedCh <- ErrHandshakeInitAck
+		a.completeHandshake(ErrHandshakeInitAck)
 		return
 	}
 
 	if id == timerT1Cookie {
 		a.log.Errorf("[%s] retransmission failure: T1-cookie", a.name)
-		a.handshakeCompletedCh <- ErrHandshakeCookieEcho
+		a.completeHandshake(ErrHandshakeCookieEcho)
 		return
 	}
 
@@ -2751,4 +2751,18 @@ func (a *Association) MaxMessageSize() uint32 {
 // SetMaxMessageSize sets the maximum message size you can send.
 func (a *Association) SetMaxMessageSize(maxMsgSize uint32) {
 	atomic.StoreUint32(&a.maxMessageSize, maxMsgSize)
+}
+
+// completeHandshake sends the given error to  handshakeCompletedCh unless the read/write
+// side of the association closes before that can happen. It returns whether it was able
+// to send on the channel or not.
+func (a *Association) completeHandshake(handshakeErr error) bool {
+	select {
+	// Note: This is a future place where the user could be notified (COMMUNICATION UP)
+	case a.handshakeCompletedCh <- handshakeErr:
+		return true
+	case <-a.closeWriteLoopCh: // check the read/write sides for closure
+	case <-a.readLoopCloseCh:
+	}
+	return false
 }

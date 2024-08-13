@@ -3222,6 +3222,10 @@ func TestAssociation_Abort(t *testing.T) {
 
 // TestAssociation_createClientWithContext tests that the client is closed when the context is canceled.
 func TestAssociation_createClientWithContext(t *testing.T) {
+	// Limit runtime in case of deadlocks
+	lim := test.TimeOut(time.Second * 5)
+	defer lim.Stop()
+
 	checkGoroutineLeaks(t)
 
 	udp1, udp2 := createUDPConnPair()
