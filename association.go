@@ -573,6 +573,7 @@ func (a *Association) readLoop() {
 		a.closeWriteLoopOnce.Do(func() { close(a.closeWriteLoopCh) })
 
 		a.lock.Lock()
+		a.setState(closed)
 		for _, s := range a.streams {
 			a.unregisterStream(s, closeErr)
 		}
