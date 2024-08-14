@@ -3475,3 +3475,25 @@ func TestAssociation_OpenStreamAfterClose(t *testing.T) {
 	_, err = a2.OpenStream(1, PayloadTypeWebRTCString)
 	require.ErrorIs(t, err, ErrAssociationClosed)
 }
+
+// https://github.com/pion/sctp/pull/350
+// may need to run with a high test count to reproduce if there
+// is ever a regression.
+func TestAssociation_OpenStreamAfterInternalClose(t *testing.T) {
+	checkGoroutineLeaks(t)
+
+	a1, a2, err := createAssocs()
+	require.NoError(t, err)
+
+	a1.netConn.Close()
+	a2.netConn.Close()
+
+	a1.OpenStream(1, PayloadTypeWebRTCString)
+	a2.OpenStream(1, PayloadTypeWebRTCString)
+
+	require.NoError(t, a1.Close())
+	require.NoError(t, a2.Close())
+
+	require.Equal(t, 0, len(a1.streams))
+	require.Equal(t, 0, len(a2.streams))
+}
