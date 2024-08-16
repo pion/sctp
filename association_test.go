@@ -3485,11 +3485,14 @@ func TestAssociation_OpenStreamAfterInternalClose(t *testing.T) {
 	a1, a2, err := createAssocs()
 	require.NoError(t, err)
 
-	a1.netConn.Close()
-	a2.netConn.Close()
+	require.NoError(t, a1.netConn.Close())
+	require.NoError(t, a2.netConn.Close())
 
-	a1.OpenStream(1, PayloadTypeWebRTCString)
-	a2.OpenStream(1, PayloadTypeWebRTCString)
+	_, err = a1.OpenStream(1, PayloadTypeWebRTCString)
+	require.NoError(t, err)
+
+	_, err = a2.OpenStream(1, PayloadTypeWebRTCString)
+	require.NoError(t, err)
 
 	require.NoError(t, a1.Close())
 	require.NoError(t, a2.Close())
