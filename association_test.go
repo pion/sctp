@@ -1839,6 +1839,7 @@ func TestAssocCongestionControl(t *testing.T) {
 		br := test.NewBridge()
 
 		a0, a1, err := createNewAssociationPair(br, ackModeNormal, maxReceiveBufferSize)
+		a0.cwndCAStep = 2800 // 2 mtu
 		if !assert.Nil(t, err, "failed to create associations") {
 			assert.FailNow(t, "failed due to earlier error")
 		}
@@ -2735,6 +2736,10 @@ func (d *udpDiscardReader) Read(b []byte) (n int, err error) {
 }
 
 func createAssociationPair(udpConn1 net.Conn, udpConn2 net.Conn) (*Association, *Association, error) {
+	return createAssociationPairWithConfig(udpConn1, udpConn2, Config{})
+}
+
+func createAssociationPairWithConfig(udpConn1 net.Conn, udpConn2 net.Conn, config Config) (*Association, *Association, error) {
 	loggerFactory := logging.NewDefaultLoggerFactory()
 
 	a1Chan := make(chan interface{})
@@ -2744,10 +2749,10 @@ func createAssociationPair(udpConn1 net.Conn, udpConn2 net.Conn) (*Association, 
 	defer cancel()
 
 	go func() {
-		a, err2 := createClientWithContext(ctx, Config{
-			NetConn:       udpConn1,
-			LoggerFactory: loggerFactory,
-		})
+		cfg := config
+		cfg.NetConn = udpConn1
+		cfg.LoggerFactory = loggerFactory
+		a, err2 := createClientWithContext(ctx, cfg)
 		if err2 != nil {
 			a1Chan <- err2
 		} else {
@@ -2756,11 +2761,13 @@ func createAssociationPair(udpConn1 net.Conn, udpConn2 net.Conn) (*Association, 
 	}()
 
 	go func() {
-		a, err2 := createClientWithContext(ctx, Config{
-			NetConn:              udpConn2,
-			LoggerFactory:        loggerFactory,
-			MaxReceiveBufferSize: 100_000,
-		})
+		cfg := config
+		cfg.NetConn = udpConn2
+		cfg.LoggerFactory = loggerFactory
+		if cfg.MaxReceiveBufferSize == 0 {
+			cfg.MaxReceiveBufferSize = 100_000
+		}
+		a, err2 := createClientWithContext(ctx, cfg)
 		if err2 != nil {
 			a2Chan <- err2
 		} else {
@@ -2878,6 +2885,85 @@ func TestAssociationReceiveWindow(t *testing.T) {
 	}
 	close(done)
 	cancel()
+}
+
+func TestAssociationFastRtxWnd(t *testing.T) {
+	udp1, udp2 := createUDPConnPair()
+	a1, a2, err := createAssociationPairWithConfig(udp1, udp2, Config{MinCwnd: 14000, FastRtxWnd: 14000})
+	require.NoError(t, err)
+	defer noErrorClose(t, a2.Close)
+	defer noErrorClose(t, a1.Close)
+	s1, err := a1.OpenStream(1, PayloadTypeWebRTCBinary)
+	require.NoError(t, err)
+	defer noErrorClose(t, s1.Close)
+	_, err = s1.WriteSCTP([]byte("hello"), PayloadTypeWebRTCBinary)
+	require.NoError(t, err)
+	_, err = a2.AcceptStream()
+	require.NoError(t, err)
+
+	a1.rtoMgr.setRTO(1000, true)
+	// ack the hello packet
+	time.Sleep(1 * time.Second)
+
+	require.Equal(t, a1.minCwnd, a1.CWND())
+
+	var shouldDrop atomic.Bool
+	var dropCounter atomic.Uint32
+	dbConn1, ok := udp1.(*dumbConn2)
+	require.True(t, ok)
+	dbConn2, ok := udp2.(*dumbConn2)
+	require.True(t, ok)
+	dbConn1.remoteInboundHandler = func(packet []byte) {
+		if !shouldDrop.Load() {
+			dbConn2.inboundHandler(packet)
+		} else {
+			dropCounter.Add(1)
+		}
+	}
+
+	shouldDrop.Store(true)
+	// send packets and dropped
+	buf := make([]byte, 1000)
+	for i := 0; i < 10; i++ {
+		_, err = s1.WriteSCTP(buf, PayloadTypeWebRTCBinary)
+		require.NoError(t, err)
+	}
+
+	require.Eventually(t, func() bool { return dropCounter.Load() >= 10 }, 5*time.Second, 10*time.Millisecond, "drop %d", dropCounter.Load())
+	// send packets to trigger fast retransmit
+	shouldDrop.Store(false)
+
+	require.Zero(t, a1.stats.getNumFastRetrans())
+	require.False(t, a1.inFastRecovery)
+
+	// wait SACK
+	sackCh := make(chan []byte, 1)
+	dbConn2.remoteInboundHandler = func(buf []byte) {
+		p := &packet{}
+		require.NoError(t, p.unmarshal(true, buf))
+		for _, c := range p.chunks {
+			if _, ok := c.(*chunkSelectiveAck); ok {
+				select {
+				case sackCh <- buf:
+				default:
+				}
+				return
+			}
+		}
+	}
+	// wait sack to trigger fast retransmit
+	for i := 0; i < 3; i++ {
+		_, err = s1.WriteSCTP(buf, PayloadTypeWebRTCBinary)
+		require.NoError(t, err)
+		dbConn1.inboundHandler(<-sackCh)
+	}
+	// fast retransmit and new sack sent
+	require.Eventually(t, func() bool {
+		a1.lock.RLock()
+		defer a1.lock.RUnlock()
+		return a1.inFastRecovery
+	}, 5*time.Second, 10*time.Millisecond)
+	require.GreaterOrEqual(t, uint64(10), a1.stats.getNumFastRetrans())
 }
 
 func TestAssociationMaxTSNOffset(t *testing.T) {
@@ -3489,10 +3575,10 @@ func TestAssociation_OpenStreamAfterInternalClose(t *testing.T) {
 	require.NoError(t, a2.netConn.Close())
 
 	_, err = a1.OpenStream(1, PayloadTypeWebRTCString)
-	require.NoError(t, err)
+	require.True(t, err == nil || errors.Is(err, ErrAssociationClosed))
 
 	_, err = a2.OpenStream(1, PayloadTypeWebRTCString)
-	require.NoError(t, err)
+	require.True(t, err == nil || errors.Is(err, ErrAssociationClosed))
 
 	require.NoError(t, a1.Close())
 	require.NoError(t, a2.Close())
