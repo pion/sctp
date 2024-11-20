@@ -1755,7 +1755,7 @@ func (a *Association) onCumulativeTSNAckPointAdvanced(totalBytesAcked int) {
 }
 
 // The caller should hold the lock.
-func (a *Association) processFastRetransmission(cumTSNAckPoint, htna uint32, cumTSNAckPointAdvanced bool) error {
+func (a *Association) processFastRetransmission(cumTSNAckPoint uint32, gapAckBlocks []gapAckBlock, htna uint32, cumTSNAckPointAdvanced bool) error {
 	// HTNA algorithm - RFC 4960 Sec 7.2.4
 	// Increment missIndicator of each chunks that the SACK reported missing
 	// when either of the following is met:
@@ -1772,7 +1772,10 @@ func (a *Association) processFastRetransmission(cumTSNAckPoint, htna uint32, cum
 			maxTSN = htna
 		} else {
 			// b) increment for all TSNs reported missing
-			maxTSN = cumTSNAckPoint + uint32(a.inflightQueue.size()) + 1
+			maxTSN = cumTSNAckPoint
+			if len(gapAckBlocks) > 0 {
+				maxTSN += uint32(gapAckBlocks[len(gapAckBlocks)-1].end)
+			}
 		}
 
 		for tsn := cumTSNAckPoint + 1; sna32LT(tsn, maxTSN); tsn++ {
@@ -1882,7 +1885,7 @@ func (a *Association) handleSack(d *chunkSelectiveAck) error {
 		a.setRWND(d.advertisedReceiverWindowCredit - bytesOutstanding)
 	}
 
-	err = a.processFastRetransmission(d.cumulativeTSNAck, htna, cumTSNAckPointAdvanced)
+	err = a.processFastRetransmission(d.cumulativeTSNAck, d.gapAckBlocks, htna, cumTSNAckPointAdvanced)
 	if err != nil {
 		return err
 	}
