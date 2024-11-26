@@ -17,6 +17,7 @@ import (
 
 	"github.com/pion/logging"
 	"github.com/pion/randutil"
+	"github.com/pion/transport/v3/deadline"
 )
 
 // Port 5000 shows up in examples for SDPs used by WebRTC. Since this implementation
@@ -251,6 +252,10 @@ type Association struct {
 	delayedAckTriggered   bool
 	immediateAckTriggered bool
 
+	blockWrite   bool
+	writePending bool
+	writeNotify  chan struct{}
+
 	name string
 	log  logging.LeveledLogger
 }
@@ -264,6 +269,7 @@ type Config struct {
 	MaxMessageSize       uint32
 	EnableZeroChecksum   bool
 	LoggerFactory        logging.LoggerFactory
+	BlockWrite           bool
 
 	// congestion control configuration
 	// RTOMax is the maximum retransmission timeout in milliseconds
@@ -375,6 +381,8 @@ func createAssociation(config Config) *Association {
 		stats:                   &associationStats{},
 		log:                     config.LoggerFactory.NewLogger("sctp"),
 		name:                    config.Name,
+		blockWrite:              config.BlockWrite,
+		writeNotify:             make(chan struct{}, 1),
 	}
 
 	if a.name == "" {
@@ -671,6 +679,20 @@ loop:
 func (a *Association) awakeWriteLoop() {
 	select {
 	case a.awakeWriteLoopCh <- struct{}{}:
+	default:
+	}
+}
+
+func (a *Association) isBlockWrite() bool {
+	return a.blockWrite
+}
+
+// Mark the association is writable and unblock the waiting write,
+// the caller should hold the association write lock.
+func (a *Association) notifyBlockWritable() {
+	a.writePending = false
+	select {
+	case a.writeNotify <- struct{}{}:
 	default:
 	}
 }
@@ -1555,6 +1577,7 @@ func (a *Association) createStream(streamIdentifier uint16, accept bool) *Stream
 		reassemblyQueue:  newReassemblyQueue(streamIdentifier),
 		log:              a.log,
 		name:             fmt.Sprintf("%d:%s", streamIdentifier, a.name),
+		writeDeadline:    deadline.New(),
 	}
 
 	s.readNotifier = sync.NewCond(&s.lock)
@@ -2338,6 +2361,11 @@ func (a *Association) popPendingDataChunksToSend() ([]*chunkPayloadData, []uint1
 		}
 	}
 
+	if a.blockWrite && len(chunks) > 0 && a.pendingQueue.size() == 0 {
+		a.log.Tracef("[%s] all pending data have been sent, notify writable", a.name)
+		a.notifyBlockWritable()
+	}
+
 	return chunks, sisToReset
 }
 
@@ -2375,14 +2403,27 @@ func (a *Association) bundleDataChunksIntoPackets(chunks []*chunkPayloadData) []
 }
 
 // sendPayloadData sends the data chunks.
-func (a *Association) sendPayloadData(chunks []*chunkPayloadData) error {
+func (a *Association) sendPayloadData(ctx context.Context, chunks []*chunkPayloadData) error {
 	a.lock.Lock()
-	defer a.lock.Unlock()
 
 	state := a.getState()
 	if state != established {
+		a.lock.Unlock()
 		return fmt.Errorf("%w: state=%s", ErrPayloadDataStateNotExist,
 			getAssociationStateString(state))
+	}
+
+	if a.blockWrite {
+		for a.writePending {
+			a.lock.Unlock()
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-a.writeNotify:
+				a.lock.Lock()
+			}
+		}
+		a.writePending = true
 	}
 
 	// Push the chunks into the pending queue first.
@@ -2390,6 +2431,7 @@ func (a *Association) sendPayloadData(chunks []*chunkPayloadData) error {
 		a.pendingQueue.push(c)
 	}
 
+	a.lock.Unlock()
 	a.awakeWriteLoop()
 	return nil
 }
