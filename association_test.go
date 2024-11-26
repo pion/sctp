@@ -2845,7 +2845,7 @@ func TestAssociationReceiveWindow(t *testing.T) {
 
 	done := make(chan bool)
 	go func() {
-		chunks := s1.packetize(make([]byte, 1000), PayloadTypeWebRTCBinary)
+		chunks, _ := s1.packetize(make([]byte, 1000), PayloadTypeWebRTCBinary)
 		chunks = chunks[:1]
 		chunk := chunks[0]
 		// Fake the TSN and enqueue 1 chunk with a very high tsn in the payload queue
@@ -3016,7 +3016,7 @@ func TestAssociationMaxTSNOffset(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint16(1), s2.streamIdentifier)
 
-	chunks := s1.packetize(make([]byte, 1000), PayloadTypeWebRTCBinary)
+	chunks, _ := s1.packetize(make([]byte, 1000), PayloadTypeWebRTCBinary)
 	chunks = chunks[:1]
 	sendChunk := func(tsn uint32) {
 		chunk := chunks[0]
@@ -3615,4 +3615,95 @@ func TestAssociation_OpenStreamAfterInternalClose(t *testing.T) {
 
 	require.Equal(t, 0, len(a1.streams))
 	require.Equal(t, 0, len(a2.streams))
+}
+
+func TestAssociation_BlockWrite(t *testing.T) {
+	checkGoroutineLeaks(t)
+
+	conn1, conn2 := createUDPConnPair()
+	a1, a2, err := createAssociationPairWithConfig(conn1, conn2, Config{BlockWrite: true, MaxReceiveBufferSize: 4000})
+	require.NoError(t, err)
+
+	defer noErrorClose(t, a2.Close)
+	defer noErrorClose(t, a1.Close)
+	s1, err := a1.OpenStream(1, PayloadTypeWebRTCBinary)
+	require.NoError(t, err)
+	defer noErrorClose(t, s1.Close)
+	_, err = s1.WriteSCTP([]byte("hello"), PayloadTypeWebRTCBinary)
+	require.NoError(t, err)
+	s2, err := a2.AcceptStream()
+	require.NoError(t, err)
+
+	data := make([]byte, 4000)
+	n, err := s2.Read(data)
+	require.NoError(t, err)
+	require.Equal(t, "hello", string(data[:n]))
+
+	// Write should block until data is sent
+	dbConn1, ok := conn1.(*dumbConn2)
+	require.True(t, ok)
+	dbConn2, ok := conn2.(*dumbConn2)
+	require.True(t, ok)
+
+	dbConn1.remoteInboundHandler = dbConn2.inboundHandler
+
+	_, err = s1.WriteSCTP(data, PayloadTypeWebRTCBinary)
+	require.NoError(t, err)
+	_, err = s1.WriteSCTP(data, PayloadTypeWebRTCBinary)
+	require.NoError(t, err)
+
+	// test write deadline
+	// a2's awnd is 0, so write should be blocked
+	require.NoError(t, s1.SetWriteDeadline(time.Now().Add(100*time.Millisecond)))
+	_, err = s1.WriteSCTP(data, PayloadTypeWebRTCBinary)
+	require.ErrorIs(t, err, context.DeadlineExceeded, err)
+
+	// test write deadline cancel
+	require.NoError(t, s1.SetWriteDeadline(time.Time{}))
+	var deadLineCanceled atomic.Bool
+	writeCanceled := make(chan struct{}, 2)
+	// both write should be blocked and canceled by deadline
+	go func() {
+		_, err1 := s1.WriteSCTP(data, PayloadTypeWebRTCBinary)
+		require.ErrorIs(t, err, context.DeadlineExceeded, err1)
+		require.True(t, deadLineCanceled.Load())
+		writeCanceled <- struct{}{}
+	}()
+	go func() {
+		_, err1 := s1.WriteSCTP(data, PayloadTypeWebRTCBinary)
+		require.ErrorIs(t, err, context.DeadlineExceeded, err1)
+		require.True(t, deadLineCanceled.Load())
+		writeCanceled <- struct{}{}
+	}()
+	time.Sleep(100 * time.Millisecond)
+	deadLineCanceled.Store(true)
+	require.NoError(t, s1.SetWriteDeadline(time.Now().Add(-1*time.Second)))
+	<-writeCanceled
+	<-writeCanceled
+	require.NoError(t, s1.SetWriteDeadline(time.Time{}))
+
+	rn, rerr := s2.Read(data)
+	require.NoError(t, rerr)
+	require.Equal(t, 4000, rn)
+
+	// slow reader and fast writer, make sure all write is blocked
+	go func() {
+		for {
+			bytes := make([]byte, 4000)
+			rn, rerr = s2.Read(bytes)
+			if errors.Is(rerr, io.EOF) {
+				return
+			}
+			require.NoError(t, rerr)
+			require.Equal(t, 4000, rn)
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+
+	for i := 0; i < 10; i++ {
+		_, err = s1.Write(data)
+		require.NoError(t, err)
+		// bufferedAmount should not exceed RWND+message size (inflight + pending)
+		require.LessOrEqual(t, s1.BufferedAmount(), uint64(4000*2))
+	}
 }
