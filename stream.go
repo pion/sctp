@@ -291,6 +291,7 @@ func (s *Stream) WriteSCTP(p []byte, ppi PayloadProtocolIdentifier) (int, error)
 			s.sequenceNumber--
 		}
 		s.lock.Unlock()
+		n = 0
 	}
 	if s.association.isBlockWrite() {
 		s.writeLock.Unlock()
