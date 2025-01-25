@@ -17,21 +17,22 @@ const (
 )
 
 func makeDataChunk(tsn uint32, unordered bool, frag int) *chunkPayloadData {
-	var b, e bool
+	var begin, end bool
 	switch frag {
 	case noFragment:
-		b = true
-		e = true
+		begin = true
+		end = true
 	case fragBegin:
-		b = true
+		begin = true
 	case fragEnd:
-		e = true
+		end = true
 	}
+
 	return &chunkPayloadData{
 		tsn:               tsn,
 		unordered:         unordered,
-		beginningFragment: b,
-		endingFragment:    e,
+		beginningFragment: begin,
+		endingFragment:    end,
 		userData:          make([]byte, 10), // always 10 bytes
 	}
 }
@@ -124,25 +125,25 @@ func TestPendingQueue(t *testing.T) {
 		pq.push(makeDataChunk(3, true, noFragment))
 		assert.Equal(t, 40, pq.getNumBytes(), "total bytes mismatch")
 
-		c := pq.peek()
-		err := pq.pop(c)
+		chunkPayload := pq.peek()
+		err := pq.pop(chunkPayload)
 		assert.NoError(t, err, "should not error")
-		assert.Equal(t, uint32(1), c.tsn, "TSN should match")
+		assert.Equal(t, uint32(1), chunkPayload.tsn, "TSN should match")
 
-		c = pq.peek()
-		err = pq.pop(c)
+		chunkPayload = pq.peek()
+		err = pq.pop(chunkPayload)
 		assert.NoError(t, err, "should not error")
-		assert.Equal(t, uint32(3), c.tsn, "TSN should match")
+		assert.Equal(t, uint32(3), chunkPayload.tsn, "TSN should match")
 
-		c = pq.peek()
-		err = pq.pop(c)
+		chunkPayload = pq.peek()
+		err = pq.pop(chunkPayload)
 		assert.NoError(t, err, "should not error")
-		assert.Equal(t, uint32(0), c.tsn, "TSN should match")
+		assert.Equal(t, uint32(0), chunkPayload.tsn, "TSN should match")
 
-		c = pq.peek()
-		err = pq.pop(c)
+		chunkPayload = pq.peek()
+		err = pq.pop(chunkPayload)
 		assert.NoError(t, err, "should not error")
-		assert.Equal(t, uint32(2), c.tsn, "TSN should match")
+		assert.Equal(t, uint32(2), chunkPayload.tsn, "TSN should match")
 
 		assert.Equal(t, 0, pq.getNumBytes(), "total bytes mismatch")
 	})
@@ -172,10 +173,10 @@ func TestPendingQueue(t *testing.T) {
 		pq := newPendingQueue()
 		pq.push(makeDataChunk(0, false, fragBegin))
 
-		c := pq.peek()
-		err := pq.pop(c)
+		chunkPayload := pq.peek()
+		err := pq.pop(chunkPayload)
 		assert.NoError(t, err, "should not error")
-		assert.Equal(t, uint32(0), c.tsn, "TSN should match")
+		assert.Equal(t, uint32(0), chunkPayload.tsn, "TSN should match")
 
 		pq.push(makeDataChunk(1, true, noFragment))
 		pq.push(makeDataChunk(2, false, fragMiddle))
@@ -184,10 +185,10 @@ func TestPendingQueue(t *testing.T) {
 		expects := []uint32{2, 3, 1}
 
 		for _, exp := range expects {
-			c = pq.peek()
-			err = pq.pop(c)
+			chunkPayload = pq.peek()
+			err = pq.pop(chunkPayload)
 			assert.NoError(t, err, "should not error")
-			assert.Equal(t, exp, c.tsn, "TSN should match")
+			assert.Equal(t, exp, chunkPayload.tsn, "TSN should match")
 		}
 	})
 }

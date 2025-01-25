@@ -51,6 +51,8 @@ func TestAssocStressDuplex(t *testing.T) {
 }
 
 func stressDuplex(t *testing.T) {
+	t.Helper()
+
 	ca, cb, stop, err := pipe(pipeDump)
 	if err != nil {
 		t.Fatal(err)
@@ -91,6 +93,8 @@ func pipe(piper piperFunc) (*Stream, *Stream, func(*testing.T), error) {
 	}
 
 	stop := func(t *testing.T) {
+		t.Helper()
+
 		err = sa.Close()
 		if err != nil {
 			t.Error(err)
@@ -120,7 +124,7 @@ func association(piper piperFunc) (*Association, *Association, error) {
 		err error
 	}
 
-	c := make(chan result)
+	resultCh := make(chan result)
 	loggerFactory := logging.NewDefaultLoggerFactory()
 
 	// Setup client
@@ -129,7 +133,7 @@ func association(piper piperFunc) (*Association, *Association, error) {
 			NetConn:       ca,
 			LoggerFactory: loggerFactory,
 		})
-		c <- result{client, err}
+		resultCh <- result{client, err}
 	}()
 
 	// Setup server
@@ -142,7 +146,7 @@ func association(piper piperFunc) (*Association, *Association, error) {
 	}
 
 	// Receive client
-	res := <-c
+	res := <-resultCh
 	if res.err != nil {
 		return nil, nil, res.err
 	}
@@ -189,12 +193,13 @@ type dumbConn struct {
 func acceptDumbConn() *dumbConn {
 	pConn, err := net.ListenUDP("udp4", nil)
 	check(err)
+
 	return &dumbConn{
 		pConn: pConn,
 	}
 }
 
-// Read
+// Read.
 func (c *dumbConn) Read(p []byte) (int, error) {
 	i, rAddr, err := c.pConn.ReadFrom(p)
 	if err != nil {
@@ -208,47 +213,54 @@ func (c *dumbConn) Read(p []byte) (int, error) {
 	return i, err
 }
 
-// Write writes len(p) bytes from p to the DTLS connection
+// Write writes len(p) bytes from p to the DTLS connection.
 func (c *dumbConn) Write(p []byte) (n int, err error) {
 	return c.pConn.WriteTo(p, c.RemoteAddr())
 }
 
-// Close closes the conn and releases any Read calls
+// Close closes the conn and releases any Read calls.
 func (c *dumbConn) Close() error {
 	return c.pConn.Close()
 }
 
-// LocalAddr is a stub
+// LocalAddr is a stub.
 func (c *dumbConn) LocalAddr() net.Addr {
 	if c.pConn != nil {
 		return c.pConn.LocalAddr()
 	}
+
 	return nil
 }
 
-// RemoteAddr is a stub
+// RemoteAddr is a stub.
 func (c *dumbConn) RemoteAddr() net.Addr {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+
 	return c.rAddr
 }
 
-// SetDeadline is a stub
+// SetDeadline is a stub.
 func (c *dumbConn) SetDeadline(time.Time) error {
 	return nil
 }
 
-// SetReadDeadline is a stub
+// SetReadDeadline is a stub.
 func (c *dumbConn) SetReadDeadline(time.Time) error {
 	return nil
 }
 
-// SetWriteDeadline is a stub
+// SetWriteDeadline is a stub.
 func (c *dumbConn) SetWriteDeadline(time.Time) error {
 	return nil
 }
 
-func createNewAssociationPair(br *test.Bridge, ackMode int, recvBufSize uint32) (*Association, *Association, error) {
+//nolint:cyclop
+func createNewAssociationPair(
+	br *test.Bridge,
+	ackMode int,
+	recvBufSize uint32,
+) (*Association, *Association, error) {
 	var a0, a1 *Association
 	var err0, err1 error
 	loggerFactory := logging.NewDefaultLoggerFactory()
@@ -416,14 +428,14 @@ func establishSessionPair(br *test.Bridge, a0, a1 *Association, si uint16) (*Str
 	return s0, s1, nil
 }
 
-func TestAssocReliable(t *testing.T) {
+func TestAssocReliable(t *testing.T) { //nolint:cyclop,maintidx
 	// sbuf - small enough not to be fragmented
 	//        large enough not to be bundled
 	sbuf := make([]byte, 1000)
 	for i := 0; i < len(sbuf); i++ {
 		sbuf[i] = byte(i & 0xff)
 	}
-	rand.Seed(time.Now().UnixNano())
+	rand.Seed(time.Now().UnixNano()) //nolint:staticcheck // TODO: remove?
 	rand.Shuffle(len(sbuf), func(i, j int) { sbuf[i], sbuf[j] = sbuf[j], sbuf[i] })
 
 	// sbufL - large enough to be fragmented into two chunks and each chunks are
@@ -432,7 +444,7 @@ func TestAssocReliable(t *testing.T) {
 	for i := 0; i < len(sbufL); i++ {
 		sbufL[i] = byte(i & 0xff)
 	}
-	rand.Seed(time.Now().UnixNano())
+	rand.Seed(time.Now().UnixNano()) //nolint:staticcheck // TODO: remove?
 	rand.Shuffle(len(sbufL), func(i, j int) { sbufL[i], sbufL[j] = sbufL[j], sbufL[i] })
 
 	t.Run("Simple", func(t *testing.T) {
@@ -825,7 +837,7 @@ func TestAssocReliable(t *testing.T) {
 	})
 }
 
-func TestAssocUnreliable(t *testing.T) {
+func TestAssocUnreliable(t *testing.T) { //nolint:cyclop,maintidx
 	// sbuf1, sbuf2:
 	//    large enough to be fragmented into two chunks and each chunks are
 	//    large enough not to be bundled
@@ -834,12 +846,12 @@ func TestAssocUnreliable(t *testing.T) {
 	for i := 0; i < len(sbuf1); i++ {
 		sbuf1[i] = byte(i & 0xff)
 	}
-	rand.Seed(time.Now().UnixNano())
+	rand.Seed(time.Now().UnixNano()) //nolint:staticcheck // TODO: remove?
 	rand.Shuffle(len(sbuf1), func(i, j int) { sbuf1[i], sbuf1[j] = sbuf1[j], sbuf1[i] })
 	for i := 0; i < len(sbuf2); i++ {
 		sbuf2[i] = byte(i & 0xff)
 	}
-	rand.Seed(time.Now().UnixNano())
+	rand.Seed(time.Now().UnixNano()) //nolint:staticcheck // TODO: remove?
 	rand.Shuffle(len(sbuf2), func(i, j int) { sbuf2[i], sbuf2[j] = sbuf2[j], sbuf2[i] })
 
 	// sbuf - small enough not to be fragmented
@@ -848,7 +860,7 @@ func TestAssocUnreliable(t *testing.T) {
 	for i := 0; i < len(sbuf); i++ {
 		sbuf[i] = byte(i & 0xff)
 	}
-	rand.Seed(time.Now().UnixNano())
+	rand.Seed(time.Now().UnixNano()) //nolint:staticcheck // TODO: remove?
 	rand.Shuffle(len(sbuf), func(i, j int) { sbuf[i], sbuf[j] = sbuf[j], sbuf[i] })
 
 	t.Run("Rexmit ordered no fragment", func(t *testing.T) { // nolint:dupl
@@ -1185,7 +1197,7 @@ func TestAssocUnreliable(t *testing.T) {
 // A test for this PR https://github.com/pion/sctp/pull/341
 // We drop the first INIT ACK, and we expect the verification tag to be 0 on
 // retransmission.
-func TestInitVerificationTagIsZero(t *testing.T) {
+func TestInitVerificationTagIsZero(t *testing.T) { //nolint:cyclop
 	lim := test.TimeOut(time.Second * 10)
 	defer lim.Stop()
 
@@ -1230,6 +1242,7 @@ func TestInitVerificationTagIsZero(t *testing.T) {
 		// Drop the first two Init Ack chunk.
 		case *chunkInitAck:
 			ackCount++
+
 			return ackCount > 2
 		}
 
@@ -1324,14 +1337,14 @@ func TestCreateForwardTSN(t *testing.T) {
 	loggerFactory := logging.NewDefaultLoggerFactory()
 
 	t.Run("forward one abandoned", func(t *testing.T) {
-		a := createAssociation(Config{
+		assoc := createAssociation(Config{
 			NetConn:       &dumbConn{},
 			LoggerFactory: loggerFactory,
 		})
 
-		a.cumulativeTSNAckPoint = 9
-		a.advancedPeerTSNAckPoint = 10
-		a.inflightQueue.pushNoCheck(&chunkPayloadData{
+		assoc.cumulativeTSNAckPoint = 9
+		assoc.advancedPeerTSNAckPoint = 10
+		assoc.inflightQueue.pushNoCheck(&chunkPayloadData{
 			beginningFragment:    true,
 			endingFragment:       true,
 			tsn:                  10,
@@ -1342,7 +1355,7 @@ func TestCreateForwardTSN(t *testing.T) {
 			_abandoned:           true,
 		})
 
-		fwdtsn := a.createForwardTSN()
+		fwdtsn := assoc.createForwardTSN()
 
 		assert.Equal(t, uint32(10), fwdtsn.newCumulativeTSN, "should be able to serialize")
 		assert.Equal(t, 1, len(fwdtsn.streams), "there should be one stream")
@@ -1351,14 +1364,14 @@ func TestCreateForwardTSN(t *testing.T) {
 	})
 
 	t.Run("forward two abandoned with the same SI", func(t *testing.T) {
-		a := createAssociation(Config{
+		assoc := createAssociation(Config{
 			NetConn:       &dumbConn{},
 			LoggerFactory: loggerFactory,
 		})
 
-		a.cumulativeTSNAckPoint = 9
-		a.advancedPeerTSNAckPoint = 12
-		a.inflightQueue.pushNoCheck(&chunkPayloadData{
+		assoc.cumulativeTSNAckPoint = 9
+		assoc.advancedPeerTSNAckPoint = 12
+		assoc.inflightQueue.pushNoCheck(&chunkPayloadData{
 			beginningFragment:    true,
 			endingFragment:       true,
 			tsn:                  10,
@@ -1368,7 +1381,7 @@ func TestCreateForwardTSN(t *testing.T) {
 			nSent:                1,
 			_abandoned:           true,
 		})
-		a.inflightQueue.pushNoCheck(&chunkPayloadData{
+		assoc.inflightQueue.pushNoCheck(&chunkPayloadData{
 			beginningFragment:    true,
 			endingFragment:       true,
 			tsn:                  11,
@@ -1378,7 +1391,7 @@ func TestCreateForwardTSN(t *testing.T) {
 			nSent:                1,
 			_abandoned:           true,
 		})
-		a.inflightQueue.pushNoCheck(&chunkPayloadData{
+		assoc.inflightQueue.pushNoCheck(&chunkPayloadData{
 			beginningFragment:    true,
 			endingFragment:       true,
 			tsn:                  12,
@@ -1389,7 +1402,7 @@ func TestCreateForwardTSN(t *testing.T) {
 			_abandoned:           true,
 		})
 
-		fwdtsn := a.createForwardTSN()
+		fwdtsn := assoc.createForwardTSN()
 
 		assert.Equal(t, uint32(12), fwdtsn.newCumulativeTSN, "should be able to serialize")
 		assert.Equal(t, 2, len(fwdtsn.streams), "there should be two stream")
@@ -1417,116 +1430,116 @@ func TestHandleForwardTSN(t *testing.T) {
 	loggerFactory := logging.NewDefaultLoggerFactory()
 
 	t.Run("forward 3 unreceived chunks", func(t *testing.T) {
-		a := createAssociation(Config{
+		assoc := createAssociation(Config{
 			NetConn:       &dumbConn{},
 			LoggerFactory: loggerFactory,
 		})
-		a.useForwardTSN = true
-		prevTSN := a.peerLastTSN()
+		assoc.useForwardTSN = true
+		prevTSN := assoc.peerLastTSN()
 
 		fwdtsn := &chunkForwardTSN{
 			newCumulativeTSN: prevTSN + 3,
 			streams:          []chunkForwardTSNStream{{identifier: 0, sequence: 0}},
 		}
 
-		p := a.handleForwardTSN(fwdtsn)
+		p := assoc.handleForwardTSN(fwdtsn)
 
-		a.lock.Lock()
-		delayedAckTriggered := a.delayedAckTriggered
-		immediateAckTriggered := a.immediateAckTriggered
-		a.lock.Unlock()
-		assert.Equal(t, a.peerLastTSN(), prevTSN+3, "peerLastTSN should advance by 3 ")
+		assoc.lock.Lock()
+		delayedAckTriggered := assoc.delayedAckTriggered
+		immediateAckTriggered := assoc.immediateAckTriggered
+		assoc.lock.Unlock()
+		assert.Equal(t, assoc.peerLastTSN(), prevTSN+3, "peerLastTSN should advance by 3 ")
 		assert.True(t, delayedAckTriggered, "delayed sack should be triggered")
 		assert.False(t, immediateAckTriggered, "immediate sack should NOT be triggered")
 		assert.Nil(t, p, "should return nil")
 	})
 
 	t.Run("forward 1 for 1 missing", func(t *testing.T) {
-		a := createAssociation(Config{
+		assoc := createAssociation(Config{
 			NetConn:       &dumbConn{},
 			LoggerFactory: loggerFactory,
 		})
-		a.useForwardTSN = true
-		prevTSN := a.peerLastTSN()
+		assoc.useForwardTSN = true
+		prevTSN := assoc.peerLastTSN()
 
 		// this chunk is blocked by the missing chunk at tsn=1
-		a.payloadQueue.push(a.peerLastTSN() + 2)
+		assoc.payloadQueue.push(assoc.peerLastTSN() + 2)
 
 		fwdtsn := &chunkForwardTSN{
-			newCumulativeTSN: a.peerLastTSN() + 1,
+			newCumulativeTSN: assoc.peerLastTSN() + 1,
 			streams: []chunkForwardTSNStream{
 				{identifier: 0, sequence: 1},
 			},
 		}
 
-		p := a.handleForwardTSN(fwdtsn)
+		p := assoc.handleForwardTSN(fwdtsn)
 
-		a.lock.Lock()
-		delayedAckTriggered := a.delayedAckTriggered
-		immediateAckTriggered := a.immediateAckTriggered
-		a.lock.Unlock()
-		assert.Equal(t, a.peerLastTSN(), prevTSN+2, "peerLastTSN should advance by 3")
+		assoc.lock.Lock()
+		delayedAckTriggered := assoc.delayedAckTriggered
+		immediateAckTriggered := assoc.immediateAckTriggered
+		assoc.lock.Unlock()
+		assert.Equal(t, assoc.peerLastTSN(), prevTSN+2, "peerLastTSN should advance by 3")
 		assert.True(t, delayedAckTriggered, "delayed sack should be triggered")
 		assert.False(t, immediateAckTriggered, "immediate sack should NOT be triggered")
 		assert.Nil(t, p, "should return nil")
 	})
 
 	t.Run("forward 1 for 2 missing", func(t *testing.T) {
-		a := createAssociation(Config{
+		assoc := createAssociation(Config{
 			NetConn:       &dumbConn{},
 			LoggerFactory: loggerFactory,
 		})
-		a.useForwardTSN = true
-		prevTSN := a.peerLastTSN()
+		assoc.useForwardTSN = true
+		prevTSN := assoc.peerLastTSN()
 
 		// this chunk is blocked by the missing chunk at tsn=1
-		a.payloadQueue.push(a.peerLastTSN() + 3)
+		assoc.payloadQueue.push(assoc.peerLastTSN() + 3)
 
 		fwdtsn := &chunkForwardTSN{
-			newCumulativeTSN: a.peerLastTSN() + 1,
+			newCumulativeTSN: assoc.peerLastTSN() + 1,
 			streams: []chunkForwardTSNStream{
 				{identifier: 0, sequence: 1},
 			},
 		}
 
-		p := a.handleForwardTSN(fwdtsn)
+		p := assoc.handleForwardTSN(fwdtsn)
 
-		a.lock.Lock()
-		immediateAckTriggered := a.immediateAckTriggered
-		a.lock.Unlock()
-		assert.Equal(t, a.peerLastTSN(), prevTSN+1, "peerLastTSN should advance by 1")
+		assoc.lock.Lock()
+		immediateAckTriggered := assoc.immediateAckTriggered
+		assoc.lock.Unlock()
+		assert.Equal(t, assoc.peerLastTSN(), prevTSN+1, "peerLastTSN should advance by 1")
 		assert.True(t, immediateAckTriggered, "immediate sack should be triggered")
 
 		assert.Nil(t, p, "should return nil")
 	})
 
 	t.Run("dup forward TSN chunk should generate sack", func(t *testing.T) {
-		a := createAssociation(Config{
+		assoc := createAssociation(Config{
 			NetConn:       &dumbConn{},
 			LoggerFactory: loggerFactory,
 		})
-		a.useForwardTSN = true
-		prevTSN := a.peerLastTSN()
+		assoc.useForwardTSN = true
+		prevTSN := assoc.peerLastTSN()
 
 		fwdtsn := &chunkForwardTSN{
-			newCumulativeTSN: a.peerLastTSN(), // old TSN
+			newCumulativeTSN: assoc.peerLastTSN(), // old TSN
 			streams: []chunkForwardTSNStream{
 				{identifier: 0, sequence: 1},
 			},
 		}
 
-		p := a.handleForwardTSN(fwdtsn)
+		p := assoc.handleForwardTSN(fwdtsn)
 
-		a.lock.Lock()
-		ackState := a.ackState
-		a.lock.Unlock()
-		assert.Equal(t, a.peerLastTSN(), prevTSN, "peerLastTSN should not advance")
+		assoc.lock.Lock()
+		ackState := assoc.ackState
+		assoc.lock.Unlock()
+		assert.Equal(t, assoc.peerLastTSN(), prevTSN, "peerLastTSN should not advance")
 		assert.Equal(t, ackStateImmediate, ackState, "sack should be requested")
 		assert.Nil(t, p, "should return nil")
 	})
 }
 
-func TestAssocT1InitTimer(t *testing.T) {
+func TestAssocT1InitTimer(t *testing.T) { //nolint:cyclop
 	loggerFactory := logging.NewDefaultLoggerFactory()
 
 	t.Run("Retransmission success", func(t *testing.T) {
@@ -1655,7 +1668,7 @@ func TestAssocT1InitTimer(t *testing.T) {
 	})
 }
 
-func TestAssocT1CookieTimer(t *testing.T) {
+func TestAssocT1CookieTimer(t *testing.T) { //nolint:cyclop
 	loggerFactory := logging.NewDefaultLoggerFactory()
 
 	t.Run("Retransmission success", func(t *testing.T) {
@@ -1765,6 +1778,7 @@ func TestAssocT1CookieTimer(t *testing.T) {
 					return true
 				}
 			}
+
 			return true
 		})
 
@@ -1795,32 +1809,32 @@ func TestAssocCreateNewStream(t *testing.T) {
 	loggerFactory := logging.NewDefaultLoggerFactory()
 
 	t.Run("acceptChSize", func(t *testing.T) {
-		a := createAssociation(Config{
+		assoc := createAssociation(Config{
 			NetConn:       &dumbConn{},
 			LoggerFactory: loggerFactory,
 		})
 
 		for i := 0; i < acceptChSize; i++ {
-			s := a.createStream(uint16(i), true)
-			_, ok := a.streams[s.streamIdentifier]
+			s := assoc.createStream(uint16(i), true) //nolint:gosec
+			_, ok := assoc.streams[s.streamIdentifier]
 			assert.True(t, ok, "should be in a.streams map")
 		}
 
 		newSI := uint16(acceptChSize)
-		s := a.createStream(newSI, true)
+		s := assoc.createStream(newSI, true)
 		assert.Nil(t, s, "should be nil")
-		_, ok := a.streams[newSI]
+		_, ok := assoc.streams[newSI]
 		assert.False(t, ok, "should NOT be in a.streams map")
 
 		toBeIgnored := &chunkPayloadData{
 			beginningFragment: true,
 			endingFragment:    true,
-			tsn:               a.peerLastTSN() + 1,
+			tsn:               assoc.peerLastTSN() + 1,
 			streamIdentifier:  newSI,
 			userData:          []byte("ABC"),
 		}
 
-		p := a.handleData(toBeIgnored)
+		p := assoc.handleData(toBeIgnored)
 		assert.Nil(t, p, "should be nil")
 	})
 }
@@ -1882,7 +1896,7 @@ func TestAssocT3RtxTimer(t *testing.T) {
 	})
 }
 
-func TestAssocCongestionControl(t *testing.T) {
+func TestAssocCongestionControl(t *testing.T) { //nolint:cyclop,maintidx
 	// sbuf - large enough not to be bundled
 	sbuf := make([]byte, 1000)
 	for i := 0; i < len(sbuf); i++ {
@@ -1913,7 +1927,7 @@ func TestAssocCongestionControl(t *testing.T) {
 		br.DropNextNWrites(0, 1) // drop the next write
 
 		for i := 0; i < 4; i++ {
-			binary.BigEndian.PutUint32(sbuf, uint32(i)) // uint32 sequence number
+			binary.BigEndian.PutUint32(sbuf, uint32(i)) //nolint:gosec // G115 uint32 sequence number
 			n, err = s0.WriteSCTP(sbuf, PayloadTypeWebRTCBinary)
 			assert.Nil(t, err, "WriteSCTP failed")
 			assert.Equal(t, n, len(sbuf), "unexpected length of received data")
@@ -1990,7 +2004,7 @@ func TestAssocCongestionControl(t *testing.T) {
 		a1.stats.reset()
 
 		for i := 0; i < nPacketsToSend; i++ {
-			binary.BigEndian.PutUint32(sbuf, uint32(i)) // uint32 sequence number
+			binary.BigEndian.PutUint32(sbuf, uint32(i)) //nolint:gosec // G115 uint32 sequence number
 			n, err = s0.WriteSCTP(sbuf, PayloadTypeWebRTCBinary)
 			assert.Nil(t, err, "WriteSCTP failed")
 			assert.Equal(t, n, len(sbuf), "unexpected length of received data")
@@ -2074,7 +2088,7 @@ func TestAssocCongestionControl(t *testing.T) {
 		assert.Nil(t, err, "failed to establish session pair")
 
 		for i := 0; i < nPacketsToSend; i++ {
-			binary.BigEndian.PutUint32(sbuf, uint32(i)) // uint32 sequence number
+			binary.BigEndian.PutUint32(sbuf, uint32(i)) // nolint:gosec // G115 uint32 sequence number
 			n, err = s0.WriteSCTP(sbuf, PayloadTypeWebRTCBinary)
 			assert.Nil(t, err, "WriteSCTP failed")
 			assert.Equal(t, n, len(sbuf), "unexpected length of received data")
@@ -2217,7 +2231,12 @@ func TestAssocDelayedAck(t *testing.T) {
 		t.Logf("nAckTimeouts: %d\n", a1.stats.getNumAckTimeouts())
 
 		assert.Equal(t, uint64(1), a1.stats.getNumDATAs(), "DATA chunk count mismatch")
-		assert.Equal(t, a0.stats.getNumSACKsReceived(), a1.stats.getNumDATAs(), "sack count should be equal to the number of data chunks")
+		assert.Equal(
+			t,
+			a0.stats.getNumSACKsReceived(),
+			a1.stats.getNumDATAs(),
+			"sack count should be equal to the number of data chunks",
+		)
 		assert.Equal(t, uint64(1), a1.stats.getNumAckTimeouts(), "ackTimeout count mismatch")
 		assert.Equal(t, uint64(0), a0.stats.getNumT3Timeouts(), "should be no retransmit")
 
@@ -2226,6 +2245,8 @@ func TestAssocDelayedAck(t *testing.T) {
 }
 
 func checkGoroutineLeaks(t *testing.T) {
+	t.Helper()
+
 	// Get the count of goroutines at the start of the test.
 	initialGoroutines := runtime.NumGoroutine()
 	// Register a cleanup function to run after the test completes.
@@ -2243,7 +2264,7 @@ func checkGoroutineLeaks(t *testing.T) {
 	})
 }
 
-func TestAssocReset(t *testing.T) {
+func TestAssocReset(t *testing.T) { //nolint:cyclop
 	t.Run("Close one way", func(t *testing.T) {
 		checkGoroutineLeaks(t)
 
@@ -2285,6 +2306,7 @@ func TestAssocReset(t *testing.T) {
 				n, ppi, err = s1.ReadSCTP(buf)
 				if err != nil {
 					doneCh <- err
+
 					return
 				}
 
@@ -2299,6 +2321,7 @@ func TestAssocReset(t *testing.T) {
 			select {
 			case err = <-doneCh:
 				assert.Equal(t, io.EOF, err, "should end with EOF")
+
 				break loop
 			default:
 			}
@@ -2350,6 +2373,7 @@ func TestAssocReset(t *testing.T) {
 				n, ppi, err = s1.ReadSCTP(buf)
 				if err != nil {
 					doneCh <- err
+
 					return
 				}
 
@@ -2364,6 +2388,7 @@ func TestAssocReset(t *testing.T) {
 			select {
 			case err = <-doneCh:
 				assert.Equal(t, io.EOF, err, "should end with EOF")
+
 				break loop0
 			default:
 			}
@@ -2381,6 +2406,7 @@ func TestAssocReset(t *testing.T) {
 				assert.Equal(t, io.EOF, err, "should be EOF")
 				if err != nil {
 					doneCh <- err
+
 					return
 				}
 			}
@@ -2482,6 +2508,7 @@ func (c *fakeEchoConn) Read(b []byte) (int, error) {
 
 		return len(r), nil
 	}
+
 	return 0, io.EOF
 }
 
@@ -2495,6 +2522,7 @@ func (c *fakeEchoConn) Write(b []byte) (int, error) {
 	}
 	c.echo <- b
 	c.bytesSent += uint64(len(b))
+
 	return len(b), nil
 }
 
@@ -2503,6 +2531,7 @@ func (c *fakeEchoConn) Close() error {
 	defer c.mu.Unlock()
 	close(c.echo)
 	close(c.closed)
+
 	return c.errClose
 }
 func (c *fakeEchoConn) LocalAddr() net.Addr              { return nil }
@@ -2517,23 +2546,23 @@ func TestRoutineLeak(t *testing.T) {
 		checkGoroutineLeaks(t)
 
 		conn := newFakeEchoConn(io.EOF)
-		a, err := Client(Config{NetConn: conn, LoggerFactory: loggerFactory})
+		assoc, err := Client(Config{NetConn: conn, LoggerFactory: loggerFactory})
 		assert.Equal(t, nil, err, "errored to initialize Client")
 
 		<-conn.done
 
-		err = a.Close()
+		err = assoc.Close()
 		assert.Equal(t, io.EOF, err, "Close() should fail with EOF")
 
 		select {
-		case _, ok := <-a.closeWriteLoopCh:
+		case _, ok := <-assoc.closeWriteLoopCh:
 			if ok {
 				t.Errorf("closeWriteLoopCh is expected to be closed, but received signal")
 			}
 		default:
 			t.Errorf("closeWriteLoopCh is expected to be closed, but not")
 		}
-		_ = a
+		_ = assoc
 	})
 	t.Run("Connection closed by remote host", func(t *testing.T) {
 		checkGoroutineLeaks(t)
@@ -2564,7 +2593,7 @@ func TestStats(t *testing.T) {
 	loggerFactory := logging.NewDefaultLoggerFactory()
 
 	conn := newFakeEchoConn(nil)
-	a, err := Client(Config{NetConn: conn, LoggerFactory: loggerFactory})
+	assoc, err := Client(Config{NetConn: conn, LoggerFactory: loggerFactory})
 	assert.Equal(t, nil, err, "errored to initialize Client")
 
 	<-conn.done
@@ -2573,23 +2602,25 @@ func TestStats(t *testing.T) {
 
 	conn.mu.Lock()
 	defer conn.mu.Unlock()
-	assert.Equal(t, conn.bytesReceived, a.BytesReceived())
-	assert.Equal(t, conn.bytesSent, a.BytesSent())
-	assert.Equal(t, conn.mtu, a.MTU())
-	assert.Equal(t, conn.cwnd, a.CWND())
-	assert.Equal(t, conn.rwnd, a.RWND())
-	assert.Equal(t, conn.srtt, a.SRTT())
+	assert.Equal(t, conn.bytesReceived, assoc.BytesReceived())
+	assert.Equal(t, conn.bytesSent, assoc.BytesSent())
+	assert.Equal(t, conn.mtu, assoc.MTU())
+	assert.Equal(t, conn.cwnd, assoc.CWND())
+	assert.Equal(t, conn.rwnd, assoc.RWND())
+	assert.Equal(t, conn.srtt, assoc.SRTT())
 }
 
 func TestAssocHandleInit(t *testing.T) {
 	loggerFactory := logging.NewDefaultLoggerFactory()
 
 	handleInitTest := func(t *testing.T, initialState uint32, expectErr bool) {
-		a := createAssociation(Config{
+		t.Helper()
+
+		assoc := createAssociation(Config{
 			NetConn:       &dumbConn{},
 			LoggerFactory: loggerFactory,
 		})
-		a.setState(initialState)
+		assoc.setState(initialState)
 		pkt := &packet{
 			sourcePort:      5001,
 			destinationPort: 5002,
@@ -2602,19 +2633,20 @@ func TestAssocHandleInit(t *testing.T) {
 		init.advertisedReceiverWindowCredit = 512 * 1024
 		setSupportedExtensions(&init.chunkInitCommon)
 
-		_, err := a.handleInit(pkt, init)
+		_, err := assoc.handleInit(pkt, init)
 		if expectErr {
 			assert.Error(t, err, "should fail")
+
 			return
 		}
 		assert.NoError(t, err, "should succeed")
-		assert.Equal(t, init.initialTSN-1, a.peerLastTSN(), "should match")
-		assert.Equal(t, uint16(1001), a.myMaxNumOutboundStreams, "should match")
-		assert.Equal(t, uint16(1002), a.myMaxNumInboundStreams, "should match")
-		assert.Equal(t, uint32(5678), a.peerVerificationTag, "should match")
-		assert.Equal(t, pkt.sourcePort, a.destinationPort, "should match")
-		assert.Equal(t, pkt.destinationPort, a.sourcePort, "should match")
-		assert.True(t, a.useForwardTSN, "should be set to true")
+		assert.Equal(t, init.initialTSN-1, assoc.peerLastTSN(), "should match")
+		assert.Equal(t, uint16(1001), assoc.myMaxNumOutboundStreams, "should match")
+		assert.Equal(t, uint16(1002), assoc.myMaxNumInboundStreams, "should match")
+		assert.Equal(t, uint32(5678), assoc.peerVerificationTag, "should match")
+		assert.Equal(t, pkt.sourcePort, assoc.destinationPort, "should match")
+		assert.Equal(t, pkt.destinationPort, assoc.sourcePort, "should match")
+		assert.True(t, assoc.useForwardTSN, "should be set to true")
 	}
 
 	t.Run("normal", func(t *testing.T) {
@@ -2716,10 +2748,11 @@ func newDumbConn2(localAddr, remoteAddr net.Addr) *dumbConn2 {
 		remoteAddr: remoteAddr,
 	}
 	c.cond = sync.NewCond(&c.mutex)
+
 	return c
 }
 
-// Implement the net.Conn interface methods
+// Implement the net.Conn interface methods.
 func (c *dumbConn2) Read(b []byte) (n int, err error) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
@@ -2729,6 +2762,7 @@ func (c *dumbConn2) Read(b []byte) (n int, err error) {
 			packet := c.packets[0]
 			c.packets = c.packets[1:]
 			n := copy(b, packet)
+
 			return n, nil
 		}
 
@@ -2749,6 +2783,7 @@ func (c *dumbConn2) Write(b []byte) (int, error) {
 		return 0, &net.OpError{Op: "write", Net: "udp", Addr: c.remoteAddr, Err: net.ErrClosed}
 	}
 	c.remoteInboundHandler(b)
+
 	return len(b), nil
 }
 
@@ -2758,6 +2793,7 @@ func (c *dumbConn2) Close() error {
 
 	c.closed = true
 	c.cond.Signal()
+
 	return nil
 }
 
@@ -2781,7 +2817,7 @@ func (c *dumbConn2) inboundHandler(packet []byte) {
 	}
 }
 
-// crateUDPConnPair creates a pair of net.UDPConn objects that are connected with each other
+// crateUDPConnPair creates a pair of net.UDPConn objects that are connected with each other.
 func createUDPConnPair() (net.Conn, net.Conn) {
 	addr1 := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 1234}
 	addr2 := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 5678}
@@ -2789,10 +2825,11 @@ func createUDPConnPair() (net.Conn, net.Conn) {
 	conn2 := newDumbConn2(addr2, addr1)
 	conn1.remoteInboundHandler = conn2.inboundHandler
 	conn2.remoteInboundHandler = conn1.inboundHandler
+
 	return conn1, conn2
 }
 
-func createAssocs() (*Association, *Association, error) {
+func createAssocs() (*Association, *Association, error) { //nolint:cyclop
 	udp1, udp2 := createUDPConnPair()
 
 	loggerFactory := logging.NewDefaultLoggerFactory()
@@ -2855,22 +2892,25 @@ loop:
 			}
 		}
 	}
+
 	return a1, a2, nil
 }
 
 // udpDiscardReader blocks all reads after block is set to true.
-// This allows us to send arbitrary packets on a stream and block the packets received in response
+// This allows us to send arbitrary packets on a stream and block the packets received in response.
 type udpDiscardReader struct {
 	net.Conn
-	ctx   context.Context
+	ctx   context.Context //nolint:containedctx
 	block atomic.Bool
 }
 
 func (d *udpDiscardReader) Read(b []byte) (n int, err error) {
 	if d.block.Load() {
 		<-d.ctx.Done()
+
 		return 0, d.ctx.Err()
 	}
+
 	return d.Conn.Read(b)
 }
 
@@ -2878,7 +2918,12 @@ func createAssociationPair(udpConn1 net.Conn, udpConn2 net.Conn) (*Association, 
 	return createAssociationPairWithConfig(udpConn1, udpConn2, Config{})
 }
 
-func createAssociationPairWithConfig(udpConn1 net.Conn, udpConn2 net.Conn, config Config) (*Association, *Association, error) {
+//nolint:cyclop
+func createAssociationPairWithConfig(
+	udpConn1 net.Conn,
+	udpConn2 net.Conn,
+	config Config,
+) (*Association, *Association, error) {
 	loggerFactory := logging.NewDefaultLoggerFactory()
 
 	a1Chan := make(chan interface{})
@@ -2942,6 +2987,7 @@ loop:
 			}
 		}
 	}
+
 	return a1, a2, nil
 }
 
@@ -2955,6 +3001,7 @@ func noErrorClose(t *testing.T, closeF func() error) {
 func readMyNextTSN(a *Association) uint32 {
 	a.lock.Lock()
 	defer a.lock.Unlock()
+
 	return a.myNextTSN
 }
 
@@ -3017,6 +3064,7 @@ func TestAssociationReceiveWindow(t *testing.T) {
 		bytesQueued := s2.getNumBytesInReassemblyQueue()
 		if bytesQueued > 5_000_000 {
 			t.Error("too many bytes enqueued with receive window of 10kb", bytesQueued)
+
 			break
 		}
 		t.Log("bytes queued", bytesQueued)
@@ -3085,7 +3133,14 @@ func TestAssociationFastRtxWnd(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	require.Eventually(t, func() bool { return dropCounter.Load() >= 15 }, 5*time.Second, 10*time.Millisecond, "drop %d", dropCounter.Load())
+	require.Eventually(
+		t,
+		func() bool { return dropCounter.Load() >= 15 },
+		5*time.Second,
+		10*time.Millisecond,
+		"drop %d",
+		dropCounter.Load(),
+	)
 
 	require.Zero(t, a1.stats.getNumFastRetrans())
 	require.False(t, a1.inFastRecovery)
@@ -3094,7 +3149,7 @@ func TestAssociationFastRtxWnd(t *testing.T) {
 	ack := *(lastSACK.Load())
 	ack.gapAckBlocks = []gapAckBlock{{start: 11}}
 	for i := 11; i < 14; i++ {
-		ack.gapAckBlocks[0].end = uint16(i)
+		ack.gapAckBlocks[0].end = uint16(i) //nolint:gosec // G115
 		pkt := a1.createPacket([]chunk{&ack})
 		pktBuf, err1 := pkt.marshal(true)
 		require.NoError(t, err1)
@@ -3104,6 +3159,7 @@ func TestAssociationFastRtxWnd(t *testing.T) {
 	require.Eventually(t, func() bool {
 		a1.lock.RLock()
 		defer a1.lock.RUnlock()
+
 		return a1.inFastRecovery
 	}, 5*time.Second, 10*time.Millisecond)
 	require.GreaterOrEqual(t, uint64(10), a1.stats.getNumFastRetrans())
@@ -3123,6 +3179,7 @@ func TestAssociationFastRtxWnd(t *testing.T) {
 	// sack with cumAckPoint advanced, lastTSN should not be marked as missing
 	ack.cumulativeTSNAck++
 	end := lastTSN - 1 - ack.cumulativeTSNAck
+	//nolint:gosec // G115
 	ack.gapAckBlocks = append(ack.gapAckBlocks, gapAckBlock{start: uint16(end), end: uint16(end)})
 	pkt := a1.createPacket([]chunk{&ack})
 	pktBuf, err := pkt.marshal(true)
@@ -3131,6 +3188,7 @@ func TestAssociationFastRtxWnd(t *testing.T) {
 	require.Eventually(t, func() bool {
 		a1.lock.Lock()
 		defer a1.lock.Unlock()
+
 		return lastChunkMinusTwo.missIndicator == 1 && lastChunk.missIndicator == 0
 	}, 5*time.Second, 10*time.Millisecond)
 }
@@ -3166,11 +3224,13 @@ func TestAssociationMaxTSNOffset(t *testing.T) {
 			raw, err := p.marshal(true)
 			if err != nil {
 				t.Fatal(err)
+
 				return
 			}
 			_, err = a1.netConn.Write(raw)
 			if err != nil {
 				t.Fatal(err)
+
 				return
 			}
 		}
@@ -3413,20 +3473,20 @@ func TestAssociation_HandlePacketInCookieWaitState(t *testing.T) {
 		testCase := testCase
 		t.Run(name, func(t *testing.T) {
 			aConn, charlieConn := pipeDump()
-			a := createAssociation(Config{
+			assoc := createAssociation(Config{
 				NetConn:              aConn,
 				MaxReceiveBufferSize: 0,
 				LoggerFactory:        loggerFactory,
 			})
-			a.init(true)
+			assoc.init(true)
 
 			if !testCase.skipClose {
 				defer func() {
-					assert.NoError(t, a.close())
+					assert.NoError(t, assoc.close())
 				}()
 			}
 
-			packet, err := a.marshalPacket(testCase.inputPacket)
+			packet, err := assoc.marshalPacket(testCase.inputPacket)
 			assert.NoError(t, err)
 			_, err = charlieConn.Write(packet)
 			assert.NoError(t, err)
@@ -3691,9 +3751,9 @@ func TestAssociation_ReconfigRequestsLimited(t *testing.T) {
 	for i := 0; i < maxReconfigRequests+100; i++ {
 		c := &chunkReconfig{
 			paramA: &paramOutgoingResetRequest{
-				reconfigRequestSequenceNumber: 10 + uint32(i),
-				senderLastTSN:                 tsn + 10, // has to be enqueued
-				streamIdentifiers:             []uint16{uint16(i)},
+				reconfigRequestSequenceNumber: 10 + uint32(i),      //nolint:gosec // G115
+				senderLastTSN:                 tsn + 10,            // has to be enqueued
+				streamIdentifiers:             []uint16{uint16(i)}, //nolint:gosec // G115
 			},
 		}
 		p := a1.createPacket([]chunk{c})

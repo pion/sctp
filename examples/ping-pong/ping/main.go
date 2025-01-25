@@ -16,7 +16,7 @@ import (
 	"github.com/pion/sctp"
 )
 
-func main() {
+func main() { //nolint:cyclop
 	conn, err := net.Dial("udp", "127.0.0.1:9899")
 	if err != nil {
 		log.Panic(err)

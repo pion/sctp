@@ -16,20 +16,22 @@ func TestChunkInit_UnrecognizedParameters(t *testing.T) {
 	unrecognizedSkip := append([]byte{}, initChunkHeader...)
 	unrecognizedSkip = append(unrecognizedSkip, byte(paramHeaderUnrecognizedActionSkip), 0xFF, 0x00, 0x04, 0x00)
 
-	i := &chunkInitCommon{}
-	if err := i.unmarshal(unrecognizedSkip); err != nil {
+	initCommonChunk := &chunkInitCommon{}
+	if err := initCommonChunk.unmarshal(unrecognizedSkip); err != nil {
 		t.Errorf("Unmarshal init Chunk failed: %v", err)
-	} else if len(i.unrecognizedParams) != 1 || i.unrecognizedParams[0].unrecognizedAction != paramHeaderUnrecognizedActionSkip {
+	} else if len(initCommonChunk.unrecognizedParams) != 1 ||
+		initCommonChunk.unrecognizedParams[0].unrecognizedAction != paramHeaderUnrecognizedActionSkip {
 		t.Errorf("Unrecognized Param parsed incorrectly")
 	}
 
 	unrecognizedStop := append([]byte{}, initChunkHeader...)
 	unrecognizedStop = append(unrecognizedStop, byte(paramHeaderUnrecognizedActionStop), 0xFF, 0x00, 0x04, 0x00)
 
-	i = &chunkInitCommon{}
-	if err := i.unmarshal(unrecognizedStop); err != nil {
+	initCommonChunk = &chunkInitCommon{}
+	if err := initCommonChunk.unmarshal(unrecognizedStop); err != nil {
 		t.Errorf("Unmarshal init Chunk failed: %v", err)
-	} else if len(i.unrecognizedParams) != 1 || i.unrecognizedParams[0].unrecognizedAction != paramHeaderUnrecognizedActionStop {
+	} else if len(initCommonChunk.unrecognizedParams) != 1 ||
+		initCommonChunk.unrecognizedParams[0].unrecognizedAction != paramHeaderUnrecognizedActionStop {
 		t.Errorf("Unrecognized Param parsed incorrectly")
 	}
 }

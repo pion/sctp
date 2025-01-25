@@ -57,7 +57,7 @@ func TestPayloadQueue(t *testing.T) {
 	t.Run("markAllToRetrasmit", func(t *testing.T) {
 		pq := newPayloadQueue()
 		for i := 0; i < 3; i++ {
-			pq.pushNoCheck(makePayload(uint32(i+1), 10))
+			pq.pushNoCheck(makePayload(uint32(i+1), 10)) //nolint:gosec // G115
 		}
 		pq.markAsAcked(2)
 		pq.markAllToRetrasmit()
@@ -76,7 +76,7 @@ func TestPayloadQueue(t *testing.T) {
 	t.Run("reset retransmit flag on ack", func(t *testing.T) {
 		pq := newPayloadQueue()
 		for i := 0; i < 4; i++ {
-			pq.pushNoCheck(makePayload(uint32(i+1), 10))
+			pq.pushNoCheck(makePayload(uint32(i+1), 10)) //nolint:gosec // G115
 		}
 
 		pq.markAllToRetrasmit()

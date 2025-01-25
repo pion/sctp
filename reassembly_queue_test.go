@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestReassemblyQueue(t *testing.T) {
+func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 	t.Run("ordered fragments", func(t *testing.T) {
 		rq := newReassemblyQueue(0)
 

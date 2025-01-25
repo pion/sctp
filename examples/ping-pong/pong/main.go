@@ -13,7 +13,7 @@ import (
 	"github.com/pion/sctp"
 )
 
-func main() {
+func main() { //nolint:cyclop
 	addr := net.UDPAddr{
 		IP:   net.IPv4(127, 0, 0, 1),
 		Port: 9899,

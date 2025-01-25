@@ -115,7 +115,7 @@ func (o *testTimerObserver) onRetransmissionFailure(id int) {
 	o.onRtxFailure(id)
 }
 
-func TestRtxTimer(t *testing.T) {
+func TestRtxTimer(t *testing.T) { //nolint:maintidx
 	t.Run("callback interval", func(t *testing.T) {
 		timerID := 0
 		var nCbs int32

@@ -52,7 +52,7 @@ func (venv *vNetEnv) dropNextCookieAckChunk(numToDrop int) {
 	venv.numToDropCookieAck = numToDrop
 }
 
-func buildVNetEnv(cfg *vNetEnvConfig) (*vNetEnv, error) {
+func buildVNetEnv(cfg *vNetEnvConfig) (*vNetEnv, error) { //nolint:cyclop
 	log := cfg.log
 
 	var venv *vNetEnv
@@ -94,6 +94,7 @@ func buildVNetEnv(cfg *vNetEnvConfig) (*vNetEnv, error) {
 							toDrop = true
 							venv.numToDropData--
 							log.Infof("Chunk filter:  drop TSN %d", tsn)
+
 							break loop
 						}
 					}
@@ -102,6 +103,7 @@ func buildVNetEnv(cfg *vNetEnvConfig) (*vNetEnv, error) {
 						toDrop = true
 						venv.numToDropReconfig--
 						log.Infof("Chunk filter:  drop RECONFIG %s", chunk.String())
+
 						break loop
 					}
 				case *chunkCookieEcho:
@@ -109,6 +111,7 @@ func buildVNetEnv(cfg *vNetEnvConfig) (*vNetEnv, error) {
 						toDrop = true
 						venv.numToDropCookieEcho--
 						log.Infof("Chunk filter:  drop %s", chunk.String())
+
 						break loop
 					}
 				case *chunkCookieAck:
@@ -116,10 +119,12 @@ func buildVNetEnv(cfg *vNetEnvConfig) (*vNetEnv, error) {
 						toDrop = true
 						venv.numToDropCookieAck--
 						log.Infof("Chunk filter:  drop %s", chunk.String())
+
 						break loop
 					}
 				}
 			}
+
 			return !toDrop
 		}
 	}
@@ -163,7 +168,9 @@ func buildVNetEnv(cfg *vNetEnvConfig) (*vNetEnv, error) {
 	return venv, nil
 }
 
-func testRwndFull(t *testing.T, unordered bool) {
+func testRwndFull(t *testing.T, unordered bool) { //nolint:cyclop
+	t.Helper()
+
 	loggerFactory := logging.NewDefaultLoggerFactory()
 	log := loggerFactory.NewLogger("test")
 
@@ -196,7 +203,7 @@ func testRwndFull(t *testing.T, unordered bool) {
 	maxReceiveBufferSize := uint32(64 * 1024)
 	msgSize := int(float32(maxReceiveBufferSize)/2) + int(initialMTU)
 	msg := make([]byte, msgSize)
-	rand.Read(msg) // nolint:errcheck,gosec
+	rand.Read(msg) // nolint:errcheck,gosec,staticcheck // TODO: fix?
 
 	go func() {
 		defer close(serverShutDown)
@@ -397,8 +404,10 @@ func TestRwndFull(t *testing.T) {
 	})
 }
 
-func TestStreamClose(t *testing.T) {
+func TestStreamClose(t *testing.T) { //nolint:cyclop
 	loopBackTest := func(t *testing.T, dropReconfigChunk bool) {
+		t.Helper()
+
 		lim := test.TimeOut(time.Second * 10)
 		defer lim.Stop()
 
@@ -468,6 +477,7 @@ func TestStreamClose(t *testing.T) {
 					log.Infof("server: Read returned %v", errRead)
 					_ = stream.Close() // nolint:errcheck
 					assert.Equal(t, StreamStateClosed, stream.State())
+
 					break
 				}
 
@@ -521,6 +531,7 @@ func TestStreamClose(t *testing.T) {
 				if err2 != nil {
 					log.Infof("client: Read returned %v", err2)
 					assert.Equal(t, StreamStateClosed, stream.State())
+
 					break
 				}
 
@@ -581,7 +592,7 @@ func TestStreamClose(t *testing.T) {
 // and confirmes the fix.
 // To reproduce the case mentioned above:
 // * Use simultaneous-open (SCTP)
-// * Drop both of the first COOKIE-ECHO and COOKIE-ACK
+// * Drop both of the first COOKIE-ECHO and COOKIE-ACK.
 func TestCookieEchoRetransmission(t *testing.T) {
 	lim := test.TimeOut(time.Second * 10)
 	defer lim.Stop()

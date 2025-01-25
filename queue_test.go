@@ -10,37 +10,37 @@ import (
 )
 
 func TestQueue(t *testing.T) {
-	q := newQueue[int](32)
-	assert.Zero(t, q.Len())
+	queu := newQueue[int](32)
+	assert.Zero(t, queu.Len())
 
 	// test push & pop
 	for i := 1; i < 33; i++ {
-		q.PushBack(i)
+		queu.PushBack(i)
 	}
-	assert.Equal(t, 32, q.Len())
-	assert.Equal(t, 5, q.At(4))
+	assert.Equal(t, 32, queu.Len())
+	assert.Equal(t, 5, queu.At(4))
 	for i := 1; i < 33; i++ {
-		assert.Equal(t, i, q.Front())
-		assert.Equal(t, i, q.PopFront())
+		assert.Equal(t, i, queu.Front())
+		assert.Equal(t, i, queu.PopFront())
 	}
-	assert.Zero(t, q.Len())
+	assert.Zero(t, queu.Len())
 
-	q.PushBack(10)
-	q.PushBack(11)
-	assert.Equal(t, 2, q.Len())
-	assert.Equal(t, 11, q.At(1))
-	assert.Equal(t, 10, q.Front())
-	assert.Equal(t, 10, q.PopFront())
-	assert.Equal(t, 11, q.PopFront())
+	queu.PushBack(10)
+	queu.PushBack(11)
+	assert.Equal(t, 2, queu.Len())
+	assert.Equal(t, 11, queu.At(1))
+	assert.Equal(t, 10, queu.Front())
+	assert.Equal(t, 10, queu.PopFront())
+	assert.Equal(t, 11, queu.PopFront())
 
 	// test grow capacity
 	for i := 0; i < 64; i++ {
-		q.PushBack(i)
+		queu.PushBack(i)
 	}
-	assert.Equal(t, 64, q.Len())
-	assert.Equal(t, 2, q.At(2))
+	assert.Equal(t, 64, queu.Len())
+	assert.Equal(t, 2, queu.At(2))
 	for i := 0; i < 64; i++ {
-		assert.Equal(t, i, q.Front())
-		assert.Equal(t, i, q.PopFront())
+		assert.Equal(t, i, queu.Front())
+		assert.Equal(t, i, queu.PopFront())
 	}
 }
