@@ -1264,6 +1264,9 @@ func (a *Association) handleInit(pkt *packet, initChunk *chunkInit) ([]*packet, 
 	// subtracting one from it.
 	a.payloadQueue.init(initChunk.initialTSN - 1)
 
+	a.setRWND(initChunk.advertisedReceiverWindowCredit)
+	a.log.Debugf("[%s] initial rwnd=%d", a.name, a.RWND())
+
 	for _, param := range initChunk.params {
 		switch v := param.(type) { // nolint:gocritic
 		case *paramSupportedExtensions:
