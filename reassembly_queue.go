@@ -272,15 +272,19 @@ func (r *reassemblyQueue) isReadable() bool {
 	return false
 }
 
-func (r *reassemblyQueue) read(buf []byte) (int, PayloadProtocolIdentifier, error) {
-	var cset *chunkSet
-	// Check unordered first
+func (r *reassemblyQueue) read(buf []byte) (int, PayloadProtocolIdentifier, error) { // nolint: cyclop
+	var (
+		cset        *chunkSet
+		isUnordered bool
+		nTotal      int
+		err         error
+	)
+
 	switch {
 	case len(r.unordered) > 0:
 		cset = r.unordered[0]
-		r.unordered = r.unordered[1:]
+		isUnordered = true
 	case len(r.ordered) > 0:
-		// Now, check ordered
 		cset = r.ordered[0]
 		if !cset.isComplete() {
 			return 0, 0, errTryAgain
@@ -288,31 +292,35 @@ func (r *reassemblyQueue) read(buf []byte) (int, PayloadProtocolIdentifier, erro
 		if sna16GT(cset.ssn, r.nextSSN) {
 			return 0, 0, errTryAgain
 		}
-		r.ordered = r.ordered[1:]
-		if cset.ssn == r.nextSSN {
-			r.nextSSN++
-		}
 	default:
 		return 0, 0, errTryAgain
 	}
 
-	// Concat all fragments into the buffer
-	nWritten := 0
-	ppi := cset.ppi
-	var err error
 	for _, c := range cset.chunks {
-		toCopy := len(c.userData)
-		r.subtractNumBytes(toCopy)
-		if err == nil {
-			n := copy(buf[nWritten:], c.userData)
-			nWritten += n
-			if n < toCopy {
-				err = io.ErrShortBuffer
-			}
+		if len(buf)-nTotal < len(c.userData) {
+			err = io.ErrShortBuffer
+		} else {
+			copy(buf[nTotal:], c.userData)
+		}
+
+		nTotal += len(c.userData)
+	}
+
+	switch {
+	case err != nil:
+		return nTotal, 0, err
+	case isUnordered:
+		r.unordered = r.unordered[1:]
+	default:
+		r.ordered = r.ordered[1:]
+		if cset.ssn == r.nextSSN {
+			r.nextSSN++
 		}
 	}
 
-	return nWritten, ppi, err
+	r.subtractNumBytes(nTotal)
+
+	return nTotal, cset.ppi, err
 }
 
 func (r *reassemblyQueue) forwardTSNForOrdered(lastSSN uint16) {
