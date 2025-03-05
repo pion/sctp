@@ -165,7 +165,7 @@ func check(err error) {
 func pipeDump() (net.Conn, net.Conn) {
 	aConn := acceptDumbConn()
 
-	bConn, err := net.DialUDP("udp4", nil, aConn.LocalAddr().(*net.UDPAddr))
+	bConn, err := net.DialUDP("udp4", nil, aConn.LocalAddr().(*net.UDPAddr)) // nolint: forcetypeassert
 	check(err)
 
 	// Dumb handshake
@@ -827,7 +827,7 @@ func TestAssocReliable(t *testing.T) { //nolint:cyclop,maintidx
 		buf := make([]byte, 3)
 		n, ppi, err := s1.ReadSCTP(buf)
 		assert.Equal(t, err, io.ErrShortBuffer, "expected error to be io.ErrShortBuffer")
-		assert.Equal(t, n, 0, "unexpected length of received data")
+		assert.Equal(t, n, 5, "unexpected length of received data")
 		assert.Equal(t, ppi, PayloadProtocolIdentifier(0), "unexpected ppi")
 
 		assert.False(t, s0.reassemblyQueue.isReadable(), "should no longer be readable")

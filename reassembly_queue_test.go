@@ -331,29 +331,46 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 
 	t.Run("detect buffer too short", func(t *testing.T) {
 		rq := newReassemblyQueue(0)
-
 		orgPpi := PayloadTypeWebRTCBinary
 
-		var chunk *chunkPayloadData
-		var complete bool
-
-		chunk = &chunkPayloadData{
-			payloadType:          orgPpi,
-			beginningFragment:    true,
-			endingFragment:       true,
-			tsn:                  123,
-			streamSequenceNumber: 0,
-			userData:             []byte("0123456789"),
+		for _, chunk := range []*chunkPayloadData{
+			{
+				payloadType:          orgPpi,
+				beginningFragment:    true,
+				tsn:                  123,
+				streamSequenceNumber: 0,
+				userData:             []byte("0123"),
+			},
+			{
+				payloadType:          orgPpi,
+				tsn:                  124,
+				streamSequenceNumber: 0,
+				userData:             []byte("456"),
+			},
+			{
+				payloadType:          orgPpi,
+				endingFragment:       true,
+				tsn:                  125,
+				streamSequenceNumber: 0,
+				userData:             []byte("789"),
+			},
+		} {
+			rq.push(chunk)
 		}
 
-		complete = rq.push(chunk)
-		assert.True(t, complete, "the set should be complete")
-		assert.Equal(t, 10, rq.getNumBytes(), "num bytes mismatch")
+		assert.Equal(t, 10, rq.getNumBytes())
 
-		buf := make([]byte, 8) // <- passing buffer too short
-		_, _, err := rq.read(buf)
-		assert.Equal(t, io.ErrShortBuffer, err, "read() should not succeed")
-		assert.Equal(t, 0, rq.getNumBytes(), "num bytes mismatch")
+		buf := make([]byte, 6) // <- passing buffer too short
+		n, ppi, err := rq.read(buf)
+		assert.Equal(t, io.ErrShortBuffer, err)
+		assert.Equal(t, PayloadTypeUnknown, ppi)
+		assert.Equal(t, 10, n)
+
+		buf = make([]byte, n)
+		n, ppi, err = rq.read(buf)
+		assert.NoError(t, err)
+		assert.Equal(t, orgPpi, ppi)
+		assert.Equal(t, 10, n)
 	})
 
 	t.Run("forwardTSN for ordered fragments", func(t *testing.T) {
