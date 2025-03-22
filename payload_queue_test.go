@@ -29,9 +29,7 @@ func TestPayloadQueue(t *testing.T) {
 		for i := uint32(0); i < 3; i++ {
 			c, ok := pq.pop(i)
 			assert.True(t, ok, "pop should succeed")
-			if ok {
-				assert.Equal(t, i, c.tsn, "TSN should match")
-			}
+			assert.Equal(t, i, c.tsn, "TSN should match")
 		}
 
 		assert.Equal(t, 0, pq.getNumBytes(), "total bytes mismatch")
@@ -45,9 +43,7 @@ func TestPayloadQueue(t *testing.T) {
 		for i := uint32(3); i < 5; i++ {
 			c, ok := pq.pop(i)
 			assert.True(t, ok, "pop should succeed")
-			if ok {
-				assert.Equal(t, i, c.tsn, "TSN should match")
-			}
+			assert.Equal(t, i, c.tsn, "TSN should match")
 		}
 
 		assert.Equal(t, 0, pq.getNumBytes(), "total bytes mismatch")

@@ -5,6 +5,8 @@ package sctp
 
 import (
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestChunkInit_UnrecognizedParameters(t *testing.T) {
@@ -17,21 +19,15 @@ func TestChunkInit_UnrecognizedParameters(t *testing.T) {
 	unrecognizedSkip = append(unrecognizedSkip, byte(paramHeaderUnrecognizedActionSkip), 0xFF, 0x00, 0x04, 0x00)
 
 	initCommonChunk := &chunkInitCommon{}
-	if err := initCommonChunk.unmarshal(unrecognizedSkip); err != nil {
-		t.Errorf("Unmarshal init Chunk failed: %v", err)
-	} else if len(initCommonChunk.unrecognizedParams) != 1 ||
-		initCommonChunk.unrecognizedParams[0].unrecognizedAction != paramHeaderUnrecognizedActionSkip {
-		t.Errorf("Unrecognized Param parsed incorrectly")
-	}
+	assert.NoError(t, initCommonChunk.unmarshal(unrecognizedSkip))
+	assert.Equal(t, 1, len(initCommonChunk.unrecognizedParams))
+	assert.Equal(t, paramHeaderUnrecognizedActionSkip, initCommonChunk.unrecognizedParams[0].unrecognizedAction)
 
 	unrecognizedStop := append([]byte{}, initChunkHeader...)
 	unrecognizedStop = append(unrecognizedStop, byte(paramHeaderUnrecognizedActionStop), 0xFF, 0x00, 0x04, 0x00)
 
 	initCommonChunk = &chunkInitCommon{}
-	if err := initCommonChunk.unmarshal(unrecognizedStop); err != nil {
-		t.Errorf("Unmarshal init Chunk failed: %v", err)
-	} else if len(initCommonChunk.unrecognizedParams) != 1 ||
-		initCommonChunk.unrecognizedParams[0].unrecognizedAction != paramHeaderUnrecognizedActionStop {
-		t.Errorf("Unrecognized Param parsed incorrectly")
-	}
+	assert.NoError(t, initCommonChunk.unmarshal(unrecognizedStop))
+	assert.Equal(t, 1, len(initCommonChunk.unrecognizedParams))
+	assert.Equal(t, paramHeaderUnrecognizedActionStop, initCommonChunk.unrecognizedParams[0].unrecognizedAction)
 }

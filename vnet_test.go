@@ -272,7 +272,7 @@ func testRwndFull(t *testing.T, unordered bool) { //nolint:cyclop
 				return
 			}
 			log.Infof("server read %d bytes", n)
-			assert.True(t, reflect.DeepEqual(msg, buf[:n]), "msg %d should match", i)
+			assert.Truef(t, reflect.DeepEqual(msg, buf[:n]), "msg %d should match", i)
 		}
 
 		close(serverReadAll)

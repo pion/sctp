@@ -45,7 +45,7 @@ func TestAckTimer(t *testing.T) {
 			// Sleep more than 2 * 200msec interval to test if it times out only once
 			time.Sleep(ackInterval*2 + 50*time.Millisecond)
 
-			assert.Equal(t, uint32(1), atomic.LoadUint32(&nCbs),
+			assert.Equalf(t, uint32(1), atomic.LoadUint32(&nCbs),
 				"should be called once (actual: %d)", atomic.LoadUint32(&nCbs))
 
 			atomic.StoreUint32(&nCbs, 0)
@@ -84,7 +84,7 @@ func TestAckTimer(t *testing.T) {
 		// Sleep more than 200msec of interval to test if it never times out
 		time.Sleep(ackInterval + 50*time.Millisecond)
 
-		assert.Equal(t, uint32(0), atomic.LoadUint32(&nCbs),
+		assert.Equalf(t, uint32(0), atomic.LoadUint32(&nCbs),
 			"should not be timed out (actual: %d)", atomic.LoadUint32(&nCbs))
 
 		// can start again

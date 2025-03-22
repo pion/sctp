@@ -18,17 +18,13 @@ func TestBuildParam_Success(t *testing.T) {
 
 	for i, tc := range tt {
 		pType, err := parseParamType(tc.binary)
-		if err != nil {
-			t.Fatalf("failed to parse param type: %v", err)
-		}
+		assert.NoErrorf(t, err, "failed to parse param type #%d", i)
+
 		p, err := buildParam(pType, tc.binary)
-		if err != nil {
-			t.Fatalf("failed to unmarshal #%d: %v", i, err)
-		}
+		assert.NoErrorf(t, err, "failed to unmarshal #%d", i)
+
 		b, err := p.marshal()
-		if err != nil {
-			t.Fatalf("failed to marshal: %v", err)
-		}
+		assert.NoErrorf(t, err, "failed to marshal #%d", i)
 		assert.Equal(t, tc.binary, b)
 	}
 }
@@ -44,12 +40,9 @@ func TestBuildParam_Failure(t *testing.T) {
 
 	for i, tc := range tt {
 		pType, err := parseParamType(tc.binary)
-		if err != nil {
-			t.Fatalf("failed to parse param type: %v", err)
-		}
+		assert.NoErrorf(t, err, "failed to parse param type #%d", i)
+
 		_, err = buildParam(pType, tc.binary)
-		if err == nil {
-			t.Errorf("expected unmarshal #%d: '%s' to fail.", i, tc.name)
-		}
+		assert.Errorf(t, err, "expected buildParam #%d: '%s' to fail.", i, tc.name)
 	}
 }

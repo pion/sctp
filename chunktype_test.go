@@ -3,7 +3,11 @@
 
 package sctp
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
 
 func TestChunkType_String(t *testing.T) {
 	tt := []struct {
@@ -30,8 +34,6 @@ func TestChunkType_String(t *testing.T) {
 	}
 
 	for _, tc := range tt {
-		if tc.chunkType.String() != tc.expected {
-			t.Errorf("failed to stringify chunkType %v, expected %s", tc.chunkType, tc.expected)
-		}
+		assert.Equalf(t, tc.expected, tc.chunkType.String(), "chunkType %v should be %s", tc.chunkType, tc.expected)
 	}
 }

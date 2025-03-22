@@ -20,9 +20,7 @@ func TestParseParamType_Success(t *testing.T) {
 
 	for i, tc := range tt {
 		pType, err := parseParamType(tc.binary)
-		if err != nil {
-			t.Fatalf("failed to parse paramType %d: %v", i, err)
-		}
+		assert.NoErrorf(t, err, "failed to parse paramType #%d", i)
 		assert.Equal(t, tc.expected, pType)
 	}
 }
@@ -37,8 +35,6 @@ func TestParseParamType_Failure(t *testing.T) {
 
 	for i, tc := range tt {
 		_, err := parseParamType(tc.binary)
-		if err == nil {
-			t.Errorf("expected parseParamType #%d: '%s' to fail.", i, tc.name)
-		}
+		assert.Errorf(t, err, "expected parseParamType #%d: '%s' to fail.", i, tc.name)
 	}
 }

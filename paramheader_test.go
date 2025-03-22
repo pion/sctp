@@ -31,14 +31,11 @@ func TestParamHeader_Success(t *testing.T) {
 	for i, tc := range tt {
 		actual := &paramHeader{}
 		err := actual.unmarshal(tc.binary)
-		if err != nil {
-			t.Errorf("failed to unmarshal #%d: %v", i, err)
-		}
+		assert.NoErrorf(t, err, "failed to unmarshal #%d", i)
 		assert.Equal(t, tc.parsed, actual)
+
 		b, err := actual.marshal()
-		if err != nil {
-			t.Errorf("failed to marshal: %v", err)
-		}
+		assert.NoErrorf(t, err, "failed to marshal #%d", i)
 		assert.Equal(t, tc.binary, b)
 	}
 }
@@ -57,8 +54,6 @@ func TestParamHeaderUnmarshal_Failure(t *testing.T) {
 	for i, tc := range tt {
 		actual := &paramHeader{}
 		err := actual.unmarshal(tc.binary)
-		if err == nil {
-			t.Errorf("expected unmarshal #%d: '%s' to fail.", i, tc.name)
-		}
+		assert.Errorf(t, err, "expected unmarshal #%d: '%s' to fail.", i, tc.name)
 	}
 }

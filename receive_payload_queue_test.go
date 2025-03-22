@@ -30,7 +30,7 @@ func TestReceivePayloadQueue(t *testing.T) {
 	assert.True(t, payloadQueue.push(nextTSN))
 	assert.Equal(t, 1, payloadQueue.size())
 	lastTSN, ok := payloadQueue.getLastTSNReceived()
-	assert.True(t, lastTSN == nextTSN && ok, "lastTSN:%d, ok:%t", lastTSN, ok)
+	assert.Truef(t, lastTSN == nextTSN && ok, "lastTSN:%d, ok:%t", lastTSN, ok)
 	assert.True(t, payloadQueue.hasChunk(nextTSN))
 
 	assert.True(t, payloadQueue.push(initTSN))

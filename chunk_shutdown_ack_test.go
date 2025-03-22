@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2023 The Pion community <https://pion.ly>
 // SPDX-License-Identifier: MIT
 
+//nolint:dupl
 package sctp
 
 import (
@@ -20,11 +21,11 @@ func TestChunkShutdownAck_Success(t *testing.T) {
 	for i, tc := range tt {
 		actual := &chunkShutdownAck{}
 		err := actual.unmarshal(tc.binary)
-		require.NoError(t, err, "failed to unmarshal #%d: %v", i, err)
+		require.NoErrorf(t, err, "failed to unmarshal #%d", i)
 
 		b, err := actual.marshal()
-		require.NoError(t, err, "failed to marshal: %v", err)
-		assert.Equal(t, tc.binary, b, "test %d not equal", i)
+		require.NoError(t, err)
+		assert.Equalf(t, tc.binary, b, "test %d not equal", i)
 	}
 }
 
@@ -41,8 +42,6 @@ func TestChunkShutdownAck_Failure(t *testing.T) {
 	for i, tc := range tt {
 		actual := &chunkShutdownAck{}
 		err := actual.unmarshal(tc.binary)
-		if err == nil {
-			t.Errorf("expected unmarshal #%d: '%s' to fail.", i, tc.name)
-		}
+		assert.Errorf(t, err, "expected unmarshal #%d: '%s' to fail.", i, tc.name)
 	}
 }

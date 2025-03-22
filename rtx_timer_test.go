@@ -126,7 +126,7 @@ func TestRtxTimer(t *testing.T) { //nolint:maintidx
 				// 60 : 2 (90)
 				// 120: 3 (210)
 				// 240: 4 (550) <== expected in 650 msec
-				assert.Equal(t, timerID, id, "unexpted timer ID: %d", id)
+				assert.Equalf(t, timerID, id, "unexpted timer ID: %d", id)
 			},
 			onRtxFailure: func(_ int) {},
 		}, pathMaxRetrans, 0)
@@ -152,7 +152,7 @@ func TestRtxTimer(t *testing.T) { //nolint:maintidx
 		rt := newRTXTimer(timerID, &testTimerObserver{
 			onRTO: func(id int, _ uint) {
 				atomic.AddInt32(&nCbs, 1)
-				assert.Equal(t, timerID, id, "unexpted timer ID: %d", id)
+				assert.Equalf(t, timerID, id, "unexpted timer ID: %d", id)
 			},
 			onRtxFailure: func(_ int) {},
 		}, pathMaxRetrans, 0)
@@ -179,7 +179,7 @@ func TestRtxTimer(t *testing.T) { //nolint:maintidx
 		rt := newRTXTimer(timerID, &testTimerObserver{
 			onRTO: func(id int, _ uint) {
 				atomic.AddInt32(&nCbs, 1)
-				assert.Equal(t, timerID, id, "unexpted timer ID: %d", id)
+				assert.Equalf(t, timerID, id, "unexpted timer ID: %d", id)
 			},
 			onRtxFailure: func(_ int) {},
 		}, pathMaxRetrans, 0)
@@ -202,7 +202,7 @@ func TestRtxTimer(t *testing.T) { //nolint:maintidx
 		rt := newRTXTimer(timerID, &testTimerObserver{
 			onRTO: func(id int, _ uint) {
 				atomic.AddInt32(&nCbs, 1)
-				assert.Equal(t, timerID, id, "unexpted timer ID: %d", id)
+				assert.Equalf(t, timerID, id, "unexpted timer ID: %d", id)
 			},
 			onRtxFailure: func(_ int) {},
 		}, pathMaxRetrans, 0)
@@ -229,7 +229,7 @@ func TestRtxTimer(t *testing.T) { //nolint:maintidx
 			onRTO: func(id int, _ uint) {
 				atomic.AddInt32(&nCbs, 1)
 				t.Log("onRTO() called")
-				assert.Equal(t, timerID, id, "unexpted timer ID: %d", id)
+				assert.Equalf(t, timerID, id, "unexpted timer ID: %d", id)
 			},
 			onRtxFailure: func(_ int) {},
 		}, pathMaxRetrans, 0)
