@@ -20,9 +20,7 @@ func TestInitChunk(t *testing.T) {
 		0x00, 0x00, 0x80, 0x03, 0x00, 0x06, 0x80, 0xc1, 0x00, 0x00,
 	}
 	err := pkt.unmarshal(true, rawPkt)
-	if err != nil {
-		t.Errorf("Unmarshal failed, has chunk")
-	}
+	assert.NoError(t, err)
 
 	initChunk, ok := pkt.chunks[0].(*chunkInit)
 	assert.True(t, ok, "Failed to cast Chunk -> Init")

@@ -5,7 +5,6 @@ package sctp
 
 import (
 	"bytes"
-	"fmt"
 	"math/rand"
 	"net"
 	"reflect"
@@ -34,8 +33,6 @@ type vNetEnv struct {
 	numToDropCookieAck  int
 }
 
-var errSCTPPacketParse = fmt.Errorf("unable to parse SCTP packet")
-
 func (venv *vNetEnv) dropNextDataChunk(numToDrop int) {
 	venv.numToDropData = numToDrop
 }
@@ -52,7 +49,8 @@ func (venv *vNetEnv) dropNextCookieAckChunk(numToDrop int) {
 	venv.numToDropCookieAck = numToDrop
 }
 
-func buildVNetEnv(cfg *vNetEnvConfig) (*vNetEnv, error) { //nolint:cyclop
+func buildVNetEnv(t *testing.T, cfg *vNetEnvConfig) (*vNetEnv, error) { //nolint:cyclop
+	t.Helper()
 	log := cfg.log
 
 	var venv *vNetEnv
@@ -76,9 +74,7 @@ func buildVNetEnv(cfg *vNetEnvConfig) (*vNetEnv, error) { //nolint:cyclop
 		return func(c vnet.Chunk) bool {
 			var toDrop bool
 			p := &packet{}
-			if err2 := p.unmarshal(true, c.UserData()); err2 != nil {
-				panic(errSCTPPacketParse)
-			}
+			assert.NoError(t, p.unmarshal(true, c.UserData()))
 
 		loop:
 			for i := 0; i < len(p.chunks); i++ {
@@ -174,7 +170,7 @@ func testRwndFull(t *testing.T, unordered bool) { //nolint:cyclop
 	loggerFactory := logging.NewDefaultLoggerFactory()
 	log := loggerFactory.NewLogger("test")
 
-	venv, err := buildVNetEnv(&vNetEnvConfig{
+	venv, err := buildVNetEnv(t, &vNetEnvConfig{
 		minDelay:      200 * time.Millisecond,
 		loggerFactory: loggerFactory,
 		log:           log,
@@ -414,7 +410,7 @@ func TestStreamClose(t *testing.T) { //nolint:cyclop
 		loggerFactory := logging.NewDefaultLoggerFactory()
 		log := loggerFactory.NewLogger("test")
 
-		venv, err := buildVNetEnv(&vNetEnvConfig{
+		venv, err := buildVNetEnv(t, &vNetEnvConfig{
 			loggerFactory: loggerFactory,
 			log:           log,
 		})
@@ -600,7 +596,7 @@ func TestCookieEchoRetransmission(t *testing.T) {
 	loggerFactory := logging.NewDefaultLoggerFactory()
 	log := loggerFactory.NewLogger("test")
 
-	venv, err := buildVNetEnv(&vNetEnvConfig{
+	venv, err := buildVNetEnv(t, &vNetEnvConfig{
 		minDelay:      200 * time.Millisecond,
 		loggerFactory: loggerFactory,
 		log:           log,
