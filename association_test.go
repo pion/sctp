@@ -366,7 +366,7 @@ func flushBuffers(br *test.Bridge, a0, a1 *Association) {
 			}
 		}
 
-		if a0.bufferedAmount() == 0 && a1.bufferedAmount() == 0 {
+		if a0.BufferedAmount() == 0 && a1.BufferedAmount() == 0 {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -454,12 +454,12 @@ func TestAssocReliable(t *testing.T) { //nolint:maintidx
 		s0, s1, err := establishSessionPair(br, a0, a1, si)
 		assert.NoError(t, err, "failed to establish session pair")
 
-		assert.Equal(t, 0, a0.bufferedAmount(), "incorrect bufferedAmount")
+		assert.Equal(t, 0, a0.BufferedAmount(), "incorrect bufferedAmount")
 
 		n, err := s0.WriteSCTP([]byte(msg), PayloadTypeWebRTCBinary)
 		assert.NoError(t, err)
 		assert.Equal(t, len(msg), n, "unexpected length of received data")
-		assert.Equal(t, len(msg), a0.bufferedAmount(), "incorrect bufferedAmount")
+		assert.Equal(t, len(msg), a0.BufferedAmount(), "incorrect bufferedAmount")
 
 		flushBuffers(br, a0, a1)
 
@@ -471,7 +471,7 @@ func TestAssocReliable(t *testing.T) { //nolint:maintidx
 		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
 
 		assert.False(t, s0.reassemblyQueue.isReadable(), "should no longer be readable")
-		assert.Equal(t, 0, a0.bufferedAmount(), "incorrect bufferedAmount")
+		assert.Equal(t, 0, a0.BufferedAmount(), "incorrect bufferedAmount")
 
 		closeAssociationPair(br, a0, a1)
 	})
@@ -490,7 +490,7 @@ func TestAssocReliable(t *testing.T) { //nolint:maintidx
 		s0, s1, err := establishSessionPair(br, a0, a1, si)
 		assert.NoError(t, err, "failed to establish session pair")
 
-		assert.Equal(t, 0, a0.bufferedAmount(), "incorrect bufferedAmount")
+		assert.Equal(t, 0, a0.BufferedAmount(), "incorrect bufferedAmount")
 
 		assert.NoError(t, s1.SetReadDeadline(time.Now().Add(time.Millisecond)), "failed to set read deadline")
 		buf := make([]byte, 32)
@@ -510,7 +510,7 @@ func TestAssocReliable(t *testing.T) { //nolint:maintidx
 		assert.NoError(t, err)
 
 		assert.Equal(t, len(msg), n, "unexpected length of received data")
-		assert.Equal(t, len(msg), a0.bufferedAmount(), "incorrect bufferedAmount")
+		assert.Equal(t, len(msg), a0.BufferedAmount(), "incorrect bufferedAmount")
 
 		flushBuffers(br, a0, a1)
 
@@ -774,12 +774,12 @@ func TestAssocReliable(t *testing.T) { //nolint:maintidx
 		s0, s1, err := establishSessionPair(br, a0, a1, si)
 		assert.NoError(t, err, "failed to establish session pair")
 
-		assert.Equal(t, 0, a0.bufferedAmount(), "incorrect bufferedAmount")
+		assert.Equal(t, 0, a0.BufferedAmount(), "incorrect bufferedAmount")
 
 		n, err := s0.WriteSCTP([]byte(msg), PayloadTypeWebRTCBinary)
 		assert.NoError(t, err)
 		assert.Equal(t, len(msg), n, "unexpected length of received data")
-		assert.Equal(t, len(msg), a0.bufferedAmount(), "incorrect bufferedAmount")
+		assert.Equal(t, len(msg), a0.BufferedAmount(), "incorrect bufferedAmount")
 
 		flushBuffers(br, a0, a1)
 
@@ -790,7 +790,7 @@ func TestAssocReliable(t *testing.T) { //nolint:maintidx
 		assert.Equal(t, ppi, PayloadProtocolIdentifier(0), "unexpected ppi")
 
 		assert.False(t, s0.reassemblyQueue.isReadable(), "should no longer be readable")
-		assert.Equal(t, 0, a0.bufferedAmount(), "incorrect bufferedAmount")
+		assert.Equal(t, 0, a0.BufferedAmount(), "incorrect bufferedAmount")
 
 		closeAssociationPair(br, a0, a1)
 	})
@@ -1225,12 +1225,12 @@ loop1:
 	s0, s1, err := establishSessionPair(br, a0, a1, si)
 	assert.NoError(t, err, "failed to establish session pair")
 
-	assert.Equal(t, 0, a0.bufferedAmount(), "incorrect bufferedAmount")
+	assert.Equal(t, 0, a0.BufferedAmount(), "incorrect bufferedAmount")
 
 	n, err := s0.WriteSCTP([]byte(msg), PayloadTypeWebRTCBinary)
 	assert.NoError(t, err)
 	assert.Equal(t, len(msg), n, "unexpected length of received data")
-	assert.Equal(t, len(msg), a0.bufferedAmount(), "incorrect bufferedAmount")
+	assert.Equal(t, len(msg), a0.BufferedAmount(), "incorrect bufferedAmount")
 
 	flushBuffers(br, a0, a1)
 
@@ -1241,7 +1241,7 @@ loop1:
 	assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
 
 	assert.False(t, s0.reassemblyQueue.isReadable(), "should no longer be readable")
-	assert.Equal(t, 0, a0.bufferedAmount(), "incorrect bufferedAmount")
+	assert.Equal(t, 0, a0.BufferedAmount(), "incorrect bufferedAmount")
 
 	closeAssociationPair(br, a0, a1)
 }
@@ -2182,12 +2182,12 @@ func TestAssocReset(t *testing.T) { //nolint:cyclop
 		s0, s1, err := establishSessionPair(br, a0, a1, si)
 		assert.NoError(t, err, "failed to establish session pair")
 
-		assert.Equal(t, 0, a0.bufferedAmount(), "incorrect bufferedAmount")
+		assert.Equal(t, 0, a0.BufferedAmount(), "incorrect bufferedAmount")
 
 		n, err := s0.WriteSCTP([]byte(msg), PayloadTypeWebRTCBinary)
 		assert.NoError(t, err)
 		assert.Equal(t, len(msg), n, "unexpected length of received data")
-		assert.Equal(t, len(msg), a0.bufferedAmount(), "incorrect bufferedAmount")
+		assert.Equal(t, len(msg), a0.BufferedAmount(), "incorrect bufferedAmount")
 
 		err = s0.Close() // send reset
 		assert.NoError(t, err)
@@ -2241,13 +2241,13 @@ func TestAssocReset(t *testing.T) { //nolint:cyclop
 		s0, s1, err := establishSessionPair(br, a0, a1, si)
 		assert.NoError(t, err, "failed to establish session pair")
 
-		assert.Equal(t, 0, a0.bufferedAmount(), "incorrect bufferedAmount")
+		assert.Equal(t, 0, a0.BufferedAmount(), "incorrect bufferedAmount")
 
 		// send a message from s0 to s1
 		n, err := s0.WriteSCTP([]byte(msg), PayloadTypeWebRTCBinary)
 		assert.NoError(t, err)
 		assert.Equal(t, len(msg), n, "unexpected length of received data")
-		assert.Equal(t, len(msg), a0.bufferedAmount(), "incorrect bufferedAmount")
+		assert.Equal(t, len(msg), a0.BufferedAmount(), "incorrect bufferedAmount")
 
 		// close s0 as soon as the message is sent
 		err = s0.Close()
