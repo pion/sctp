@@ -2924,9 +2924,8 @@ func (a *Association) onAckTimeout() {
 	a.awakeWriteLoop()
 }
 
-// bufferedAmount returns total amount (in bytes) of currently buffered user data.
-// This is used only by testing.
-func (a *Association) bufferedAmount() int {
+// BufferedAmount returns total amount (in bytes) of currently buffered user data.
+func (a *Association) BufferedAmount() int {
 	a.lock.RLock()
 	defer a.lock.RUnlock()
 
