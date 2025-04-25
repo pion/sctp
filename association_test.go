@@ -3780,3 +3780,19 @@ func TestAssociation_BlockWrite(t *testing.T) {
 		require.LessOrEqual(t, s1.BufferedAmount(), uint64(4000*2))
 	}
 }
+
+func TestConfigMTU(t *testing.T) {
+	const expectedMTU = uint32(8765)
+	conn1, conn2 := createUDPConnPair()
+	a1, a2, err := createAssociationPairWithConfig(conn1, conn2, Config{MTU: 8765})
+	require.NoError(t, err)
+
+	require.Equal(t, expectedMTU, a1.MTU())
+	require.Equal(t, expectedMTU, a2.MTU())
+
+	require.NoError(t, a1.Close())
+	require.NoError(t, conn1.Close())
+
+	require.NoError(t, a2.Close())
+	require.NoError(t, conn2.Close())
+}
