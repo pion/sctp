@@ -272,6 +272,7 @@ type Config struct {
 	EnableZeroChecksum   bool
 	LoggerFactory        logging.LoggerFactory
 	BlockWrite           bool
+	MTU                  uint32
 
 	// congestion control configuration
 	// RTOMax is the maximum retransmission timeout in milliseconds
@@ -328,18 +329,19 @@ func createClientWithContext(ctx context.Context, config Config) (*Association, 
 }
 
 func createAssociation(config Config) *Association {
-	var maxReceiveBufferSize uint32
-	if config.MaxReceiveBufferSize == 0 {
+	maxReceiveBufferSize := config.MaxReceiveBufferSize
+	if maxReceiveBufferSize == 0 {
 		maxReceiveBufferSize = initialRecvBufSize
-	} else {
-		maxReceiveBufferSize = config.MaxReceiveBufferSize
 	}
 
-	var maxMessageSize uint32
-	if config.MaxMessageSize == 0 {
+	maxMessageSize := config.MaxMessageSize
+	if maxMessageSize == 0 {
 		maxMessageSize = defaultMaxMessageSize
-	} else {
-		maxMessageSize = config.MaxMessageSize
+	}
+
+	mtu := config.MTU
+	if mtu == 0 {
+		mtu = initialMTU
 	}
 
 	tsn := globalMathRandomGenerator.Uint32()
@@ -362,8 +364,8 @@ func createAssociation(config Config) *Association {
 		inflightQueue:           newPayloadQueue(),
 		pendingQueue:            newPendingQueue(),
 		controlQueue:            newControlQueue(),
-		mtu:                     initialMTU,
-		maxPayloadSize:          initialMTU - (commonHeaderSize + dataChunkHeaderSize),
+		mtu:                     mtu,
+		maxPayloadSize:          mtu - (commonHeaderSize + dataChunkHeaderSize),
 		myVerificationTag:       globalMathRandomGenerator.Uint32(),
 		initialTSN:              tsn,
 		myNextTSN:               tsn,

@@ -40,7 +40,7 @@ func TestInitChunk(t *testing.T) {
 		2048, initChunk.numInboundStreams)
 	assert.Equalf(t, initChunk.initialTSN, uint32(3899461680),
 		"Unmarshal passed for SCTP packet, but got incorrect initialTSN exp: %d act: %d",
-		3899461680, initChunk.initialTSN)
+		uint32(3899461680), initChunk.initialTSN)
 }
 
 func TestInitAck(t *testing.T) {
