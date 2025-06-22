@@ -2717,8 +2717,8 @@ func createAssocs() (*Association, *Association, error) { //nolint:cyclop
 
 	loggerFactory := logging.NewDefaultLoggerFactory()
 
-	a1Chan := make(chan interface{})
-	a2Chan := make(chan interface{})
+	a1Chan := make(chan any)
+	a2Chan := make(chan any)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -2809,8 +2809,8 @@ func createAssociationPairWithConfig(
 ) (*Association, *Association, error) {
 	loggerFactory := logging.NewDefaultLoggerFactory()
 
-	a1Chan := make(chan interface{})
-	a2Chan := make(chan interface{})
+	a1Chan := make(chan any)
+	a2Chan := make(chan any)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -3479,20 +3479,20 @@ type customLogger struct {
 	t                  *testing.T
 }
 
-func (c customLogger) Trace(string)                  {}
-func (c customLogger) Tracef(string, ...interface{}) {}
-func (c customLogger) Debug(string)                  {}
-func (c customLogger) Debugf(format string, args ...interface{}) {
+func (c customLogger) Trace(string)          {}
+func (c customLogger) Tracef(string, ...any) {}
+func (c customLogger) Debug(string)          {}
+func (c customLogger) Debugf(format string, args ...any) {
 	if format == "[%s] sendZeroChecksum=%t (on initAck)" {
 		assert.Equal(c.t, args[1], c.expectZeroChecksum)
 	}
 }
-func (c customLogger) Info(string)                   {}
-func (c customLogger) Infof(string, ...interface{})  {}
-func (c customLogger) Warn(string)                   {}
-func (c customLogger) Warnf(string, ...interface{})  {}
-func (c customLogger) Error(string)                  {}
-func (c customLogger) Errorf(string, ...interface{}) {}
+func (c customLogger) Info(string)           {}
+func (c customLogger) Infof(string, ...any)  {}
+func (c customLogger) Warn(string)           {}
+func (c customLogger) Warnf(string, ...any)  {}
+func (c customLogger) Error(string)          {}
+func (c customLogger) Errorf(string, ...any) {}
 
 func (c customLogger) NewLogger(string) logging.LeveledLogger {
 	return c
