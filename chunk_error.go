@@ -57,11 +57,7 @@ func (a *chunkError) unmarshal(raw []byte) error {
 	}
 
 	offset := chunkHeaderSize
-	for {
-		if len(raw)-offset < 4 {
-			break
-		}
-
+	for len(raw)-offset >= 4 {
 		e, err := buildErrorCause(raw[offset:])
 		if err != nil {
 			return fmt.Errorf("%w: %v", ErrBuildErrorChunkFailed, err) //nolint:errorlint

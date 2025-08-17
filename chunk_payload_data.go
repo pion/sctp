@@ -211,5 +211,5 @@ func (p *chunkPayloadData) setAllInflight() {
 }
 
 func (p *chunkPayloadData) isFragmented() bool {
-	return !(p.head == nil && p.beginningFragment && p.endingFragment)
+	return p.head != nil || !p.beginningFragment || !p.endingFragment
 }
