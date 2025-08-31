@@ -17,7 +17,7 @@ import (
 )
 
 func main() { //nolint:cyclop
-	conn, err := net.Dial("udp", "127.0.0.1:9899")
+	conn, err := net.Dial("udp", "127.0.0.1:9899") //nolint: noctx
 	if err != nil {
 		log.Panic(err)
 	}
