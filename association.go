@@ -1705,7 +1705,7 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 		}
 
 		if !chunkPayload.acked {
-			// RFC 4096 sec 6.3.2.  Retransmission Timer Rules
+			// RFC 4960 sec 6.3.2.  Retransmission Timer Rules
 			//   R3)  Whenever a SACK is received that acknowledges the DATA chunk
 			//        with the earliest outstanding TSN for that address, restart the
 			//        T3-rtx timer for that address with its current RTO (if there is
@@ -1793,7 +1793,7 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 
 // The caller should hold the lock.
 func (a *Association) onCumulativeTSNAckPointAdvanced(totalBytesAcked int) {
-	// RFC 4096, sec 6.3.2.  Retransmission Timer Rules
+	// RFC 4960, sec 6.3.2.  Retransmission Timer Rules
 	//   R2)  Whenever all outstanding data sent to an address have been
 	//        acknowledged, turn off the T3-rtx timer of that address.
 	if a.inflightQueue.size() == 0 {
@@ -1806,7 +1806,7 @@ func (a *Association) onCumulativeTSNAckPointAdvanced(totalBytesAcked int) {
 
 	// Update congestion control parameters
 	if a.CWND() <= a.ssthresh { //nolint:nestif
-		// RFC 4096, sec 7.2.1.  Slow-Start
+		// RFC 4960, sec 7.2.1.  Slow-Start
 		//   o  When cwnd is less than or equal to ssthresh, an SCTP endpoint MUST
 		//		use the slow-start algorithm to increase cwnd only if the current
 		//      congestion window is being fully utilized, an incoming SACK
@@ -1828,7 +1828,7 @@ func (a *Association) onCumulativeTSNAckPointAdvanced(totalBytesAcked int) {
 				a.name, a.CWND(), a.ssthresh, totalBytesAcked, a.inFastRecovery, a.pendingQueue.size())
 		}
 	} else {
-		// RFC 4096, sec 7.2.2.  Congestion Avoidance
+		// RFC 4960, sec 7.2.2.  Congestion Avoidance
 		//   o  Whenever cwnd is greater than ssthresh, upon each SACK arrival
 		//      that advances the Cumulative TSN Ack Point, increase
 		//      partial_bytes_acked by the total number of bytes of all new chunks
