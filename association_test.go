@@ -3796,3 +3796,222 @@ func TestConfigMTU(t *testing.T) {
 	require.NoError(t, a2.Close())
 	require.NoError(t, conn2.Close())
 }
+
+// makes an Association without starting read/write loops, skips init(), just the minimal state.
+func newRackTestAssoc(t *testing.T) *Association {
+	t.Helper()
+
+	lg := logging.NewDefaultLoggerFactory()
+	assoc := createAssociation(Config{
+		LoggerFactory: lg,
+	})
+
+	// Put the association into a sane "established" state with fresh queues.
+	assoc.setState(established)
+	assoc.peerVerificationTag = 1
+	assoc.sourcePort = defaultSCTPSrcDstPort
+	assoc.destinationPort = defaultSCTPSrcDstPort
+
+	// Deterministic TSN base.
+	assoc.initialTSN = 100
+	assoc.myNextTSN = 102 // we'll populate TSN=100,101 manually below
+	assoc.cumulativeTSNAckPoint = 99
+	assoc.advancedPeerTSNAckPoint = 99
+
+	// fresh queues
+	assoc.inflightQueue = newPayloadQueue()
+	assoc.payloadQueue = newReceivePayloadQueue(getMaxTSNOffset(assoc.maxReceiveBufferSize))
+
+	// RACK defaults for tests
+	assoc.rackEnabled = true
+	assoc.rackReorderingSeen = false
+	assoc.rackReoWndFloor = 0
+
+	// Have a non-zero SRTT so SRTT-bounding code runs deterministically.
+	assoc.srtt.Store(float64(100.0)) // 100 ms
+
+	return assoc
+}
+
+func mkChunk(tsn uint32, since time.Time) *chunkPayloadData {
+	return &chunkPayloadData{
+		streamIdentifier:     1,
+		streamSequenceNumber: 1,
+		beginningFragment:    true,
+		endingFragment:       true,
+		userData:             []byte("x"),
+		tsn:                  tsn,
+		since:                since,
+		nSent:                1, // original transmission
+	}
+}
+
+func TestRACK_EnabledDefaultAndDisableOption(t *testing.T) {
+	// default -> enabled
+	a := createAssociation(Config{LoggerFactory: logging.NewDefaultLoggerFactory()})
+	assert.True(t, a.rackEnabled, "RACK should be enabled by default")
+
+	// DisableRACK -> disabled
+	b := createAssociation(Config{
+		LoggerFactory: logging.NewDefaultLoggerFactory(),
+		DisableRACK:   true,
+	})
+	assert.False(t, b.rackEnabled, "RACK should be disabled when DisableRACK is set")
+}
+
+func TestRACK_MarkLossOnACK(t *testing.T) {
+	assoc := newRackTestAssoc(t)
+
+	// MinRTT=40ms => base reoWnd = 10ms
+	assoc.rackMinRTT = 40 * time.Millisecond
+	assoc.rackReoWnd = 0 // let onRackAfterSACK initialize to base
+
+	now := time.Now()
+	// Outstanding: TSN=100 (older), TSN=101 (newer, will be SACKed as gap)
+	cA := mkChunk(100, now.Add(-50*time.Millisecond))
+	cB := mkChunk(101, now) // most recently delivered send-time
+
+	assoc.inflightQueue.pushNoCheck(cA)
+	assoc.inflightQueue.pushNoCheck(cB)
+
+	// cumulativeTSNAck=99, gap block [2..2] => 99+2=101.
+	sack := &chunkSelectiveAck{
+		cumulativeTSNAck:               99,
+		advertisedReceiverWindowCredit: 65535,
+		gapAckBlocks:                   []gapAckBlock{{start: 2, end: 2}},
+		duplicateTSN:                   nil,
+	}
+
+	err := assoc.handleSack(sack)
+	require.NoError(t, err)
+
+	// RACK should have marked TSN=100 lost (since + reoWnd < deliveredTime).
+	gotA, _ := assoc.inflightQueue.get(100)
+	require.NotNil(t, gotA)
+	assert.True(t, gotA.retransmit, "RACK should mark older TSN lost on ACK")
+}
+
+func TestRACK_TimerMarksLost(t *testing.T) {
+	assoc := newRackTestAssoc(t)
+
+	assoc.rackEnabled = true
+	assoc.rackMinRTT = 80 * time.Millisecond
+	assoc.rackReoWnd = 20 * time.Millisecond
+	assoc.rackDeliveredTime = time.Now() // pretend we just delivered something
+
+	// One outstanding original transmission far in the past.
+	c := mkChunk(100, time.Now().Add(-200*time.Millisecond))
+	assoc.inflightQueue.pushNoCheck(c)
+
+	// Simulate timer.
+	assoc.onRackTimeout()
+
+	got, _ := assoc.inflightQueue.get(100)
+	require.NotNil(t, got)
+	assert.True(t, got.retransmit, "RACK timer should mark overdue original as lost")
+}
+
+func TestRACK_DSACKInflatesAndDecays(t *testing.T) {
+	assoc := newRackTestAssoc(t)
+
+	assoc.rackMinRTT = 100 * time.Millisecond
+	assoc.rackReoWnd = 25 * time.Millisecond // base is 25ms; will inflate by +25ms
+	assoc.rackKeepInflatedRecoveries = 0
+
+	// DSACK (duplicate TSN) present -> inflate by max(minRTT/4, floor) and set counter=16
+	sack := &chunkSelectiveAck{
+		cumulativeTSNAck: 99,
+		duplicateTSN:     []uint32{123},
+	}
+
+	// Note that we're checking for 15 and 14 instead of 16 and 15 because it immediately
+	// decrements when not in fast recovery.
+	assoc.onRackAfterSACK(false, time.Time{}, 0, sack)
+	assert.Equal(t, 50*time.Millisecond, assoc.rackReoWnd, "reoWnd should inflate on DSACK")
+	assert.Equal(t, 15, assoc.rackKeepInflatedRecoveries, "keep-inflated counter should be 15")
+
+	// When not in fast recovery, the counter decays each pass.
+	assoc.inFastRecovery = false
+	assoc.onRackAfterSACK(false, time.Time{}, 0, &chunkSelectiveAck{})
+	assert.Equal(t, 14, assoc.rackKeepInflatedRecoveries)
+
+	// Drive counter to zero and ensure reoWnd resets to base (minRTT/4).
+	assoc.rackKeepInflatedRecoveries = 1
+	assoc.onRackAfterSACK(false, time.Time{}, 0, &chunkSelectiveAck{})
+	assert.Equal(t, 0, assoc.rackKeepInflatedRecoveries)
+	assert.Equal(t, 25*time.Millisecond, assoc.rackReoWnd, "reoWnd should reset to base after decay")
+}
+
+func TestRACK_SuppressReoWndDuringRecovery_NoReorderingSeen(t *testing.T) {
+	assoc := newRackTestAssoc(t)
+
+	assoc.rackMinRTT = 120 * time.Millisecond
+	assoc.rackReoWnd = 40 * time.Millisecond
+	assoc.rackReorderingSeen = false
+	assoc.inFastRecovery = true
+
+	// During recovery with no reordering observed, reoWnd must go to zero.
+	assoc.onRackAfterSACK(false, time.Time{}, 0, &chunkSelectiveAck{})
+	assert.Equal(t, time.Duration(0), assoc.rackReoWnd, "reoWnd should be suppressed during recovery w/o reordering")
+
+	// After recovery ends, if reoWnd==0, it should re-initialize to base.
+	assoc.inFastRecovery = false
+	assoc.onRackAfterSACK(false, time.Time{}, 0, &chunkSelectiveAck{})
+	assert.Equal(t, 30*time.Millisecond, assoc.rackReoWnd, "reoWnd should re-initialize to base (minRTT/4) after recovery")
+}
+
+func TestRACK_ReoWndBoundedBySRTT(t *testing.T) {
+	a := newRackTestAssoc(t)
+
+	// Set a very large reoWnd, and a small SRTT (10ms).
+	a.rackReoWnd = 200 * time.Millisecond
+	a.srtt.Store(float64(10.0))
+
+	// Any onRackAfterSACK pass should bound reoWnd by SRTT.
+	a.onRackAfterSACK(false, time.Time{}, 0, &chunkSelectiveAck{})
+	assert.Equal(t, 10*time.Millisecond, a.rackReoWnd, "reoWnd must be bounded by SRTT")
+}
+
+func TestRACK_PTO_ProbesLatestOutstanding_WhenNoPending(t *testing.T) {
+	assoc := newRackTestAssoc(t)
+
+	// Two outstanding, none acked/abandoned.
+	now := time.Now()
+	c0 := mkChunk(100, now.Add(-10*time.Millisecond))
+	c1 := mkChunk(101, now)
+	assoc.inflightQueue.pushNoCheck(c0)
+	assoc.inflightQueue.pushNoCheck(c1)
+
+	// No pending -> PTO should mark latest outstanding for retransmit.
+	assoc.onPTOTimer()
+
+	got0, _ := assoc.inflightQueue.get(100)
+	got1, _ := assoc.inflightQueue.get(101)
+	require.NotNil(t, got0)
+	require.NotNil(t, got1)
+
+	assert.False(t, got0.retransmit, "older TSN should not be probed by PTO")
+	assert.True(t, got1.retransmit, "latest outstanding should be probed by PTO")
+}
+
+func TestRACK_PTO_DoesNotProbe_WhenPendingExists(t *testing.T) {
+	assoc := newRackTestAssoc(t)
+
+	// One outstanding
+	assoc.inflightQueue.pushNoCheck(mkChunk(100, time.Now()))
+
+	// Add something pending (generic non-nil chunk).
+	assoc.pendingQueue.push(&chunkPayloadData{
+		streamIdentifier:  2,
+		beginningFragment: true,
+		endingFragment:    true,
+		userData:          []byte("pending"),
+	})
+
+	// With pending data, PTO should NOT mark retransmit and simply wake sender.
+	assoc.onPTOTimer()
+
+	got, _ := assoc.inflightQueue.get(100)
+	require.NotNil(t, got)
+	assert.False(t, got.retransmit, "PTO must prefer sending pending data over probing")
+}
