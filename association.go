@@ -1708,7 +1708,14 @@ func (a *Association) getOrCreateStream(
 // The caller should hold the lock.
 //
 //nolint:gocognit,cyclop
-func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) (map[uint16]int, uint32, time.Time, uint32, bool, error) {
+func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) (
+	map[uint16]int,
+	uint32,
+	time.Time,
+	uint32,
+	bool,
+	error,
+) {
 	bytesAckedPerStream := map[uint16]int{}
 	var newestDeliveredSendTime time.Time // send time of most recently delivered original chunk
 	var newestDeliveredOrigTSN uint32
@@ -1723,7 +1730,7 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 			return nil, 0, time.Time{}, 0, false, fmt.Errorf("%w: %v", ErrInflightQueueTSNPop, i)
 		}
 
-		if !chunkPayload.acked {
+		if !chunkPayload.acked { //nolint:nestif
 			// RFC 4960 sec 6.3.2.  Retransmission Timer Rules
 			//   R3)  Whenever a SACK is received that acknowledges the DATA chunk
 			//        with the earliest outstanding TSN for that address, restart the
@@ -1793,7 +1800,7 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 				return nil, 0, time.Time{}, 0, false, fmt.Errorf("%w: %v", ErrTSNRequestNotExist, tsn)
 			}
 
-			if !chunkPayload.acked {
+			if !chunkPayload.acked { //nolint:nestif
 				nBytesAcked := a.inflightQueue.markAsAcked(tsn)
 
 				// Sum the number of bytes acknowledged per stream
@@ -1998,7 +2005,9 @@ func (a *Association) handleSack(selectiveAckChunk *chunkSelectiveAck) error {
 	}
 
 	// Process selective ack
-	bytesAckedPerStream, htna, newestDeliveredSendTime, newestDeliveredOrigTSN, deliveredFound, err := a.processSelectiveAck(selectiveAckChunk)
+	bytesAckedPerStream, htna,
+		newestDeliveredSendTime, newestDeliveredOrigTSN,
+		deliveredFound, err := a.processSelectiveAck(selectiveAckChunk)
 	if err != nil {
 		return err
 	}
@@ -3078,7 +3087,14 @@ func (a *Association) stopPTOTimer() {
 }
 
 // onRackAfterSACK implements the RACK logic (RACK for SCTP section 2A/B, section 3) and TLP scheduling (section 2C).
-func (a *Association) onRackAfterSACK(deliveredFound bool, newestDeliveredSendTime time.Time, newestDeliveredOrigTSN uint32, sack *chunkSelectiveAck) {
+//
+//nolint:gocognit,cyclop
+func (a *Association) onRackAfterSACK(
+	deliveredFound bool,
+	newestDeliveredSendTime time.Time,
+	newestDeliveredOrigTSN uint32,
+	sack *chunkSelectiveAck,
+) {
 	now := time.Now()
 
 	// 1) Update highest delivered original TSN for reordering detection (section 2B)
@@ -3109,7 +3125,8 @@ func (a *Association) onRackAfterSACK(deliveredFound bool, newestDeliveredSendTi
 		}
 	}
 
-	// DSACK-style inflation using SCTP duplicate TSNs (RACK for SCTP section 3 noting SCTP natively reports duplicates + RACK for SCTP section 2B policy)
+	// DSACK-style inflation using SCTP duplicate TSNs (RACK for SCTP section 3 noting SCTP
+	// natively reports duplicates + RACK for SCTP section 2B policy)
 	if len(sack.duplicateTSN) > 0 && a.rackMinRTT > 0 {
 		a.rackReoWnd += max(a.rackMinRTT/4, a.rackReoWndFloor)
 		// keep inflated for 16 loss recoveries before reset
@@ -3125,7 +3142,8 @@ func (a *Association) onRackAfterSACK(deliveredFound bool, newestDeliveredSendTi
 		}
 	}
 
-	// 3) Loss marking on ACK: any outstanding chunk whose (send_time + reoWnd) < newestDeliveredSendTime is lost (RACK for SCTP section 2A)
+	// 3) Loss marking on ACK: any outstanding chunk whose (send_time + reoWnd) < newestDeliveredSendTime
+	// is lost (RACK for SCTP section 2A)
 	if !a.rackDeliveredTime.IsZero() {
 		for i := a.cumulativeTSNAckPoint + 1; ; i++ {
 			chunk, ok := a.inflightQueue.get(i)
@@ -3214,7 +3232,7 @@ func (a *Association) schedulePTOAfterSendLocked() {
 }
 
 // onRackTimeout is fired to avoid waiting for the next ACK.
-func (a *Association) onRackTimeout() {
+func (a *Association) onRackTimeout() { //nolint:cyclop
 	a.lock.Lock()
 	defer a.lock.Unlock()
 
