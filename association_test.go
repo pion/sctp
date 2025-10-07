@@ -1840,8 +1840,7 @@ func TestAssocCongestionControl(t *testing.T) { //nolint:cyclop,maintidx
 			assert.Equal(t, n, len(sbuf), "unexpected length of received data")
 		}
 
-		// process packets for 500 msec, assuming that the fast retrans/recover
-		// should complete within 500 msec.
+		// process packets for 500 msec; recovery should complete without RTO
 		for i := 0; i < 50; i++ {
 			br.Tick()
 			time.Sleep(10 * time.Millisecond)
@@ -1865,7 +1864,7 @@ func TestAssocCongestionControl(t *testing.T) { //nolint:cyclop,maintidx
 				return
 			}
 			assert.Equal(t, len(sbuf), n, "unexpected length of received data")
-			assert.Equal(t, i, int(binary.BigEndian.Uint32(rbuf)), "unexpected length of received data")
+			assert.Equal(t, i, int(binary.BigEndian.Uint32(rbuf)), "unexpected payload sequence")
 			assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
 		}
 
@@ -1878,8 +1877,13 @@ func TestAssocCongestionControl(t *testing.T) { //nolint:cyclop,maintidx
 		t.Logf("nSACKs      : %d\n", a0.stats.getNumSACKsReceived())
 		t.Logf("nAckTimeouts: %d\n", a1.stats.getNumAckTimeouts())
 		t.Logf("nFastRetrans: %d\n", a0.stats.getNumFastRetrans())
+		t.Logf("nT3Timeouts : %d\n", a0.stats.getNumT3Timeouts())
 
-		assert.Equal(t, uint64(1), a0.stats.getNumFastRetrans(), "should be 1")
+		// With RACK enabled, recovery may happen without classic fast retransmit.
+		// Require recovery before RTO; allow FR count to be 0 or 1.
+		assert.Equal(t, uint64(0), a0.stats.getNumT3Timeouts(), "recovery should complete before any RTO")
+		fr := a0.stats.getNumFastRetrans()
+		assert.Truef(t, fr == 0 || fr == 1, "expected fast retrans 0 or 1 (RACK may bypass FR), got %d", fr)
 
 		closeAssociationPair(br, a0, a1)
 	})
