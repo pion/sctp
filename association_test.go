@@ -428,7 +428,6 @@ func TestAssocReliable(t *testing.T) { //nolint:maintidx
 	for i := 0; i < len(sbuf); i++ {
 		sbuf[i] = byte(i & 0xff)
 	}
-	rand.Seed(time.Now().UnixNano()) //nolint:staticcheck // TODO: remove?
 	rand.Shuffle(len(sbuf), func(i, j int) { sbuf[i], sbuf[j] = sbuf[j], sbuf[i] })
 
 	// sbufL - large enough to be fragmented into two chunks and each chunks are
@@ -437,7 +436,6 @@ func TestAssocReliable(t *testing.T) { //nolint:maintidx
 	for i := 0; i < len(sbufL); i++ {
 		sbufL[i] = byte(i & 0xff)
 	}
-	rand.Seed(time.Now().UnixNano()) //nolint:staticcheck // TODO: remove?
 	rand.Shuffle(len(sbufL), func(i, j int) { sbufL[i], sbufL[j] = sbufL[j], sbufL[i] })
 
 	t.Run("Simple", func(t *testing.T) {
@@ -805,12 +803,10 @@ func TestAssocUnreliable(t *testing.T) { //nolint:maintidx
 	for i := 0; i < len(sbuf1); i++ {
 		sbuf1[i] = byte(i & 0xff)
 	}
-	rand.Seed(time.Now().UnixNano()) //nolint:staticcheck // TODO: remove?
 	rand.Shuffle(len(sbuf1), func(i, j int) { sbuf1[i], sbuf1[j] = sbuf1[j], sbuf1[i] })
 	for i := 0; i < len(sbuf2); i++ {
 		sbuf2[i] = byte(i & 0xff)
 	}
-	rand.Seed(time.Now().UnixNano()) //nolint:staticcheck // TODO: remove?
 	rand.Shuffle(len(sbuf2), func(i, j int) { sbuf2[i], sbuf2[j] = sbuf2[j], sbuf2[i] })
 
 	// sbuf - small enough not to be fragmented
@@ -819,7 +815,6 @@ func TestAssocUnreliable(t *testing.T) { //nolint:maintidx
 	for i := 0; i < len(sbuf); i++ {
 		sbuf[i] = byte(i & 0xff)
 	}
-	rand.Seed(time.Now().UnixNano()) //nolint:staticcheck // TODO: remove?
 	rand.Shuffle(len(sbuf), func(i, j int) { sbuf[i], sbuf[j] = sbuf[j], sbuf[i] })
 
 	t.Run("Rexmit ordered no fragment", func(t *testing.T) { // nolint:dupl
