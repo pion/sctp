@@ -5,7 +5,7 @@ package sctp
 
 import (
 	"bytes"
-	"math/rand"
+	crand "crypto/rand"
 	"net"
 	"reflect"
 	"testing"
@@ -15,6 +15,7 @@ import (
 	"github.com/pion/transport/v3/test"
 	"github.com/pion/transport/v3/vnet"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type vNetEnvConfig struct {
@@ -175,12 +176,8 @@ func testRwndFull(t *testing.T, unordered bool) { //nolint:cyclop
 		loggerFactory: loggerFactory,
 		log:           log,
 	})
-	if !assert.NoError(t, err, "should succeed") {
-		return
-	}
-	if !assert.NotNil(t, venv, "should not be nil") {
-		return
-	}
+	require.NoError(t, err, "should succeed")
+	require.NotNil(t, venv, "should not be nil")
 	defer venv.wan.Stop() // nolint:errcheck
 
 	serverHandshakeDone := make(chan struct{})
@@ -199,7 +196,9 @@ func testRwndFull(t *testing.T, unordered bool) { //nolint:cyclop
 	maxReceiveBufferSize := uint32(64 * 1024)
 	msgSize := int(float32(maxReceiveBufferSize)/2) + int(initialMTU)
 	msg := make([]byte, msgSize)
-	rand.Read(msg) // nolint:errcheck,gosec,staticcheck // TODO: fix?
+	n, err := crand.Read(msg)
+	require.NoError(t, err, "failed to read random bytes")
+	require.Equal(t, len(msg), n, "short random read")
 
 	go func() {
 		defer close(serverShutDown)
@@ -414,12 +413,8 @@ func TestStreamClose(t *testing.T) { //nolint:cyclop
 			loggerFactory: loggerFactory,
 			log:           log,
 		})
-		if !assert.NoError(t, err, "should succeed") {
-			return
-		}
-		if !assert.NotNil(t, venv, "should not be nil") {
-			return
-		}
+		require.NoError(t, err, "should succeed")
+		require.NotNil(t, venv, "should not be nil")
 		defer venv.wan.Stop() // nolint:errcheck
 
 		clientShutDown := make(chan struct{})
@@ -601,12 +596,8 @@ func TestCookieEchoRetransmission(t *testing.T) {
 		loggerFactory: loggerFactory,
 		log:           log,
 	})
-	if !assert.NoError(t, err, "should succeed") {
-		return
-	}
-	if !assert.NotNil(t, venv, "should not be nil") {
-		return
-	}
+	require.NoError(t, err, "should succeed")
+	require.NotNil(t, venv, "should not be nil")
 	defer venv.wan.Stop() // nolint:errcheck
 
 	// To cause the cookie echo retransmission, both COOKIE-ECHO
