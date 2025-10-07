@@ -228,6 +228,21 @@ type Association struct {
 	tReconfig  *rtxTimer
 	ackTimer   *ackTimer
 
+	// RACK / TLP state
+	rackEnabled                 bool
+	rackReoWnd                  time.Duration // dynamic reordering window
+	rackMinRTT                  time.Duration // min observed RTT
+	rackDeliveredTime           time.Time     // send time of most recently delivered original chunk
+	rackHighestDeliveredOrigTSN uint32
+	rackReorderingSeen          bool // ever observed reordering for this association
+	rackKeepInflatedRecoveries  int  // keep inflated reoWnd for 16 loss recoveries
+	rackTimerMu                 sync.Mutex
+	rackTimer                   *time.Timer // arms when outstanding but not (yet) overdue
+	ptoTimerMu                  sync.Mutex
+	ptoTimer                    *time.Timer   // Tail Loss Probe timer
+	rackWCDelAck                time.Duration // 200ms default
+	rackReoWndFloor             time.Duration
+
 	// Chunks stored for retransmission
 	storedInit       *chunkInit
 	storedCookieEcho *chunkCookieEcho
@@ -283,6 +298,13 @@ type Config struct {
 	FastRtxWnd uint32
 	// Step of congestion window increase at Congestion Avoidance
 	CwndCAStep uint32
+
+	// RACK loss detection: DISABLED by default (although it should probably be enabled by default..?)
+	DisableRACK bool
+	// Optional: cap the minimum reordering window: 0 = use quarter-RTT
+	RACKReoWndFloor time.Duration
+	// Optional: receiver worst-case delayed-ACK for PTO when only one packet is in flight
+	RACKWCDelAck time.Duration
 }
 
 // Server accepts a SCTP stream over a conn.
@@ -390,6 +412,21 @@ func createAssociation(config Config) *Association {
 		name:                    config.Name,
 		blockWrite:              config.BlockWrite,
 		writeNotify:             make(chan struct{}, 1),
+	}
+
+	// RACK defaults
+	assoc.rackEnabled = true
+
+	if config.DisableRACK {
+		assoc.rackEnabled = false
+	} else if assoc.rackEnabled {
+		assoc.rackWCDelAck = config.RACKWCDelAck
+		if assoc.rackWCDelAck == 0 {
+			assoc.rackWCDelAck = 200 * time.Millisecond // WCDelAckT, RACK for SCTP section 2C
+		}
+
+		assoc.rackReoWndFloor = config.RACKReoWndFloor // optional floor; usually 0
+		assoc.rackKeepInflatedRecoveries = 0
 	}
 
 	if assoc.name == "" {
@@ -592,6 +629,8 @@ func (a *Association) closeAllTimers() {
 	a.t3RTX.close()
 	a.tReconfig.close()
 	a.ackTimer.close()
+	a.stopRackTimer()
+	a.stopPTOTimer()
 }
 
 func (a *Association) readLoop() {
@@ -805,6 +844,8 @@ func (a *Association) gatherOutboundDataAndReconfigPackets(rawPackets [][]byte) 
 			}
 			rawPackets = append(rawPackets, raw)
 		}
+		// RFC 8985 (RACK) schedule PTO on new data transmission
+		a.schedulePTOAfterSendLocked()
 	}
 
 	if len(sisToReset) > 0 || a.willRetransmitReconfig { //nolint:nestif
@@ -1667,8 +1708,18 @@ func (a *Association) getOrCreateStream(
 // The caller should hold the lock.
 //
 //nolint:gocognit,cyclop
-func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) (map[uint16]int, uint32, error) {
+func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) (
+	map[uint16]int,
+	uint32,
+	time.Time,
+	uint32,
+	bool,
+	error,
+) {
 	bytesAckedPerStream := map[uint16]int{}
+	var newestDeliveredSendTime time.Time // send time of most recently delivered original chunk
+	var newestDeliveredOrigTSN uint32
+	var deliveredFound bool
 
 	// New ack point, so pop all ACKed packets from inflightQueue
 	// We add 1 because the "currentAckPoint" has already been popped from the inflight queue
@@ -1676,10 +1727,10 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 	for i := a.cumulativeTSNAckPoint + 1; sna32LTE(i, selectiveAckChunk.cumulativeTSNAck); i++ {
 		chunkPayload, ok := a.inflightQueue.pop(i)
 		if !ok {
-			return nil, 0, fmt.Errorf("%w: %v", ErrInflightQueueTSNPop, i)
+			return nil, 0, time.Time{}, 0, false, fmt.Errorf("%w: %v", ErrInflightQueueTSNPop, i)
 		}
 
-		if !chunkPayload.acked {
+		if !chunkPayload.acked { //nolint:nestif
 			// RFC 4960 sec 6.3.2.  Retransmission Timer Rules
 			//   R3)  Whenever a SACK is received that acknowledges the DATA chunk
 			//        with the earliest outstanding TSN for that address, restart the
@@ -1713,6 +1764,20 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 				rtt := time.Since(chunkPayload.since).Seconds() * 1000.0
 				srtt := a.rtoMgr.setNewRTT(rtt)
 				a.srtt.Store(srtt)
+
+				// RACK (NOT RFC 4960): track minRTT and latest delivered *original* send time
+				if a.rackEnabled {
+					if a.rackMinRTT == 0 || time.Duration(rtt*1e6) < a.rackMinRTT {
+						a.rackMinRTT = time.Duration(rtt * 1e6)
+					}
+
+					if chunkPayload.since.After(newestDeliveredSendTime) {
+						newestDeliveredSendTime = chunkPayload.since
+						newestDeliveredOrigTSN = chunkPayload.tsn
+						deliveredFound = true
+					}
+				}
+
 				a.log.Tracef("[%s] SACK: measured-rtt=%f srtt=%f new-rto=%f",
 					a.name, rtt, srtt, a.rtoMgr.getRTO())
 			}
@@ -1732,10 +1797,10 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 			tsn := selectiveAckChunk.cumulativeTSNAck + uint32(i)
 			chunkPayload, ok := a.inflightQueue.get(tsn)
 			if !ok {
-				return nil, 0, fmt.Errorf("%w: %v", ErrTSNRequestNotExist, tsn)
+				return nil, 0, time.Time{}, 0, false, fmt.Errorf("%w: %v", ErrTSNRequestNotExist, tsn)
 			}
 
-			if !chunkPayload.acked {
+			if !chunkPayload.acked { //nolint:nestif
 				nBytesAcked := a.inflightQueue.markAsAcked(tsn)
 
 				// Sum the number of bytes acknowledged per stream
@@ -1752,6 +1817,20 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 					rtt := time.Since(chunkPayload.since).Seconds() * 1000.0
 					srtt := a.rtoMgr.setNewRTT(rtt)
 					a.srtt.Store(srtt)
+
+					// RACK
+					if a.rackEnabled {
+						if a.rackMinRTT == 0 || time.Duration(rtt*1e6) < a.rackMinRTT {
+							a.rackMinRTT = time.Duration(rtt * 1e6)
+						}
+
+						if chunkPayload.since.After(newestDeliveredSendTime) {
+							newestDeliveredSendTime = chunkPayload.since
+							newestDeliveredOrigTSN = chunkPayload.tsn
+							deliveredFound = true
+						}
+					}
+
 					a.log.Tracef("[%s] SACK: measured-rtt=%f srtt=%f new-rto=%f",
 						a.name, rtt, srtt, a.rtoMgr.getRTO())
 				}
@@ -1763,7 +1842,7 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 		}
 	}
 
-	return bytesAckedPerStream, htna, nil
+	return bytesAckedPerStream, htna, newestDeliveredSendTime, newestDeliveredOrigTSN, deliveredFound, nil
 }
 
 // The caller should hold the lock.
@@ -1926,7 +2005,9 @@ func (a *Association) handleSack(selectiveAckChunk *chunkSelectiveAck) error {
 	}
 
 	// Process selective ack
-	bytesAckedPerStream, htna, err := a.processSelectiveAck(selectiveAckChunk)
+	bytesAckedPerStream, htna,
+		newestDeliveredSendTime, newestDeliveredOrigTSN,
+		deliveredFound, err := a.processSelectiveAck(selectiveAckChunk)
 	if err != nil {
 		return err
 	}
@@ -2004,6 +2085,11 @@ func (a *Association) handleSack(selectiveAckChunk *chunkSelectiveAck) error {
 	}
 
 	a.postprocessSack(state, cumTSNAckPointAdvanced)
+
+	// RACK
+	if a.rackEnabled {
+		a.onRackAfterSACK(deliveredFound, newestDeliveredSendTime, newestDeliveredOrigTSN, selectiveAckChunk)
+	}
 
 	return nil
 }
@@ -2942,4 +3028,269 @@ func (a *Association) completeHandshake(handshakeErr error) bool {
 	}
 
 	return false
+}
+
+func (a *Association) startRackTimer(d time.Duration) {
+	if !a.rackEnabled || d <= 0 {
+		return
+	}
+
+	a.rackTimerMu.Lock()
+	defer a.rackTimerMu.Unlock()
+
+	if a.rackTimer != nil {
+		a.rackTimer.Stop()
+	}
+
+	a.rackTimer = time.AfterFunc(d, a.onRackTimeout)
+}
+
+func (a *Association) stopRackTimer() {
+	a.rackTimerMu.Lock()
+
+	if a.rackTimer != nil {
+		a.rackTimer.Stop()
+	}
+
+	a.rackTimerMu.Unlock()
+}
+
+func (a *Association) startPTOTimer(d time.Duration) {
+	if !a.rackEnabled || d <= 0 {
+		return
+	}
+
+	a.ptoTimerMu.Lock()
+	defer a.ptoTimerMu.Unlock()
+
+	if a.ptoTimer != nil {
+		a.ptoTimer.Stop()
+	}
+
+	a.ptoTimer = time.AfterFunc(d, a.onPTOTimer)
+}
+
+func (a *Association) stopPTOTimer() {
+	a.ptoTimerMu.Lock()
+
+	if a.ptoTimer != nil {
+		a.ptoTimer.Stop()
+	}
+
+	a.ptoTimerMu.Unlock()
+}
+
+// onRackAfterSACK implements the RACK logic (RACK for SCTP section 2A/B, section 3) and TLP scheduling (section 2C).
+//
+//nolint:gocognit,cyclop
+func (a *Association) onRackAfterSACK(
+	deliveredFound bool,
+	newestDeliveredSendTime time.Time,
+	newestDeliveredOrigTSN uint32,
+	sack *chunkSelectiveAck,
+) {
+	now := time.Now()
+
+	// 1) Update highest delivered original TSN for reordering detection (section 2B)
+	if deliveredFound {
+		if sna32LT(a.rackHighestDeliveredOrigTSN, newestDeliveredOrigTSN) {
+			a.rackHighestDeliveredOrigTSN = newestDeliveredOrigTSN
+		} else {
+			// subsequent ACK acknowledges an original TSN below the recorded high-watermark ⇒ reordering observed
+			a.rackReorderingSeen = true
+		}
+
+		if newestDeliveredSendTime.After(a.rackDeliveredTime) {
+			a.rackDeliveredTime = newestDeliveredSendTime
+		}
+	}
+
+	// 2) Maintain ReoWND (RACK for SCTP section 2B)
+	if a.rackMinRTT == 0 {
+		// no RTT signal yet; leave as zero until we have an RTT
+	} else {
+		base := max(a.rackMinRTT/4, a.rackReoWndFloor)
+		// if we have never seen reordering for this connection, set to zero *during loss recovery* (RACK for SCTP section 2B)
+		// we approximate “during loss recovery” with inFastRecovery or T3-Rtx pending. Outside recovery keep base.
+		if !a.rackReorderingSeen && (a.inFastRecovery || a.t3RTX.isRunning()) {
+			a.rackReoWnd = 0
+		} else if a.rackReoWnd == 0 {
+			a.rackReoWnd = base
+		}
+	}
+
+	// DSACK-style inflation using SCTP duplicate TSNs (RACK for SCTP section 3 noting SCTP
+	// natively reports duplicates + RACK for SCTP section 2B policy)
+	if len(sack.duplicateTSN) > 0 && a.rackMinRTT > 0 {
+		a.rackReoWnd += max(a.rackMinRTT/4, a.rackReoWndFloor)
+		// keep inflated for 16 loss recoveries before reset
+		a.rackKeepInflatedRecoveries = 16
+		a.log.Tracef("[%s] RACK: DSACK/dupTSN seen, inflate reoWnd to %v", a.name, a.rackReoWnd)
+	}
+
+	// decrement the keep inflated counter when we leave recovery
+	if !a.inFastRecovery && a.rackKeepInflatedRecoveries > 0 {
+		a.rackKeepInflatedRecoveries--
+		if a.rackKeepInflatedRecoveries == 0 && a.rackMinRTT > 0 {
+			a.rackReoWnd = a.rackMinRTT / 4
+		}
+	}
+
+	// 3) Loss marking on ACK: any outstanding chunk whose (send_time + reoWnd) < newestDeliveredSendTime
+	// is lost (RACK for SCTP section 2A)
+	if !a.rackDeliveredTime.IsZero() {
+		for i := a.cumulativeTSNAckPoint + 1; ; i++ {
+			chunk, ok := a.inflightQueue.get(i)
+			if !ok {
+				break
+			}
+
+			if chunk.acked || chunk.abandoned() || chunk.retransmit {
+				continue
+			}
+
+			// Only consider original transmissions
+			if chunk.nSent > 1 {
+				continue
+			}
+
+			if chunk.since.Add(a.rackReoWnd).Before(a.rackDeliveredTime) {
+				chunk.retransmit = true
+				a.log.Tracef("[%s] RACK: mark lost tsn=%d (sent=%v, delivered=%v, reoWnd=%v)",
+					a.name, chunk.tsn, chunk.since, a.rackDeliveredTime, a.rackReoWnd)
+			}
+		}
+		// if we marked anything, kick the writer
+		a.awakeWriteLoop()
+	}
+
+	// 4) Arm the RACK timer if there are still outstanding but not-yet-overdue chunks (RACK for SCTP section 2A)
+	if a.inflightQueue.size() > 0 && !a.rackDeliveredTime.IsZero() {
+		// RackRTT = RTT of the most recently delivered packet
+		rackRTT := max(now.Sub(a.rackDeliveredTime), 0)
+		a.startRackTimer(rackRTT + a.rackReoWnd) // RACK for SCTP section 2A
+	} else {
+		a.stopRackTimer()
+	}
+
+	// RFC 8985: the reordering window MUST be bounded by SRTT.
+	if srtt := a.SRTT(); srtt > 0 {
+		srttDur := time.Duration(srtt * 1e6) // ms -> ns
+		if a.rackReoWnd > srttDur {
+			a.rackReoWnd = srttDur
+		}
+	}
+
+	// 5) Re/schedule Tail Loss Probe (PTO) (RACK for SCTP section 2C)
+	// Triggered when new data is sent or cum-ack advances; we approximate by scheduling on every SACK that advanced
+	var pto time.Duration
+	srttMs := a.SRTT()
+	if srttMs > 0 {
+		srtt := time.Duration(srttMs * 1e6)
+		extra := 2 * time.Millisecond
+
+		if a.inflightQueue.size() == 1 {
+			extra = a.rackWCDelAck // 200ms for single outstanding, else 2ms
+		}
+
+		pto = 2*srtt + extra
+	} else {
+		pto = time.Second // no RTT yet
+	}
+
+	a.startPTOTimer(pto)
+}
+
+// schedulePTOAfterSendLocked starts/restarts the PTO timer when new data is transmitted.
+// Caller must hold a.lock.
+func (a *Association) schedulePTOAfterSendLocked() {
+	if !a.rackEnabled {
+		return
+	}
+
+	var pto time.Duration
+	if srttMs := a.SRTT(); srttMs > 0 {
+		srtt := time.Duration(srttMs * 1e6)
+		extra := 2 * time.Millisecond
+
+		if a.inflightQueue.size() == 1 {
+			extra = a.rackWCDelAck
+		}
+
+		pto = 2*srtt + extra
+	} else {
+		pto = time.Second
+	}
+
+	a.startPTOTimer(pto)
+}
+
+// onRackTimeout is fired to avoid waiting for the next ACK.
+func (a *Association) onRackTimeout() { //nolint:cyclop
+	a.lock.Lock()
+	defer a.lock.Unlock()
+
+	if !a.rackEnabled || a.rackDeliveredTime.IsZero() {
+		return
+	}
+
+	marked := false
+	for i := a.cumulativeTSNAckPoint + 1; ; i++ {
+		chunk, ok := a.inflightQueue.get(i)
+
+		if !ok {
+			break
+		}
+
+		if chunk.acked || chunk.abandoned() || chunk.retransmit || chunk.nSent > 1 {
+			continue
+		}
+
+		if chunk.since.Add(a.rackReoWnd).Before(a.rackDeliveredTime) {
+			chunk.retransmit = true
+			marked = true
+			a.log.Tracef("[%s] RACK timer: mark lost tsn=%d", a.name, chunk.tsn)
+		}
+	}
+
+	if marked {
+		a.awakeWriteLoop()
+	}
+}
+
+func (a *Association) onPTOTimer() {
+	a.lock.Lock()
+	defer a.lock.Unlock()
+
+	if !a.rackEnabled {
+		return
+	}
+
+	// Prefer unsent data if any
+	if a.pendingQueue.size() > 0 {
+		a.awakeWriteLoop()
+
+		return
+	}
+
+	// Otherwise retransmit the most recently sent in-flight DATA (highest TSN not acked/abandoned)
+	var latest *chunkPayloadData
+	for i := uint32(0); ; i++ {
+		c, ok := a.inflightQueue.get(a.cumulativeTSNAckPoint + i + 1)
+		if !ok {
+			break
+		}
+
+		if c.acked || c.abandoned() {
+			continue
+		}
+
+		latest = c
+	}
+
+	if latest != nil && !latest.retransmit {
+		latest.retransmit = true
+		a.log.Tracef("[%s] PTO fired: probe tsn=%d", a.name, latest.tsn)
+		a.awakeWriteLoop()
+	}
 }
