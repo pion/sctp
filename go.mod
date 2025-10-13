@@ -16,3 +16,6 @@ require (
 )
 
 go 1.21
+
+// Retract version with ZeroChecksum misinterpretation (bi-directional/global handling)
+retract v1.8.12
