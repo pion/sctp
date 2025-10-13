@@ -2766,12 +2766,6 @@ func (a *Association) onRetransmissionTimeout(id int, nRtos uint) { //nolint:cyc
 	a.lock.Lock()
 	defer a.lock.Unlock()
 
-	// TSN hasn't been incremented in 3 attempts. Speculatively
-	// toggle ZeroChecksum because old Pion versions had a broken implementation
-	if a.cumulativeTSNAckPoint+1 == a.initialTSN && nRtos%3 == 0 {
-		a.sendZeroChecksum = !a.sendZeroChecksum
-	}
-
 	if id == timerT1Init {
 		err := a.sendInit()
 		if err != nil {
