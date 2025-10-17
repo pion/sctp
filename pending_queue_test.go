@@ -66,7 +66,7 @@ func TestPendingBaseQueue(t *testing.T) {
 		}
 	})
 
-	t.Run("out of bounce", func(t *testing.T) {
+	t.Run("out of bounds", func(t *testing.T) {
 		pq := newPendingBaseQueue()
 		assert.Nil(t, pq.pop(), "should be nil")
 		assert.Nil(t, pq.get(0), "should be nil")
@@ -190,5 +190,88 @@ func TestPendingQueue(t *testing.T) {
 			assert.NoError(t, err, "should not error")
 			assert.Equal(t, exp, chunkPayload.tsn, "TSN should match")
 		}
+	})
+}
+
+func TestPendingQueue_PopErrors(t *testing.T) {
+	t.Run("ErrUnexpectedQState when not selected and not beginningFragment", func(t *testing.T) {
+		pq := newPendingQueue()
+
+		mid := makeDataChunk(100, false, fragMiddle)
+		err := pq.pop(mid)
+		assert.ErrorIs(t, err, ErrUnexpectedQState)
+	})
+
+	t.Run("ErrUnexpectedChunkPoppedUnordered (not selected path)", func(t *testing.T) {
+		pq := newPendingQueue()
+
+		u1 := makeDataChunk(1, true, noFragment)
+		u2 := makeDataChunk(2, true, noFragment)
+		pq.push(u1)
+		pq.push(u2)
+
+		err := pq.pop(u2)
+		assert.ErrorIs(t, err, ErrUnexpectedChunkPoppedUnordered)
+	})
+
+	t.Run("ErrUnexpectedChunkPoppedOrdered (not selected path)", func(t *testing.T) {
+		pq := newPendingQueue()
+
+		o1 := makeDataChunk(10, false, noFragment)
+		o2 := makeDataChunk(11, false, noFragment)
+		pq.push(o1)
+		pq.push(o2)
+
+		err := pq.pop(o2)
+		assert.ErrorIs(t, err, ErrUnexpectedChunkPoppedOrdered)
+	})
+
+	t.Run("ErrUnexpectedChunkPoppedUnordered (selected unordered path)", func(t *testing.T) {
+		pq := newPendingQueue()
+
+		uBegin := makeDataChunk(21, true, fragBegin)
+		uMid := makeDataChunk(22, true, fragMiddle)
+		uEnd := makeDataChunk(23, true, fragEnd)
+		pq.push(uBegin)
+		pq.push(uMid)
+		pq.push(uEnd)
+
+		err := pq.pop(uBegin)
+		assert.NoError(t, err)
+
+		err = pq.pop(uEnd)
+		assert.ErrorIs(t, err, ErrUnexpectedChunkPoppedUnordered)
+	})
+
+	t.Run("ErrUnexpectedChunkPoppedOrdered (selected ordered path)", func(t *testing.T) {
+		pq := newPendingQueue()
+
+		oBegin := makeDataChunk(31, false, fragBegin)
+		oMid := makeDataChunk(32, false, fragMiddle)
+		oEnd := makeDataChunk(33, false, fragEnd)
+		pq.push(oBegin)
+		pq.push(oMid)
+		pq.push(oEnd)
+
+		err := pq.pop(oBegin)
+		assert.NoError(t, err)
+
+		err = pq.pop(oEnd)
+		assert.ErrorIs(t, err, ErrUnexpectedChunkPoppedOrdered)
+	})
+
+	t.Run("nBytes guard clamps to zero when underflows", func(t *testing.T) {
+		pq := newPendingQueue()
+
+		c := makeDataChunk(40, false, noFragment)
+		pq.push(c)
+
+		pq.nBytes = 5
+
+		peek := pq.peek()
+		err := pq.pop(peek)
+		assert.NoError(t, err)
+
+		assert.Equal(t, 0, pq.getNumBytes())
 	})
 }
