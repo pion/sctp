@@ -25,8 +25,15 @@ func (q *pendingBaseQueue) pop() *chunkPayloadData {
 	if len(q.queue) == 0 {
 		return nil
 	}
+
 	c := q.queue[0]
-	q.queue = q.queue[1:]
+	q.queue[0] = nil
+
+	if len(q.queue) == 0 {
+		q.queue = nil
+	} else {
+		q.queue = q.queue[1:]
+	}
 
 	return c
 }
@@ -55,9 +62,14 @@ type pendingQueue struct {
 
 // Pending queue errors.
 var (
-	ErrUnexpectedChuckPoppedUnordered = errors.New("unexpected chunk popped (unordered)")
-	ErrUnexpectedChuckPoppedOrdered   = errors.New("unexpected chunk popped (ordered)")
+	ErrUnexpectedChunkPoppedUnordered = errors.New("unexpected chunk popped (unordered)")
+	ErrUnexpectedChunkPoppedOrdered   = errors.New("unexpected chunk popped (ordered)")
 	ErrUnexpectedQState               = errors.New("unexpected q state (should've been selected)")
+
+	// Deprecated: use ErrUnexpectedChunkPoppedUnordered.
+	ErrUnexpectedChuckPoppedUnordered = ErrUnexpectedChunkPoppedUnordered
+	// Deprecated: use ErrUnexpectedChunkPoppedOrdered.
+	ErrUnexpectedChuckPoppedOrdered = ErrUnexpectedChunkPoppedOrdered
 )
 
 func newPendingQueue() *pendingQueue {
@@ -98,12 +110,12 @@ func (q *pendingQueue) pop(chunkPayload *chunkPayloadData) error { //nolint:cycl
 		if q.unorderedIsSelected {
 			popped = q.unorderedQueue.pop()
 			if popped != chunkPayload {
-				return ErrUnexpectedChuckPoppedUnordered
+				return ErrUnexpectedChunkPoppedUnordered
 			}
 		} else {
 			popped = q.orderedQueue.pop()
 			if popped != chunkPayload {
-				return ErrUnexpectedChuckPoppedOrdered
+				return ErrUnexpectedChunkPoppedOrdered
 			}
 		}
 		if popped.endingFragment {
@@ -116,7 +128,7 @@ func (q *pendingQueue) pop(chunkPayload *chunkPayloadData) error { //nolint:cycl
 		if chunkPayload.unordered {
 			popped := q.unorderedQueue.pop()
 			if popped != chunkPayload {
-				return ErrUnexpectedChuckPoppedUnordered
+				return ErrUnexpectedChunkPoppedUnordered
 			}
 			if !popped.endingFragment {
 				q.selected = true
@@ -125,7 +137,7 @@ func (q *pendingQueue) pop(chunkPayload *chunkPayloadData) error { //nolint:cycl
 		} else {
 			popped := q.orderedQueue.pop()
 			if popped != chunkPayload {
-				return ErrUnexpectedChuckPoppedOrdered
+				return ErrUnexpectedChunkPoppedOrdered
 			}
 			if !popped.endingFragment {
 				q.selected = true
@@ -133,7 +145,12 @@ func (q *pendingQueue) pop(chunkPayload *chunkPayloadData) error { //nolint:cycl
 			}
 		}
 	}
+
+	// guard against negative values (should never happen, but just in case).
 	q.nBytes -= len(chunkPayload.userData)
+	if q.nBytes < 0 {
+		q.nBytes = 0
+	}
 
 	return nil
 }
