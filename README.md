@@ -16,6 +16,35 @@
 </p>
 <br>
 
+### Implemented
+- [RFC 6525](https://www.rfc-editor.org/rfc/rfc6525.html) — Stream Control Transmission Protocol (SCTP) Stream Reconfiguration
+- [RFC 3758](https://www.rfc-editor.org/rfc/rfc3758.html) — Stream Control Transmission Protocol (SCTP) Partial Reliability Extension
+- [RFC 5061](https://www.rfc-editor.org/rfc/rfc5061.html) — Stream Control Transmission Protocol (SCTP) Dynamic Address Reconfiguration
+- [RFC 4895](https://www.rfc-editor.org/rfc/rfc4895.html) — Authenticated Chunks for the Stream Control Transmission Protocol (SCTP)
+- [RFC 1982](https://www.rfc-editor.org/rfc/rfc1982.html) — Serial Number Arithmetic
+
+### Partial implementations
+Pion only implements the subset of RFC 4960 that is required for WebRTC.
+
+- [RFC 4960](https://www.rfc-editor.org/rfc/rfc4960.html) — Stream Control Transmission Protocol [Obsoleted by 9260, above]
+- [RFC 2960](https://www.rfc-editor.org/rfc/rfc2960.html) — Stream Control Transmission Protocol [Obsoleted by 4960, above]
+
+The update to [RFC 9260](https://www.rfc-editor.org/rfc/rfc9260) — Stream Control Transmission Protocol is currently a [work in progress](https://github.com/pion/sctp/issues/402).
+
+### Potential future implementations
+Ideally, we would like to add the following features as part of a [v2 refresh](https://github.com/pion/sctp/issues/314):
+
+Feature | Reference | Progress
+--- | --- | ---
+RACK | [Paper](https://icnp20.cs.ucr.edu/proceedings/nipaa/RACK%20for%20SCTP.pdf)| [In review](https://github.com/pion/sctp/pull/390)
+TLP | [Parent issue](https://github.com/pion/sctp/issues/314) | [Would be implemented via RACK for SCTP](https://github.com/pion/sctp/issues/206#issuecomment-968265853)
+Adaptive burst mitigation | [Paper, see section 5A](https://icnp20.cs.ucr.edu/proceedings/nipaa/RACK%20for%20SCTP.pdf)| [In review](https://github.com/pion/sctp/pull/394)
+Blocking writes | [1](https://github.com/pion/sctp/issues/77), [2](https://github.com/pion/sctp/issues/357) | [In progress](https://github.com/pion/sctp/issues/357#issuecomment-3382050767)
+association.listener (and better docs) | [1](https://github.com/pion/sctp/issues/74), [2](https://github.com/pion/sctp/issues/173) | Not started, [blocked by above](https://github.com/pion/sctp/issues/74#issuecomment-545550714)
+
+RFCs of interest:
+- [RFC 8312](https://www.rfc-editor.org/rfc/rfc8312.html) as it addresses the low utilization problem of [RFC 4960](https://www.rfc-editor.org/rfc/rfc4960.html) in fast long-distance networks as mentioned [here](https://github.com/pion/sctp/issues/218#issuecomment-3329690797).
+
 ### Roadmap
 The library is used as a part of our WebRTC implementation. Please refer to that [roadmap](https://github.com/pion/webrtc/issues/9) to track our major milestones.
 
