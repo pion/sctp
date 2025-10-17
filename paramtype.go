@@ -29,7 +29,7 @@ const (
 	addIncStreamsReq       paramType = 18    // Add Incoming Streams Request Parameter	[RFC6525]
 	ecnCapable             paramType = 32768 // ECN Capable (0x8000)	[RFC2960]
 	zeroChecksumAcceptable paramType = 32769 // Zero Checksum Acceptable [draft-ietf-tsvwg-sctp-zero-checksum-00]
-	random                 paramType = 32770 // Random (0x8002)	[RFC4805]
+	random                 paramType = 32770 // Random (0x8002)	[RFC4895]
 	chunkList              paramType = 32771 // Chunk List (0x8003)	[RFC4895]
 	reqHMACAlgo            paramType = 32772 // Requested HMAC Algorithm Parameter (0x8004)	[RFC4895]
 	padding                paramType = 32773 // Padding (0x8005)
