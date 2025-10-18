@@ -718,24 +718,16 @@ func (a *Association) unregisterStream(s *Stream, err error) {
 	s.readNotifier.Broadcast()
 }
 
-func chunkMandatoryChecksum(cc []chunk) bool {
-	for _, c := range cc {
-		switch c.(type) {
-		case *chunkInit, *chunkCookieEcho:
-			return true
-		}
-	}
-
-	return false
-}
-
 func (a *Association) marshalPacket(p *packet) ([]byte, error) {
-	return p.marshal(!a.sendZeroChecksum || chunkMandatoryChecksum(p.chunks))
+	// RFC 9653: pass whether zero checksum is allowed on this path.
+	// packet.marshal() will still force a correct CRC for INIT/COOKIE ECHO.
+	return p.marshal(a.sendZeroChecksum)
 }
 
 func (a *Association) unmarshalPacket(raw []byte) (*packet, error) {
 	p := &packet{}
-	if err := p.unmarshal(!a.recvZeroChecksum, raw); err != nil {
+	// In packet.unmarshal: doChecksum==true => accept ZERO checksum.
+	if err := p.unmarshal(a.recvZeroChecksum, raw); err != nil {
 		return nil, err
 	}
 
@@ -1273,7 +1265,8 @@ func (a *Association) handleInit(pkt *packet, initChunk *chunkInit) ([]*packet, 
 				}
 			}
 		case *paramZeroChecksumAcceptable:
-			a.sendZeroChecksum = v.edmid == dtlsErrorDetectionMethod
+			// Only send zero if we allow ZCA and the peer accepts it.
+			a.sendZeroChecksum = a.recvZeroChecksum && (v.edmid == dtlsErrorDetectionMethod)
 		}
 	}
 
@@ -1370,7 +1363,9 @@ func (a *Association) handleInitAck(pkt *packet, initChunkAck *chunkInitAck) err
 				}
 			}
 		case *paramZeroChecksumAcceptable:
-			a.sendZeroChecksum = v.edmid == dtlsErrorDetectionMethod
+			// Client: if the server advertised ZCA, we may send zero checksums.
+			// (Cookie Echo & INIT are still forced to real CRC in packet.marshal)
+			a.sendZeroChecksum = (v.edmid == dtlsErrorDetectionMethod)
 		}
 	}
 
