@@ -260,6 +260,24 @@ type Association struct {
 
 	name string
 	log  logging.LeveledLogger
+
+	// Adaptive Burst Mitigation state
+	enableAdaptiveBurst bool
+	// First round (first RTT in a recovery epoch): limit in MTUs (float to allow fractional tuning).
+	burstInitMTUs float64 // default 4.0, min 2.0
+	// Subsequent rounds in the same epoch: per-ACK burst limit ("increase rate"), default 2.0, min 1.25
+	burstSubseqMTUs float64 // default 2.0, min 1.25
+	// Tail-loss recovery (TLR) epoch tracking
+	tlrActive            bool
+	tlrStart             time.Time
+	tlrRTT               time.Duration
+	tlrHadSubsequentLoss bool
+	tlrGoodRecoveries    int            // successful TLR epochs without extra loss; reset burst limits at 16
+	tlrSentRound         map[uint32]int // TSN -> recovery-round index when (re)sent
+	// Adaptive-burst per-ACK budget, measured in MTUs (-1 = unlimited).
+	// Refilled on each SACK while in a TLR epoch.
+	burstBudgetMTUsRemaining int
+	tlrRoundIndex            int // -1 when inactive
 }
 
 // Config collects the arguments to createAssociation construction into
@@ -283,6 +301,9 @@ type Config struct {
 	FastRtxWnd uint32
 	// Step of congestion window increase at Congestion Avoidance
 	CwndCAStep uint32
+
+	// Adaptive Burst Mitigation (RACK for SCTP section 5A) ---
+	DisableAdaptiveBurst bool
 }
 
 // Server accepts a SCTP stream over a conn.
@@ -391,6 +412,20 @@ func createAssociation(config Config) *Association {
 		blockWrite:              config.BlockWrite,
 		writeNotify:             make(chan struct{}, 1),
 	}
+
+	// Adaptive burst mitigation defaults
+	assoc.enableAdaptiveBurst = true
+	if config.DisableAdaptiveBurst {
+		assoc.enableAdaptiveBurst = false
+	} else if assoc.enableAdaptiveBurst {
+		assoc.burstInitMTUs = 4.0
+		assoc.burstSubseqMTUs = 2.0
+		assoc.tlrSentRound = make(map[uint32]int)
+	}
+
+	// Initialize per-round tracking as inactive
+	assoc.burstBudgetMTUsRemaining = -1
+	assoc.tlrRoundIndex = -1
 
 	if assoc.name == "" {
 		assoc.name = fmt.Sprintf("%p", assoc)
@@ -779,6 +814,15 @@ func (a *Association) gatherDataPacketsToRetransmit(rawPackets [][]byte) [][]byt
 
 			continue
 		}
+
+		if a.tlrActive && a.burstBudgetMTUsRemaining >= 0 {
+			mtus := (len(raw) + int(a.MTU()) - 1) / int(a.MTU()) // ceil(len/MTU)
+			if mtus > a.burstBudgetMTUsRemaining {
+				break
+			}
+			a.burstBudgetMTUsRemaining -= mtus
+		}
+
 		rawPackets = append(rawPackets, raw)
 	}
 
@@ -787,11 +831,17 @@ func (a *Association) gatherDataPacketsToRetransmit(rawPackets [][]byte) [][]byt
 
 // The caller should hold the lock.
 //
-//nolint:cyclop
+//nolint:cyclop,gocognit
 func (a *Association) gatherOutboundDataAndReconfigPackets(rawPackets [][]byte) [][]byte {
 	// Pop unsent data chunks from the pending queue to send as much as
 	// cwnd and rwnd allow.
-	chunks, sisToReset := a.popPendingDataChunksToSend()
+	// Also respect the adaptive burst budget when TLR is active.
+	allowedBytes := math.MaxInt
+	if a.tlrActive && a.burstBudgetMTUsRemaining >= 0 {
+		allowedBytes = max(a.burstBudgetMTUsRemaining*int(a.MTU()), 0)
+	}
+	chunks, sisToReset := a.popPendingDataChunksToSend(allowedBytes)
+
 	if len(chunks) > 0 {
 		// Start timer. (noop if already started)
 		a.log.Tracef("[%s] T3-rtx timer start (pt1)", a.name)
@@ -803,6 +853,15 @@ func (a *Association) gatherOutboundDataAndReconfigPackets(rawPackets [][]byte) 
 
 				continue
 			}
+
+			if a.tlrActive && a.burstBudgetMTUsRemaining >= 0 {
+				mtus := (len(raw) + int(a.MTU()) - 1) / int(a.MTU())
+				if mtus > a.burstBudgetMTUsRemaining {
+					break
+				}
+				a.burstBudgetMTUsRemaining -= mtus
+			}
+
 			rawPackets = append(rawPackets, raw)
 		}
 	}
@@ -854,7 +913,7 @@ func (a *Association) gatherOutboundDataAndReconfigPackets(rawPackets [][]byte) 
 
 // The caller should hold the lock.
 //
-//nolint:cyclop
+//nolint:cyclop,gocognit
 func (a *Association) gatherOutboundFastRetransmissionPackets(rawPackets [][]byte) [][]byte {
 	if a.willRetransmitFast { //nolint:nestif
 		a.willRetransmitFast = false
@@ -896,6 +955,8 @@ func (a *Association) gatherOutboundFastRetransmissionPackets(rawPackets [][]byt
 			a.stats.incFastRetrans()
 			chunkPayload.nSent++
 			a.checkPartialReliabilityStatus(chunkPayload)
+			// Tag this retransmission with the current TLR round (if active).
+			a.tlrRecordSentRoundLocked(chunkPayload.tsn)
 			toFastRetrans = append(toFastRetrans, chunkPayload)
 			a.log.Tracef("[%s] fast-retransmit: tsn=%d sent=%d htna=%d",
 				a.name, chunkPayload.tsn, chunkPayload.nSent, a.fastRecoverExitPoint)
@@ -909,6 +970,15 @@ func (a *Association) gatherOutboundFastRetransmissionPackets(rawPackets [][]byt
 
 					continue
 				}
+
+				if a.tlrActive && a.burstBudgetMTUsRemaining >= 0 {
+					mtus := (len(raw) + int(a.MTU()) - 1) / int(a.MTU())
+					if mtus > a.burstBudgetMTUsRemaining {
+						break
+					}
+					a.burstBudgetMTUsRemaining -= mtus
+				}
+
 				rawPackets = append(rawPackets, raw)
 			}
 		}
@@ -1019,9 +1089,15 @@ func (a *Association) gatherAbortPacket() ([]byte, error) {
 
 // gatherOutbound gathers outgoing packets. The returned bool value set to
 // false means the association should be closed down after the final send.
-func (a *Association) gatherOutbound() ([][]byte, bool) {
+func (a *Association) gatherOutbound() ([][]byte, bool) { //nolint:cyclop
 	a.lock.Lock()
 	defer a.lock.Unlock()
+
+	// Outside TLR: unlimited. During TLR we refill on each SACK.
+	if !a.enableAdaptiveBurst || !a.tlrActive {
+		a.burstBudgetMTUsRemaining = -1
+		a.tlrRoundIndex = -1
+	}
 
 	if a.willSendAbort {
 		pkt, err := a.gatherAbortPacket()
@@ -1828,7 +1904,7 @@ func (a *Association) onCumulativeTSNAckPointAdvanced(totalBytesAcked int) {
 
 // The caller should hold the lock.
 //
-//nolint:cyclop
+//nolint:cyclop,gocognit
 func (a *Association) processFastRetransmission(
 	cumTSNAckPoint uint32,
 	gapAckBlocks []gapAckBlock,
@@ -1860,13 +1936,13 @@ func (a *Association) processFastRetransmission(
 		}
 
 		for tsn := cumTSNAckPoint + 1; sna32LT(tsn, maxTSN); tsn++ {
-			c, ok := a.inflightQueue.get(tsn)
+			chunk, ok := a.inflightQueue.get(tsn)
 			if !ok {
 				return fmt.Errorf("%w: %v", ErrTSNRequestNotExist, tsn)
 			}
-			if !c.acked && !c.abandoned() && c.missIndicator < 3 {
-				c.missIndicator++
-				if c.missIndicator == 3 {
+			if !chunk.acked && !chunk.abandoned() && chunk.missIndicator < 3 {
+				chunk.missIndicator++
+				if chunk.missIndicator == 3 {
 					if !a.inFastRecovery {
 						// 2)  If not in Fast Recovery, adjust the ssthresh and cwnd of the
 						//     destination address(es) to which the missing DATA chunks were
@@ -1877,9 +1953,17 @@ func (a *Association) processFastRetransmission(
 						a.setCWND(a.ssthresh)
 						a.partialBytesAcked = 0
 						a.willRetransmitFast = true
+						// Start TLR epoch on first entry to fast recovery
+						a.tlrMaybeStartLocked()
 
 						a.log.Tracef("[%s] updated cwnd=%d ssthresh=%d inflight=%d (FR)",
 							a.name, a.CWND(), a.ssthresh, a.inflightQueue.getNumBytes())
+					} else {
+						// Already in recovery: if this TSN had been retransmitted earlier in this epoch,
+						// treat as a subsequent loss for adaptation.
+						if _, seen := a.tlrSentRound[chunk.tsn]; seen {
+							a.tlrOnSubsequentLossLocked(chunk.tsn)
+						}
 					}
 				}
 			}
@@ -1978,6 +2062,14 @@ func (a *Association) handleSack(selectiveAckChunk *chunkSelectiveAck) error {
 		return err
 	}
 
+	// Per-ACK burst gating: refill on EVERY SACK while in TLR (even if cumTSN didn't advance).
+	if a.enableAdaptiveBurst && a.tlrActive {
+		now := time.Now()
+		a.tlrRoundIndex = a.tlrCurrentRoundLocked(now)
+		a.burstBudgetMTUsRemaining = a.currentBurstLimitMTUsLocked(now)
+		a.awakeWriteLoop()
+	}
+
 	if a.useForwardTSN {
 		// RFC 3758 Sec 3.5 C1
 		if sna32LT(a.advancedPeerTSNAckPoint, a.cumulativeTSNAckPoint) {
@@ -2004,6 +2096,10 @@ func (a *Association) handleSack(selectiveAckChunk *chunkSelectiveAck) error {
 	}
 
 	a.postprocessSack(state, cumTSNAckPointAdvanced)
+	// Try to finish a tail-loss recovery epoch if conditions are met.
+	if a.enableAdaptiveBurst {
+		a.tlrMaybeEndLocked()
+	}
 
 	return nil
 }
@@ -2389,14 +2485,17 @@ func (a *Association) movePendingDataChunkToInflightQueue(chunkPayload *chunkPay
 	a.inflightQueue.pushNoCheck(chunkPayload)
 }
 
-// popPendingDataChunksToSend pops chunks from the pending queues as many as
-// the cwnd and rwnd allows to send.
-// The caller should hold the lock.
-//
-//nolint:cyclop
-func (a *Association) popPendingDataChunksToSend() ([]*chunkPayloadData, []uint16) {
+// popPendingDataChunksToSend pops chunks from the pending queue while
+// complying with cwnd/rwnd and an optional allowedBytes budget (burst gating).
+// If allowedBytes < 0, the budget is unlimited.
+// nolint:cyclop,gocognit
+func (a *Association) popPendingDataChunksToSend(allowedBytes int) ([]*chunkPayloadData, []uint16) {
 	chunks := []*chunkPayloadData{}
 	var sisToReset []uint16 // stream identifieres to reset
+	bytesBudget := allowedBytes
+	if bytesBudget < 0 {
+		bytesBudget = math.MaxInt
+	}
 
 	if a.pendingQueue.size() > 0 { //nolint:nestif
 		// RFC 4960 sec 6.1.  Transmission of DATA Chunks
@@ -2432,7 +2531,13 @@ func (a *Association) popPendingDataChunksToSend() ([]*chunkPayloadData, []uint1
 				break // no more rwnd
 			}
 
+			// Respect the adaptive burst per-ACK budget (bytesBudget).
+			if bytesBudget < int(dataLen) {
+				break
+			}
+
 			a.setRWND(a.RWND() - dataLen)
+			bytesBudget -= int(dataLen)
 
 			a.movePendingDataChunkToInflightQueue(chunkPayload)
 			chunks = append(chunks, chunkPayload)
@@ -2443,8 +2548,10 @@ func (a *Association) popPendingDataChunksToSend() ([]*chunkPayloadData, []uint1
 			// Send zero window probe
 			c := a.pendingQueue.peek()
 			if c != nil {
-				a.movePendingDataChunkToInflightQueue(c)
-				chunks = append(chunks, c)
+				if bytesBudget >= int(uint32(len(c.userData))) || bytesBudget == math.MaxInt {
+					a.movePendingDataChunkToInflightQueue(c)
+					chunks = append(chunks, c)
+				}
 			}
 		}
 	}
@@ -2609,6 +2716,8 @@ func (a *Association) getDataPacketsToRetransmit() []*packet {
 			a.name, chunkPayload.tsn, chunkPayload.streamSequenceNumber, chunkPayload.nSent,
 		)
 
+		// Tag this retransmission with the current TLR round (if active).
+		a.tlrRecordSentRoundLocked(chunkPayload.tsn)
 		chunks = append(chunks, chunkPayload)
 	}
 
@@ -2853,6 +2962,9 @@ func (a *Association) onRetransmissionTimeout(id int, nRtos uint) { //nolint:cyc
 			}
 		*/
 
+		// Start a TLR epoch if not already active.
+		a.tlrMaybeStartLocked()
+
 		a.inflightQueue.markAllToRetrasmit()
 		a.awakeWriteLoop()
 
@@ -2942,4 +3054,145 @@ func (a *Association) completeHandshake(handshakeErr error) bool {
 	}
 
 	return false
+}
+
+// Adaptive Burst Mitigation helpers.
+func (a *Association) tlrMaybeStartLocked() {
+	if !a.enableAdaptiveBurst || a.tlrActive {
+		return
+	}
+
+	a.tlrActive = true
+	a.tlrStart = time.Now()
+
+	if ms := a.SRTT(); ms > 0 {
+		a.tlrRTT = time.Duration(ms * 1e6) // ms -> ns
+	} else {
+		// fall back to current RTO (ms) if no SRTT yet
+		a.tlrRTT = time.Duration(a.rtoMgr.getRTO()) * time.Millisecond
+
+		if a.tlrRTT <= 0 {
+			a.tlrRTT = 100 * time.Millisecond
+		}
+	}
+
+	a.tlrHadSubsequentLoss = false
+	// Do not limit the probe/initial retransmits; start limiting on first SACK.
+	a.tlrRoundIndex = -1
+	a.burstBudgetMTUsRemaining = -1
+}
+
+func (a *Association) tlrCurrentRoundLocked(now time.Time) int {
+	if !a.tlrActive || a.tlrRTT <= 0 {
+		return 0
+	}
+
+	dt := now.Sub(a.tlrStart)
+
+	if dt < 0 {
+		return 0
+	}
+
+	return int(dt / a.tlrRTT)
+}
+
+func (a *Association) tlrRecordSentRoundLocked(tsn uint32) {
+	if !a.enableAdaptiveBurst || !a.tlrActive {
+		return
+	}
+
+	a.tlrSentRound[tsn] = a.tlrCurrentRoundLocked(time.Now())
+}
+
+func (a *Association) tlrOnSubsequentLossLocked(tsn uint32) {
+	if !a.enableAdaptiveBurst || !a.tlrActive {
+		return
+	}
+
+	round, ok := a.tlrSentRound[tsn]
+
+	if !ok {
+		return
+	}
+
+	if round == 0 { //nolint:nestif
+		// Early loss: initial burst too high → reduce by 1 MTU, floor 2 MTUs.
+		if a.burstInitMTUs > 2.0 {
+			a.burstInitMTUs -= 1.0
+
+			if a.burstInitMTUs < 2.0 {
+				a.burstInitMTUs = 2.0
+			}
+		}
+	} else {
+		// Later-round loss: increase rate too high → reduce by 0.25, floor 1.25.
+		if a.burstSubseqMTUs > 1.25 {
+			a.burstSubseqMTUs -= 0.25
+
+			if a.burstSubseqMTUs < 1.25 {
+				a.burstSubseqMTUs = 1.25
+			}
+		}
+	}
+	a.tlrHadSubsequentLoss = true
+}
+
+func (a *Association) tlrMaybeEndLocked() {
+	if !a.tlrActive {
+		return
+	}
+
+	// Heuristic end: not in Fast Recovery and no pending retransmits.
+	if a.inFastRecovery {
+		return
+	}
+
+	for tsn := a.cumulativeTSNAckPoint + 1; ; tsn++ {
+		c, ok := a.inflightQueue.get(tsn)
+
+		if !ok {
+			break
+		}
+
+		if c.retransmit && !c.acked && !c.abandoned() {
+			return
+		}
+	}
+
+	// End epoch
+	a.tlrActive = false
+	a.tlrSentRound = make(map[uint32]int)
+
+	if !a.tlrHadSubsequentLoss {
+		a.tlrGoodRecoveries++
+
+		if a.tlrGoodRecoveries >= 16 {
+			a.burstInitMTUs = 4.0
+			a.burstSubseqMTUs = 2.0
+			a.tlrGoodRecoveries = 0
+		}
+	} else {
+		a.tlrGoodRecoveries = 0
+	}
+
+	// Reset budget tracking
+	a.burstBudgetMTUsRemaining = -1
+	a.tlrRoundIndex = -1
+}
+
+func (a *Association) currentBurstLimitMTUsLocked(now time.Time) int {
+	if !a.enableAdaptiveBurst || !a.tlrActive {
+		return -1 // unlimited
+	}
+
+	mtus := a.burstSubseqMTUs
+
+	if a.tlrCurrentRoundLocked(now) == 0 {
+		mtus = a.burstInitMTUs
+	}
+
+	// At least one MTU per SACK; round up (defensive if mtus not integer)
+	limit := max(int(math.Ceil(mtus)), 1)
+
+	return limit
 }
