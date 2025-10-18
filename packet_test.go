@@ -4,6 +4,7 @@
 package sctp
 
 import (
+	"encoding/binary"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -46,11 +47,21 @@ func TestPacketMarshal(t *testing.T) {
 	headerOnly := []byte{0x13, 0x88, 0x13, 0x88, 0x00, 0x00, 0x00, 0x00, 0x06, 0xa9, 0x00, 0xe1}
 	assert.NoError(t, pkt.unmarshal(true, headerOnly), "Unmarshal failed for SCTP packet with no chunks")
 
-	headerOnlyMarshaled, err := pkt.marshal(true)
+	// Marshal in strict mode (RFC 9260) so we emit the real CRC32c.
+	headerOnlyMarshaled, err := pkt.marshal(false)
 	if assert.NoError(t, err, "Marshal failed for SCTP packet with no chunks") {
-		assert.Equal(t, headerOnly, headerOnlyMarshaled,
-			"Unmarshal/Marshaled header only packet did not match \nheaderOnly: % 02x \nheaderOnlyMarshaled % 02x",
-			headerOnly, headerOnlyMarshaled)
+		assert.Equal(t, packetHeaderSize, len(headerOnlyMarshaled))
+
+		// First 8 bytes (ports + vtag) must match the original header.
+		assert.Equal(t, headerOnly[:8], headerOnlyMarshaled[:8])
+
+		// The checksum we wrote must equal CRC32c over the header with the checksum field zeroed.
+		cpy := make([]byte, len(headerOnlyMarshaled))
+		copy(cpy, headerOnlyMarshaled)
+		binary.LittleEndian.PutUint32(cpy[8:], 0)
+		want := generatePacketChecksum(cpy)
+		got := binary.LittleEndian.Uint32(headerOnlyMarshaled[8:])
+		assert.Equal(t, want, got, "checksum must be correct CRC32c")
 	}
 }
 
@@ -60,4 +71,48 @@ func BenchmarkPacketGenerateChecksum(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		_ = generatePacketChecksum(data[:])
 	}
+}
+
+func computeCRC(raw []byte) uint32 {
+	cp := make([]byte, len(raw))
+	copy(cp, raw)
+	binary.LittleEndian.PutUint32(cp[8:], 0)
+
+	return generatePacketChecksum(cp)
+}
+
+func TestRFC9653_SenderRule_InitForcesCRC(t *testing.T) {
+	pak := &packet{
+		sourcePort:      5000,
+		destinationPort: 5001,
+		verificationTag: 0,
+		chunks: []chunk{
+			&chunkInit{chunkInitCommon: minimalInitCommon()},
+		},
+	}
+	// Even with ZCA enabled by caller, INIT must carry a correct CRC.
+	raw, err := pak.marshal(true)
+	assert.NoError(t, err)
+
+	got := binary.LittleEndian.Uint32(raw[8:])
+	assert.NotZero(t, got, "checksum must not be zero when INIT present")
+	assert.Equal(t, computeCRC(raw), got, "checksum must be correct CRC32c")
+}
+
+func TestRFC9653_SenderRule_ZeroAllowedWhenNoRestrictedChunk(t *testing.T) {
+	pak := &packet{
+		sourcePort:      6000,
+		destinationPort: 6001,
+		verificationTag: 0x22222222,
+		// No restricted chunks (e.g., no INIT/COOKIE-ECHO).
+	}
+	raw, err := pak.marshal(true) // ZCA enabled by caller
+	assert.NoError(t, err)
+	got := binary.LittleEndian.Uint32(raw[8:])
+	assert.Zero(t, got, "checksum should be zero when allowed")
+
+	// Receiver strict mode (no ZCA) must reject.
+	assert.Error(t, (&packet{}).unmarshal(false, raw))
+	// Receiver with ZCA must accept zero.
+	assert.NoError(t, (&packet{}).unmarshal(true, raw))
 }
