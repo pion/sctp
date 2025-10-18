@@ -2630,6 +2630,12 @@ func newDumbConn2(localAddr, remoteAddr net.Addr) *dumbConn2 {
 	return c
 }
 
+func (c *dumbConn2) setRemoteHandler(handler dumbConnInboundHandler) {
+	c.mutex.Lock()
+	c.remoteInboundHandler = handler
+	c.mutex.Unlock()
+}
+
 // Implement the net.Conn interface methods.
 func (c *dumbConn2) Read(b []byte) (n int, err error) {
 	c.mutex.Lock()
@@ -2701,8 +2707,8 @@ func createUDPConnPair() (net.Conn, net.Conn) {
 	addr2 := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 5678}
 	conn1 := newDumbConn2(addr1, addr2)
 	conn2 := newDumbConn2(addr2, addr1)
-	conn1.remoteInboundHandler = conn2.inboundHandler
-	conn2.remoteInboundHandler = conn1.inboundHandler
+	conn1.setRemoteHandler(conn2.inboundHandler)
+	conn2.setRemoteHandler(conn1.inboundHandler)
 
 	return conn1, conn2
 }
@@ -2977,17 +2983,17 @@ func TestAssociationFastRtxWnd(t *testing.T) {
 	require.True(t, ok)
 	dbConn2, ok := udp2.(*dumbConn2)
 	require.True(t, ok)
-	dbConn1.remoteInboundHandler = func(packet []byte) {
+	dbConn1.setRemoteHandler(func(packet []byte) {
 		if !shouldDrop.Load() {
 			dbConn2.inboundHandler(packet)
 		} else {
 			dropCounter.Add(1)
 		}
-	}
+	})
 
 	// intercept SACK
 	var lastSACK atomic.Pointer[chunkSelectiveAck]
-	dbConn2.remoteInboundHandler = func(buf []byte) {
+	dbConn2.setRemoteHandler(func(buf []byte) {
 		p := &packet{}
 		require.NoError(t, p.unmarshal(true, buf))
 		for _, c := range p.chunks {
@@ -2996,7 +3002,7 @@ func TestAssociationFastRtxWnd(t *testing.T) {
 			}
 		}
 		dbConn1.inboundHandler(buf)
-	}
+	})
 
 	_, err = s1.WriteSCTP([]byte("hello"), PayloadTypeWebRTCBinary)
 	require.NoError(t, err)
@@ -3713,7 +3719,7 @@ func TestAssociation_BlockWrite(t *testing.T) {
 	dbConn2, ok := conn2.(*dumbConn2)
 	require.True(t, ok)
 
-	dbConn1.remoteInboundHandler = dbConn2.inboundHandler
+	dbConn1.setRemoteHandler(dbConn2.inboundHandler)
 
 	_, err = s1.WriteSCTP(data, PayloadTypeWebRTCBinary)
 	require.NoError(t, err)
