@@ -238,8 +238,10 @@ type Association struct {
 	rackKeepInflatedRecoveries  int  // keep inflated reoWnd for 16 loss recoveries
 	rackTimerMu                 sync.Mutex
 	rackTimer                   *time.Timer // arms when outstanding but not (yet) overdue
+	rackTimerGen                uint32
 	ptoTimerMu                  sync.Mutex
-	ptoTimer                    *time.Timer   // Tail Loss Probe timer
+	ptoTimer                    *time.Timer // Tail Loss Probe timer
+	ptoTimerGen                 uint32
 	rackWCDelAck                time.Duration // 200ms default
 	rackReoWndFloor             time.Duration
 
@@ -299,7 +301,7 @@ type Config struct {
 	// Step of congestion window increase at Congestion Avoidance
 	CwndCAStep uint32
 
-	// RACK loss detection: DISABLED by default (although it should probably be enabled by default..?)
+	// Whether RACK loss detection is disabled (default: false, which means RACK is enabled)
 	DisableRACK bool
 	// Optional: cap the minimum reordering window: 0 = use quarter-RTT
 	RACKReoWndFloor time.Duration
@@ -3055,60 +3057,84 @@ func (a *Association) completeHandshake(handshakeErr error) bool {
 	return false
 }
 
-func (a *Association) startRackTimer(d time.Duration) {
-	if !a.rackEnabled || d <= 0 {
+func (a *Association) startRackTimer(dur time.Duration) {
+	if !a.rackEnabled || dur <= 0 {
 		return
 	}
 
 	a.rackTimerMu.Lock()
 	defer a.rackTimerMu.Unlock()
 
+	gen := atomic.AddUint32(&a.rackTimerGen, 1)
+
 	if a.rackTimer != nil {
 		a.rackTimer.Stop()
 	}
 
-	a.rackTimer = time.AfterFunc(d, a.onRackTimeout)
+	a.rackTimer = time.AfterFunc(dur, func() {
+		// re-check after acquiring the state lock.
+		a.lock.Lock()
+		defer a.lock.Unlock()
+
+		if atomic.LoadUint32(&a.rackTimerGen) != gen {
+			return
+		}
+
+		a.onRackTimeoutLocked()
+	})
 }
 
 func (a *Association) stopRackTimer() {
 	a.rackTimerMu.Lock()
+	defer a.rackTimerMu.Unlock()
+
+	atomic.AddUint32(&a.rackTimerGen, 1)
 
 	if a.rackTimer != nil {
 		a.rackTimer.Stop()
 	}
-
-	a.rackTimerMu.Unlock()
 }
 
-func (a *Association) startPTOTimer(d time.Duration) {
-	if !a.rackEnabled || d <= 0 {
+func (a *Association) startPTOTimer(dur time.Duration) {
+	if !a.rackEnabled || dur <= 0 {
 		return
 	}
 
 	a.ptoTimerMu.Lock()
 	defer a.ptoTimerMu.Unlock()
 
+	gen := atomic.AddUint32(&a.ptoTimerGen, 1)
+
 	if a.ptoTimer != nil {
 		a.ptoTimer.Stop()
 	}
 
-	a.ptoTimer = time.AfterFunc(d, a.onPTOTimer)
+	a.ptoTimer = time.AfterFunc(dur, func() {
+		// re-check after acquiring the state lock.
+		a.lock.Lock()
+		defer a.lock.Unlock()
+
+		if atomic.LoadUint32(&a.ptoTimerGen) != gen {
+			return
+		}
+
+		a.onPTOTimerLocked()
+	})
 }
 
 func (a *Association) stopPTOTimer() {
 	a.ptoTimerMu.Lock()
+	defer a.ptoTimerMu.Unlock()
+
+	atomic.AddUint32(&a.ptoTimerGen, 1)
 
 	if a.ptoTimer != nil {
 		a.ptoTimer.Stop()
 	}
-
-	a.ptoTimerMu.Unlock()
 }
 
 // onRackAfterSACK implements the RACK logic (RACK for SCTP section 2A/B, section 3) and TLP scheduling (section 2C).
-//
-//nolint:gocognit,cyclop
-func (a *Association) onRackAfterSACK(
+func (a *Association) onRackAfterSACK( // nolint:gocognit,cyclop
 	deliveredFound bool,
 	newestDeliveredSendTime time.Time,
 	newestDeliveredOrigTSN uint32,
@@ -3136,7 +3162,7 @@ func (a *Association) onRackAfterSACK(
 	} else {
 		base := max(a.rackMinRTT/4, a.rackReoWndFloor)
 		// if we have never seen reordering for this connection, set to zero *during loss recovery* (RACK for SCTP section 2B)
-		// we approximate “during loss recovery” with inFastRecovery or T3-Rtx pending. Outside recovery keep base.
+		// we approximate "during loss recovery" with inFastRecovery or T3-Rtx pending. outside recovery we can keep base.
 		if !a.rackReorderingSeen && (a.inFastRecovery || a.t3RTX.isRunning()) {
 			a.rackReoWnd = 0
 		} else if a.rackReoWnd == 0 {
@@ -3185,7 +3211,7 @@ func (a *Association) onRackAfterSACK(
 					a.name, chunk.tsn, chunk.since, a.rackDeliveredTime, a.rackReoWnd)
 			}
 		}
-		// if we marked anything, kick the writer
+		// if we marked anything then wake the writer
 		a.awakeWriteLoop()
 	}
 
@@ -3251,10 +3277,13 @@ func (a *Association) schedulePTOAfterSendLocked() {
 }
 
 // onRackTimeout is fired to avoid waiting for the next ACK.
-func (a *Association) onRackTimeout() { //nolint:cyclop
+func (a *Association) onRackTimeout() {
 	a.lock.Lock()
 	defer a.lock.Unlock()
+	a.onRackTimeoutLocked()
+}
 
+func (a *Association) onRackTimeoutLocked() { //nolint:cyclop
 	if !a.rackEnabled || a.rackDeliveredTime.IsZero() {
 		return
 	}
@@ -3286,7 +3315,10 @@ func (a *Association) onRackTimeout() { //nolint:cyclop
 func (a *Association) onPTOTimer() {
 	a.lock.Lock()
 	defer a.lock.Unlock()
+	a.onPTOTimerLocked()
+}
 
+func (a *Association) onPTOTimerLocked() {
 	if !a.rackEnabled {
 		return
 	}
