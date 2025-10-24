@@ -958,6 +958,16 @@ func (a *Association) gatherOutboundFastRetransmissionPackets(rawPackets [][]byt
 		}
 
 		if len(toFastRetrans) > 0 {
+			total := 0
+			for _, c := range toFastRetrans {
+				total += len(c.userData)
+			}
+
+			a.log.Debugf(
+				"[%s] fast-retransmit %d DATA chunk(s): bytes=%d cwnd=%d rwnd=%d inflight=%d htna=%d",
+				a.name, len(toFastRetrans), total, a.CWND(), a.RWND(), a.inflightQueue.getNumBytes(), a.fastRecoverExitPoint,
+			)
+
 			for _, p := range a.bundleDataChunksIntoPackets(toFastRetrans) {
 				raw, err := a.marshalPacket(p)
 				if err != nil {
@@ -2711,6 +2721,13 @@ func (a *Association) getDataPacketsToRetransmit() []*packet {
 		)
 
 		chunks = append(chunks, chunkPayload)
+	}
+
+	if len(chunks) > 0 {
+		a.log.Debugf(
+			"[%s] retransmitting %d DATA chunk(s) (T3-rtx): bytes=%d cwnd=%d rwnd=%d inflight=%d",
+			a.name, len(chunks), bytesToSend, a.CWND(), a.RWND(), a.inflightQueue.getNumBytes(),
+		)
 	}
 
 	return a.bundleDataChunksIntoPackets(chunks)
