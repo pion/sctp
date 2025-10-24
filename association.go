@@ -963,8 +963,8 @@ func (a *Association) gatherOutboundFastRetransmissionPackets(rawPackets [][]byt
 				total += len(c.userData)
 			}
 
-			a.log.Debugf(
-				"[%s] fast-retransmit %d DATA chunk(s): bytes=%d cwnd=%d rwnd=%d inflight=%d htna=%d",
+			fmt.Printf(
+				"[%s] fast-retransmit %d DATA chunk(s): bytes=%d cwnd=%d rwnd=%d inflight=%d htna=%d\n",
 				a.name, len(toFastRetrans), total, a.CWND(), a.RWND(), a.inflightQueue.getNumBytes(), a.fastRecoverExitPoint,
 			)
 
@@ -2724,8 +2724,8 @@ func (a *Association) getDataPacketsToRetransmit() []*packet {
 	}
 
 	if len(chunks) > 0 {
-		a.log.Debugf(
-			"[%s] retransmitting %d DATA chunk(s) (T3-rtx): bytes=%d cwnd=%d rwnd=%d inflight=%d",
+		fmt.Printf(
+			"[%s] retransmitting %d DATA chunk(s) (T3-rtx): bytes=%d cwnd=%d rwnd=%d inflight=%d\n",
 			a.name, len(chunks), bytesToSend, a.CWND(), a.RWND(), a.inflightQueue.getNumBytes(),
 		)
 	}
