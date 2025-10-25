@@ -241,14 +241,16 @@ type Association struct {
 	rackHighestDeliveredOrigTSN uint32
 	rackReorderingSeen          bool // ever observed reordering for this association
 	rackKeepInflatedRecoveries  int  // keep inflated reoWnd for 16 loss recoveries
-	rackTimerMu                 sync.Mutex
-	rackTimer                   *time.Timer // arms when outstanding but not (yet) overdue
-	rackTimerGen                uint32
-	ptoTimerMu                  sync.Mutex
-	ptoTimer                    *time.Timer // Tail Loss Probe timer
-	ptoTimerGen                 uint32
-	rackWCDelAck                time.Duration // 200ms default
-	rackReoWndFloor             time.Duration
+
+	// Unified timer for RACK and PTO driven by a single goroutine.
+	// Deadlines are protected with timerMu.
+	timerMu       sync.Mutex
+	timerUpdateCh chan struct{}
+	rackDeadline  time.Time
+	ptoDeadline   time.Time
+
+	rackWCDelAck    time.Duration // 200ms default
+	rackReoWndFloor time.Duration
 
 	// Chunks stored for retransmission
 	storedInit       *chunkInit
@@ -439,6 +441,9 @@ func createAssociation(config Config) *Association {
 		} else {
 			assoc.rackMinRTTWnd = 30 * time.Second // default 30s window to determine minRTT
 		}
+
+		assoc.timerUpdateCh = make(chan struct{}, 1)
+		go assoc.timerLoop()
 
 		assoc.rackReoWndFloor = config.RACKReoWndFloor // optional floor; usually 0
 		assoc.rackKeepInflatedRecoveries = 0
@@ -3071,78 +3076,179 @@ func (a *Association) completeHandshake(handshakeErr error) bool {
 }
 
 func (a *Association) startRackTimer(dur time.Duration) {
-	if !a.rackEnabled || dur <= 0 {
+	if !a.rackEnabled {
 		return
 	}
 
-	a.rackTimerMu.Lock()
-	defer a.rackTimerMu.Unlock()
+	a.timerMu.Lock()
 
-	gen := atomic.AddUint32(&a.rackTimerGen, 1)
-
-	if a.rackTimer != nil {
-		a.rackTimer.Stop()
+	if dur <= 0 {
+		a.rackDeadline = time.Time{}
+	} else {
+		a.rackDeadline = time.Now().Add(dur)
 	}
 
-	a.rackTimer = time.AfterFunc(dur, func() {
-		// re-check after acquiring the state lock.
-		a.lock.Lock()
-		defer a.lock.Unlock()
+	a.timerMu.Unlock()
 
-		if atomic.LoadUint32(&a.rackTimerGen) != gen {
-			return
-		}
-
-		a.onRackTimeoutLocked()
-	})
+	// poke the loop
+	select {
+	case a.timerUpdateCh <- struct{}{}:
+	default:
+	}
 }
 
 func (a *Association) stopRackTimer() {
-	a.rackTimerMu.Lock()
-	defer a.rackTimerMu.Unlock()
+	if !a.rackEnabled {
+		return
+	}
 
-	atomic.AddUint32(&a.rackTimerGen, 1)
+	a.timerMu.Lock()
+	a.rackDeadline = time.Time{}
+	a.timerMu.Unlock()
 
-	if a.rackTimer != nil {
-		a.rackTimer.Stop()
+	select {
+	case a.timerUpdateCh <- struct{}{}:
+	default:
 	}
 }
 
 func (a *Association) startPTOTimer(dur time.Duration) {
-	if !a.rackEnabled || dur <= 0 {
+	if !a.rackEnabled {
 		return
 	}
 
-	a.ptoTimerMu.Lock()
-	defer a.ptoTimerMu.Unlock()
+	a.timerMu.Lock()
 
-	gen := atomic.AddUint32(&a.ptoTimerGen, 1)
-
-	if a.ptoTimer != nil {
-		a.ptoTimer.Stop()
+	if dur <= 0 {
+		a.ptoDeadline = time.Time{}
+	} else {
+		a.ptoDeadline = time.Now().Add(dur)
 	}
 
-	a.ptoTimer = time.AfterFunc(dur, func() {
-		// re-check after acquiring the state lock.
-		a.lock.Lock()
-		defer a.lock.Unlock()
+	a.timerMu.Unlock()
 
-		if atomic.LoadUint32(&a.ptoTimerGen) != gen {
-			return
-		}
-
-		a.onPTOTimerLocked()
-	})
+	// poke the loop
+	select {
+	case a.timerUpdateCh <- struct{}{}:
+	default:
+	}
 }
 
 func (a *Association) stopPTOTimer() {
-	a.ptoTimerMu.Lock()
-	defer a.ptoTimerMu.Unlock()
+	if !a.rackEnabled {
+		return
+	}
 
-	atomic.AddUint32(&a.ptoTimerGen, 1)
+	a.timerMu.Lock()
+	a.ptoDeadline = time.Time{}
+	a.timerMu.Unlock()
 
-	if a.ptoTimer != nil {
-		a.ptoTimer.Stop()
+	select {
+	case a.timerUpdateCh <- struct{}{}:
+	default:
+	}
+}
+
+// drainTimer safely stops a timer and drains its channel if needed.
+func drainTimer(t *time.Timer) {
+	if !t.Stop() {
+		select {
+		case <-t.C:
+		default:
+		}
+	}
+}
+
+// timerLoop runs one goroutine per association for RACK and PTO deadlines.
+// this only runs if RACK is enabled.
+func (a *Association) timerLoop() { //nolint:gocognit,cyclop
+	// begin with a disarmed timer.
+	timer := time.NewTimer(time.Hour)
+	drainTimer(timer)
+	armed := false
+
+	for {
+		// compute the earliest non-zero deadline.
+		a.timerMu.Lock()
+		rackDeadline := a.rackDeadline
+		ptoDeadline := a.ptoDeadline
+		a.timerMu.Unlock()
+
+		var next time.Time
+		switch {
+		case rackDeadline.IsZero():
+			next = ptoDeadline
+		case ptoDeadline.IsZero():
+			next = rackDeadline
+		default:
+			if rackDeadline.Before(ptoDeadline) {
+				next = rackDeadline
+			} else {
+				next = ptoDeadline
+			}
+		}
+
+		if next.IsZero() {
+			if armed {
+				drainTimer(timer)
+				armed = false
+			}
+		} else {
+			d := time.Until(next)
+
+			if d <= 0 {
+				d = time.Nanosecond
+			}
+
+			if armed {
+				drainTimer(timer)
+			}
+
+			timer.Reset(d)
+			armed = true
+		}
+
+		select {
+		case <-a.closeWriteLoopCh:
+			if armed {
+				drainTimer(timer)
+			}
+
+			return
+
+		case <-a.timerUpdateCh:
+			// re-compute deadlines and (re)arm in next loop iteration.
+
+		case <-timer.C:
+			armed = false
+
+			// snapshot & clear due deadlines before firing to avoid races with re-arms.
+			now := time.Now()
+			var fireRack, firePTO bool
+
+			a.timerMu.Lock()
+
+			if !a.rackDeadline.IsZero() && !now.Before(a.rackDeadline) {
+				fireRack = true
+				a.rackDeadline = time.Time{}
+			}
+
+			if !a.ptoDeadline.IsZero() && !now.Before(a.ptoDeadline) {
+				firePTO = true
+				a.ptoDeadline = time.Time{}
+			}
+
+			a.timerMu.Unlock()
+
+			// fire callbacks without holding timerMu.
+			if fireRack {
+				a.onRackTimeout()
+			}
+
+			if firePTO {
+				a.onPTOTimer()
+			}
+		}
 	}
 }
 
