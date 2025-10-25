@@ -3950,7 +3950,7 @@ func TestRACK_DSACKInflatesAndDecays(t *testing.T) {
 func TestRACK_SuppressReoWndDuringRecovery_NoReorderingSeen(t *testing.T) {
 	assoc := newRackTestAssoc(t)
 
-	assoc.rackMinRTT = 120 * time.Millisecond
+	// Start with an empty rolling window (no RTT samples).
 	assoc.rackReoWnd = 40 * time.Millisecond
 	assoc.rackReorderingSeen = false
 	assoc.inFastRecovery = true
@@ -3959,10 +3959,20 @@ func TestRACK_SuppressReoWndDuringRecovery_NoReorderingSeen(t *testing.T) {
 	assoc.onRackAfterSACK(false, time.Time{}, 0, &chunkSelectiveAck{})
 	assert.Equal(t, time.Duration(0), assoc.rackReoWnd, "reoWnd should be suppressed during recovery w/o reordering")
 
-	// After recovery ends, if reoWnd==0, it should re-initialize to base.
 	assoc.inFastRecovery = false
 	assoc.onRackAfterSACK(false, time.Time{}, 0, &chunkSelectiveAck{})
-	assert.Equal(t, 30*time.Millisecond, assoc.rackReoWnd, "reoWnd should re-initialize to base (minRTT/4) after recovery")
+	assert.Equal(t, time.Duration(0), assoc.rackReoWnd, "reoWnd should stay 0 until a minRTT sample exists")
+
+	now := time.Now()
+	assoc.rackPushRTT(now, 120*time.Millisecond)
+
+	assoc.onRackAfterSACK(false, time.Time{}, 0, &chunkSelectiveAck{})
+	assert.Equal(
+		t,
+		30*time.Millisecond,
+		assoc.rackReoWnd,
+		"reoWnd should re-initialize to base (minRTT/4) after first sample",
+	)
 }
 
 func TestRACK_ReoWndBoundedBySRTT(t *testing.T) {
