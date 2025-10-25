@@ -941,17 +941,16 @@ func TestRACK_RTTSwitch_Reordering_NoDrop(t *testing.T) { //nolint:gocyclo,cyclo
 	}
 
 	// check FR stats reported.
-	// we can uncomment this to check the FR stats.
-	// I tested it and it works fine on the pch07/rack-sctp branch.
-	//	cs := <-clientStatsCh
-	//	ss := <-serverStatsCh
-	//
-	//	if assert.True(t, cs.ok, "client assoc/stats unavailable") {
-	//		assert.LessOrEqual(t, cs.fr, uint64(2),
-	//			"client fast retransmits should be low")
-	//	}
-	//	if assert.True(t, ss.ok, "server assoc/stats unavailable") {
-	//		assert.LessOrEqual(t, ss.fr, uint64(2),
-	//			"server fast retransmits should be low")
-	//	}
+	cs := <-clientStatsCh
+	ss := <-serverStatsCh
+
+	if assert.True(t, cs.ok, "client assoc/stats unavailable") {
+		assert.LessOrEqual(t, cs.fr, uint64(2),
+			"client fast retransmits should be low")
+	}
+
+	if assert.True(t, ss.ok, "server assoc/stats unavailable") {
+		assert.LessOrEqual(t, ss.fr, uint64(2),
+			"server fast retransmits should be low")
+	}
 }
