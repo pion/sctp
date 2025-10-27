@@ -297,10 +297,10 @@ type Association struct {
 	tlrHadSubsequentLoss bool
 	tlrGoodRecoveries    int            // successful TLR epochs without extra loss; reset burst limits at 16
 	tlrSentRound         map[uint32]int // TSN -> recovery-round index when (re)sent
-	// Adaptive-burst per-ACK budget, measured in MTUs (-1 = unlimited).
-	// Refilled on each SACK while in a TLR epoch.
-	burstBudgetMTUsRemaining int
-	tlrRoundIndex            int // -1 when inactive
+	// Adaptive-burst per-ACK token bucket measured in MTUs (fractional allowed).
+	// Tokens accrue on each SACK during a TLR epoch.
+	burstTokens   float64
+	tlrRoundIndex int // -1 when inactive
 }
 
 // Config collects the arguments to createAssociation construction into
@@ -470,14 +470,14 @@ func createAssociation(config Config) *Association {
 	assoc.enableAdaptiveBurst = true
 	if config.DisableAdaptiveBurst {
 		assoc.enableAdaptiveBurst = false
-	} else if assoc.enableAdaptiveBurst {
+	} else {
 		assoc.burstInitMTUs = 4.0
 		assoc.burstSubseqMTUs = 2.0
 		assoc.tlrSentRound = make(map[uint32]int)
 	}
 
 	// Initialize per-round tracking as inactive
-	assoc.burstBudgetMTUsRemaining = -1
+	assoc.burstTokens = 0
 	assoc.tlrRoundIndex = -1
 
 	if assoc.name == "" {
@@ -870,12 +870,12 @@ func (a *Association) gatherDataPacketsToRetransmit(rawPackets [][]byte) [][]byt
 			continue
 		}
 
-		if a.tlrActive && a.burstBudgetMTUsRemaining >= 0 {
-			mtus := (len(raw) + int(a.MTU()) - 1) / int(a.MTU()) // ceil(len/MTU)
-			if mtus > a.burstBudgetMTUsRemaining {
+		if a.tlrActive && a.tlrRoundIndex >= 0 {
+			need := mtusFor(len(raw), a.MTU())
+			if a.burstTokens < need {
 				break
 			}
-			a.burstBudgetMTUsRemaining -= mtus
+			a.burstTokens -= need
 		}
 
 		rawPackets = append(rawPackets, raw)
@@ -890,10 +890,10 @@ func (a *Association) gatherDataPacketsToRetransmit(rawPackets [][]byte) [][]byt
 func (a *Association) gatherOutboundDataAndReconfigPackets(rawPackets [][]byte) [][]byte {
 	// Pop unsent data chunks from the pending queue to send as much as
 	// cwnd and rwnd allow.
-	// Also respect the adaptive burst budget when TLR is active.
+	// When TLR gating is active, limit how many MTU-sized packets we prepare.
 	mtuBudget := -1
-	if a.tlrActive && a.burstBudgetMTUsRemaining >= 0 {
-		mtuBudget = a.burstBudgetMTUsRemaining
+	if a.tlrActive && a.tlrRoundIndex >= 0 {
+		mtuBudget = int(math.Floor(a.burstTokens))
 	}
 	chunks, sisToReset := a.popPendingDataChunksToSend(mtuBudget)
 
@@ -909,12 +909,8 @@ func (a *Association) gatherOutboundDataAndReconfigPackets(rawPackets [][]byte) 
 				continue
 			}
 
-			if a.tlrActive && a.burstBudgetMTUsRemaining >= 0 {
-				mtus := (len(raw) + int(a.MTU()) - 1) / int(a.MTU())
-				if mtus > a.burstBudgetMTUsRemaining {
-					break
-				}
-				a.burstBudgetMTUsRemaining -= mtus
+			if a.tlrActive && a.tlrRoundIndex >= 0 {
+				a.burstTokens -= mtusFor(len(raw), a.MTU())
 			}
 
 			rawPackets = append(rawPackets, raw)
@@ -1025,12 +1021,12 @@ func (a *Association) gatherOutboundFastRetransmissionPackets(rawPackets [][]byt
 					continue
 				}
 
-				if a.tlrActive && a.burstBudgetMTUsRemaining >= 0 {
-					mtus := (len(raw) + int(a.MTU()) - 1) / int(a.MTU())
-					if mtus > a.burstBudgetMTUsRemaining {
+				if a.tlrActive && a.tlrRoundIndex >= 0 {
+					need := mtusFor(len(raw), a.MTU())
+					if a.burstTokens < need {
 						break
 					}
-					a.burstBudgetMTUsRemaining -= mtus
+					a.burstTokens -= need
 				}
 
 				rawPackets = append(rawPackets, raw)
@@ -1149,7 +1145,6 @@ func (a *Association) gatherOutbound() ([][]byte, bool) { //nolint:cyclop
 
 	// Outside TLR: unlimited. During TLR we refill on each SACK.
 	if !a.enableAdaptiveBurst || !a.tlrActive {
-		a.burstBudgetMTUsRemaining = -1
 		a.tlrRoundIndex = -1
 	}
 
@@ -1265,6 +1260,19 @@ func min32(a, b uint32) uint32 {
 	}
 
 	return b
+}
+
+func mtusFor(nBytes int, mtu uint32) float64 {
+	if mtu == 0 {
+		return 0
+	}
+
+	q := nBytes / int(mtu)
+	if nBytes%int(mtu) == 0 {
+		return float64(q)
+	}
+
+	return float64(q + 1)
 }
 
 // peerLastTSN return last received cumulative TSN.
@@ -1811,14 +1819,18 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 	// New ack point, so pop all ACKed packets from inflightQueue
 	// We add 1 because the "currentAckPoint" has already been popped from the inflight queue
 	// For the first SACK we take care of this by setting the ackpoint to cumAck - 1
-	for idx := a.cumulativeTSNAckPoint + 1; sna32LTE(idx, selectiveAckChunk.cumulativeTSNAck); idx++ {
-		chunkPayload, ok := a.inflightQueue.pop(idx)
+	for ack := a.cumulativeTSNAckPoint + 1; sna32LTE(ack, selectiveAckChunk.cumulativeTSNAck); ack++ {
+		chunkPayload, ok := a.inflightQueue.pop(ack)
 		if !ok {
-			return nil, 0, time.Time{}, 0, false, fmt.Errorf("%w: %v", ErrInflightQueueTSNPop, idx)
+			return nil, 0, time.Time{}, 0, false, fmt.Errorf("%w: %v", ErrInflightQueueTSNPop, ack)
 		}
 
 		// RACK: remove from xmit-time list since it's delivered
 		a.rackRemove(chunkPayload)
+
+		if a.tlrSentRound != nil {
+			delete(a.tlrSentRound, ack)
+		}
 
 		if !chunkPayload.acked { //nolint:nestif
 			// RFC 4960 sec 6.3.2.  Retransmission Timer Rules
@@ -1826,7 +1838,7 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 			//        with the earliest outstanding TSN for that address, restart the
 			//        T3-rtx timer for that address with its current RTO (if there is
 			//        still outstanding data on that address).
-			if idx == a.cumulativeTSNAckPoint+1 {
+			if ack == a.cumulativeTSNAckPoint+1 {
 				// T3 timer needs to be reset. Stop it for now.
 				a.t3RTX.stop()
 			}
@@ -1908,6 +1920,10 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 
 			if !chunkPayload.acked { //nolint:nestif
 				nBytesAcked := a.inflightQueue.markAsAcked(tsn)
+
+				if a.tlrSentRound != nil {
+					delete(a.tlrSentRound, tsn)
+				}
 
 				// Sum the number of bytes acknowledged per stream
 				if amount, ok := bytesAckedPerStream[chunkPayload.streamIdentifier]; ok {
@@ -2091,7 +2107,7 @@ func (a *Association) processFastRetransmission(
 
 // The caller should hold the lock.
 //
-//nolint:cyclop
+//nolint:cyclop,gocognit
 func (a *Association) handleSack(selectiveAckChunk *chunkSelectiveAck) error {
 	a.log.Tracef(
 		"[%s] SACK: cumTSN=%d a_rwnd=%d",
@@ -2119,6 +2135,12 @@ func (a *Association) handleSack(selectiveAckChunk *chunkSelectiveAck) error {
 			a.cumulativeTSNAckPoint)
 
 		return nil
+	}
+
+	if a.enableAdaptiveBurst && !a.tlrActive {
+		if a.inflightQueue.size() == 0 && len(selectiveAckChunk.gapAckBlocks) > 0 {
+			a.tlrMaybeStartLocked()
+		}
 	}
 
 	// Process selective ack
@@ -2180,9 +2202,9 @@ func (a *Association) handleSack(selectiveAckChunk *chunkSelectiveAck) error {
 	if a.enableAdaptiveBurst && a.tlrActive {
 		now := time.Now()
 		a.tlrRoundIndex = a.tlrCurrentRoundLocked(now)
-		a.burstBudgetMTUsRemaining = a.currentBurstLimitMTUsLocked(now)
-		a.log.Tracef("[%s] TLR refill: round=%d budgetMTUs=%d init=%.2f subseq=%.2f",
-			a.name, a.tlrRoundIndex, a.burstBudgetMTUsRemaining, a.burstInitMTUs, a.burstSubseqMTUs)
+		a.burstTokens += a.currentBurstLimitMTUsLocked(now)
+		a.log.Tracef("[%s] TLR refill: round=%d budgetMTUs=%.2f init=%.2f subseq=%.2f",
+			a.name, a.tlrRoundIndex, a.burstTokens, a.burstInitMTUs, a.burstSubseqMTUs)
 		a.awakeWriteLoop()
 	}
 
@@ -2676,11 +2698,6 @@ func (a *Association) popPendingDataChunksToSend(mtuBudget int) ([]*chunkPayload
 
 			packetsUsed++
 			bytesInPacket = int(commonHeaderSize)
-		}
-
-		// Defensive budget check
-		if !unlimited && packetsUsed > mtuBudget {
-			break
 		}
 
 		// Consume rwnd and move to inflight
@@ -3692,7 +3709,7 @@ func (a *Association) tlrMaybeStartLocked() {
 	a.tlrHadSubsequentLoss = false
 	// Do not limit the probe/initial retransmits; start limiting on first SACK.
 	a.tlrRoundIndex = -1
-	a.burstBudgetMTUsRemaining = -1
+	a.burstTokens = 0
 }
 
 func (a *Association) tlrCurrentRoundLocked(now time.Time) int {
@@ -3789,23 +3806,24 @@ func (a *Association) tlrMaybeEndLocked() {
 	}
 
 	// Reset budget tracking
-	a.burstBudgetMTUsRemaining = -1
+	a.burstTokens = 0
 	a.tlrRoundIndex = -1
 }
 
-func (a *Association) currentBurstLimitMTUsLocked(now time.Time) int {
+func (a *Association) currentBurstLimitMTUsLocked(now time.Time) float64 {
 	if !a.enableAdaptiveBurst || !a.tlrActive {
-		return -1 // unlimited
+		return math.Inf(1) // treat as unlimited
 	}
 
 	mtus := a.burstSubseqMTUs
-
 	if a.tlrCurrentRoundLocked(now) == 0 {
 		mtus = a.burstInitMTUs
 	}
 
-	// At least one MTU per SACK; round up (defensive if mtus not integer)
-	limit := max(int(math.Ceil(mtus)), 1)
+	// mtus must be at least 1.0
+	if mtus < 1.0 {
+		mtus = 1.0
+	}
 
-	return limit
+	return mtus
 }

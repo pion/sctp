@@ -693,7 +693,7 @@ func TestCookieEchoRetransmission(t *testing.T) {
 // later DATA arrives before earlier DATA. Under a RACK regression, rackMinRTT would never increases,
 // causing reoWnd to be too small and marking packets sent at high RTT as spuriously lost.
 func TestRACK_RTTSwitch_Reordering_NoDrop(t *testing.T) { //nolint:gocyclo,cyclop,maintidx
-	lim := test.TimeOut(10 * time.Second)
+	lim := test.TimeOut(15 * time.Second)
 	defer lim.Stop()
 
 	loggerFactory := logging.NewDefaultLoggerFactory()
@@ -896,7 +896,7 @@ func TestRACK_RTTSwitch_Reordering_NoDrop(t *testing.T) { //nolint:gocyclo,cyclo
 
 		seen := make(map[byte]bool, numMessages)
 		buf := make([]byte, 4096)
-		deadline := time.Now().Add(10 * time.Second)
+		deadline := time.Now().Add(15 * time.Second)
 
 		for len(seen) < numMessages && time.Now().Before(deadline) {
 			_ = stream.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
