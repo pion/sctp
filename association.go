@@ -229,15 +229,11 @@ type Association struct {
 	ackTimer   *ackTimer
 
 	// RACK / TLP state
-	rackEnabled   bool
-	rackReoWnd    time.Duration // dynamic reordering window
-	rackMinRTT    time.Duration // min observed RTT
-	rackMinRTTWnd time.Duration // the window used to determine minRTT, defaults to 30s
-	rackRTTDeque  []struct {    // sliding window of RTT samples within rackMinRTTWnd seconds
-		time time.Time
-		rtt  time.Duration
-	}
-	rackDeliveredTime           time.Time // send time of most recently delivered original chunk
+	rackEnabled                 bool
+	rackReoWnd                  time.Duration // dynamic reordering window
+	rackMinRTT                  time.Duration // min observed RTT
+	rackMinRTTWnd               *windowedMin  // the window used to determine minRTT, defaults to 30s
+	rackDeliveredTime           time.Time     // send time of most recently delivered original chunk
 	rackHighestDeliveredOrigTSN uint32
 	rackReorderingSeen          bool // ever observed reordering for this association
 	rackKeepInflatedRecoveries  int  // keep inflated reoWnd for 16 loss recoveries
@@ -436,11 +432,8 @@ func createAssociation(config Config) *Association {
 			assoc.rackWCDelAck = 200 * time.Millisecond // WCDelAckT, RACK for SCTP section 2C
 		}
 
-		if config.RACKMinRTTWnd != 0 {
-			assoc.rackMinRTTWnd = config.RACKMinRTTWnd
-		} else {
-			assoc.rackMinRTTWnd = 30 * time.Second // default 30s window to determine minRTT
-		}
+		// defaults to 30s window to determine minRTT
+		assoc.rackMinRTTWnd = newWindowedMin(config.RACKMinRTTWnd)
 
 		assoc.timerUpdateCh = make(chan struct{}, 1)
 		go assoc.timerLoop()
@@ -1816,7 +1809,7 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 					// use a window to determine minRtt instead of a global min
 					// as the RTT can fluctuate, which can cause problems if going from a
 					// high RTT to a low RTT.
-					a.rackPushRTT(now, now.Sub(chunkPayload.since))
+					a.rackMinRTTWnd.Push(now, now.Sub(chunkPayload.since))
 
 					if chunkPayload.since.After(newestDeliveredSendTime) {
 						newestDeliveredSendTime = chunkPayload.since
@@ -1867,7 +1860,7 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 
 					// RACK
 					if a.rackEnabled {
-						a.rackPushRTT(now, now.Sub(chunkPayload.since))
+						a.rackMinRTTWnd.Push(now, now.Sub(chunkPayload.since))
 
 						if chunkPayload.since.After(newestDeliveredSendTime) {
 							newestDeliveredSendTime = chunkPayload.since
@@ -3090,11 +3083,7 @@ func (a *Association) startRackTimer(dur time.Duration) {
 
 	a.timerMu.Unlock()
 
-	// poke the loop
-	select {
-	case a.timerUpdateCh <- struct{}{}:
-	default:
-	}
+	a.pokeTimerLoop()
 }
 
 func (a *Association) stopRackTimer() {
@@ -3106,10 +3095,7 @@ func (a *Association) stopRackTimer() {
 	a.rackDeadline = time.Time{}
 	a.timerMu.Unlock()
 
-	select {
-	case a.timerUpdateCh <- struct{}{}:
-	default:
-	}
+	a.pokeTimerLoop()
 }
 
 func (a *Association) startPTOTimer(dur time.Duration) {
@@ -3127,11 +3113,7 @@ func (a *Association) startPTOTimer(dur time.Duration) {
 
 	a.timerMu.Unlock()
 
-	// poke the loop
-	select {
-	case a.timerUpdateCh <- struct{}{}:
-	default:
-	}
+	a.pokeTimerLoop()
 }
 
 func (a *Association) stopPTOTimer() {
@@ -3143,10 +3125,7 @@ func (a *Association) stopPTOTimer() {
 	a.ptoDeadline = time.Time{}
 	a.timerMu.Unlock()
 
-	select {
-	case a.timerUpdateCh <- struct{}{}:
-	default:
-	}
+	a.pokeTimerLoop()
 }
 
 // drainTimer safely stops a timer and drains its channel if needed.
@@ -3275,7 +3254,7 @@ func (a *Association) onRackAfterSACK( // nolint:gocognit,cyclop,gocyclo
 	}
 
 	// 2) Maintain ReoWND (RACK for SCTP section 2B)
-	if minRTT := a.rackWindowMin(now); minRTT > 0 {
+	if minRTT := a.rackMinRTTWnd.Min(now); minRTT > 0 {
 		a.rackMinRTT = minRTT
 	}
 
@@ -3467,53 +3446,10 @@ func (a *Association) onPTOTimerLocked() {
 	}
 }
 
-// push a new RTT sample and keep a deque within [now - rackMinRTTWnd, now].
-func (a *Association) rackPushRTT(now time.Time, rtt time.Duration) {
-	cutoff := now.Add(-a.rackMinRTTWnd)
-
-	// remove the expired rtts
-	deque := a.rackRTTDeque
-	i := 0
-	for i < len(deque) && deque[i].time.Before(cutoff) {
-		i++
+func (a *Association) pokeTimerLoop() {
+	// enqueue a single wake-up without blocking.
+	select {
+	case a.timerUpdateCh <- struct{}{}:
+	default:
 	}
-
-	if i > 0 {
-		deque = deque[i:]
-	}
-
-	// drop tails with >= rtt to keep nondecreasing by rtt
-	for len(deque) > 0 && deque[len(deque)-1].rtt >= rtt {
-		deque = deque[:len(deque)-1]
-	}
-
-	deque = append(deque, struct {
-		time time.Time
-		rtt  time.Duration
-	}{time: now, rtt: rtt})
-
-	a.rackRTTDeque = deque
-}
-
-// return current windowed MinRTT (or 0 if no recent samples).
-func (a *Association) rackWindowMin(now time.Time) time.Duration {
-	cutoff := now.Add(-a.rackMinRTTWnd)
-	deque := a.rackRTTDeque
-
-	// prune expired
-	i := 0
-	for i < len(deque) && deque[i].time.Before(cutoff) {
-		i++
-	}
-
-	if i > 0 {
-		deque = deque[i:]
-		a.rackRTTDeque = deque
-	}
-
-	if len(deque) == 0 {
-		return 0
-	}
-
-	return deque[0].rtt
 }

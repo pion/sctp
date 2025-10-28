@@ -4245,7 +4245,7 @@ func TestRACK_SuppressReoWndDuringRecovery_NoReorderingSeen(t *testing.T) {
 	assert.Equal(t, time.Duration(0), assoc.rackReoWnd, "reoWnd should stay 0 until a minRTT sample exists")
 
 	now := time.Now()
-	assoc.rackPushRTT(now, 120*time.Millisecond)
+	assoc.rackMinRTTWnd.Push(now, 120*time.Millisecond)
 
 	assoc.onRackAfterSACK(false, time.Time{}, 0, &chunkSelectiveAck{})
 	assert.Equal(
