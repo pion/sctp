@@ -102,7 +102,7 @@ func (q *receivePayloadQueue) pop(force bool) bool {
 	return false
 }
 
-// popDuplicates returns an array of TSN values that were found duplicate.
+// popDuplicates returns an array of TSN values that were duplicated.
 func (q *receivePayloadQueue) popDuplicates() []uint32 {
 	dups := q.dupTSN
 	q.dupTSN = []uint32{}
@@ -117,6 +117,8 @@ func (q *receivePayloadQueue) getGapAckBlocks() (gapAckBlocks []gapAckBlock) {
 		return nil
 	}
 
+	// RFC 9260 section 3.3.4: Gap Ack Blocks report received TSNs greater than
+	// the Cumulative TSN Ack and up to the highest TSN newly received.
 	startTSN, endTSN := q.cumulativeTSN+1, q.tailTSN
 	var findEnd bool
 	for tsn := startTSN; sna32LTE(tsn, endTSN); {
