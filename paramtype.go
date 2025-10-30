@@ -13,14 +13,14 @@ import (
 type paramType uint16
 
 const (
-	heartbeatInfo          paramType = 1     // Heartbeat Info	[RFC4960]
-	ipV4Addr               paramType = 5     // IPv4 IP	[RFC4960]
-	ipV6Addr               paramType = 6     // IPv6 IP	[RFC4960]
-	stateCookie            paramType = 7     // State Cookie	[RFC4960]
-	unrecognizedParam      paramType = 8     // Unrecognized Parameters	[RFC4960]
-	cookiePreservative     paramType = 9     // Cookie Preservative	[RFC4960]
-	hostNameAddr           paramType = 11    // Host Name IP	[RFC4960]
-	supportedAddrTypes     paramType = 12    // Supported IP Types	[RFC4960]
+	heartbeatInfo          paramType = 1     // Heartbeat Info	[RFC9260]
+	ipV4Addr               paramType = 5     // IPv4 IP	[RFC9260]
+	ipV6Addr               paramType = 6     // IPv6 IP	[RFC9260]
+	stateCookie            paramType = 7     // State Cookie	[RFC9260]
+	unrecognizedParam      paramType = 8     // Unrecognized Parameters	[RFC9260]
+	cookiePreservative     paramType = 9     // Cookie Preservative	[RFC9260]
+	hostNameAddr           paramType = 11    // Host Name Address	[RFC9260]
+	supportedAddrTypes     paramType = 12    // Supported IP Types	[RFC9260]
 	outSSNResetReq         paramType = 13    // Outgoing SSN Reset Request Parameter	[RFC6525]
 	incSSNResetReq         paramType = 14    // Incoming SSN Reset Request Parameter	[RFC6525]
 	ssnTSNResetReq         paramType = 15    // SSN/TSN Reset Request Parameter	[RFC6525]
@@ -35,8 +35,8 @@ const (
 	padding                paramType = 32773 // Padding (0x8005)
 	supportedExt           paramType = 32776 // Supported Extensions (0x8008)	[RFC5061]
 	forwardTSNSupp         paramType = 49152 // Forward TSN supported (0xC000)	[RFC3758]
-	addIPAddr              paramType = 49153 // Add IP IP (0xC001)	[RFC5061]
-	delIPAddr              paramType = 49154 // Delete IP IP (0xC002)	[RFC5061]
+	addIPAddr              paramType = 49153 // Add IP Address (0xC001)	[RFC5061]
+	delIPAddr              paramType = 49154 // Delete IP Address (0xC002)	[RFC5061]
 	errClauseInd           paramType = 49155 // Error Cause Indication (0xC003)	[RFC5061]
 	setPriAddr             paramType = 49156 // Set Primary IP (0xC004)	[RFC5061]
 	successInd             paramType = 49157 // Success Indication (0xC005)	[RFC5061]
@@ -45,7 +45,7 @@ const (
 
 // Parameter packet errors.
 var (
-	ErrParamPacketTooShort = errors.New("packet to short")
+	ErrParamPacketTooShort = errors.New("packet too short")
 )
 
 func parseParamType(raw []byte) (paramType, error) {
@@ -71,7 +71,7 @@ func (p paramType) String() string { //nolint:cyclop
 	case cookiePreservative:
 		return "Cookie Preservative"
 	case hostNameAddr:
-		return "Host Name IP"
+		return "Host Name Address"
 	case supportedAddrTypes:
 		return "Supported IP Types"
 	case outSSNResetReq:
@@ -103,9 +103,9 @@ func (p paramType) String() string { //nolint:cyclop
 	case forwardTSNSupp:
 		return "Forward TSN supported"
 	case addIPAddr:
-		return "Add IP IP"
+		return "Add IP Address"
 	case delIPAddr:
-		return "Delete IP IP"
+		return "Delete IP Address"
 	case errClauseInd:
 		return "Error Cause Indication"
 	case setPriAddr:
