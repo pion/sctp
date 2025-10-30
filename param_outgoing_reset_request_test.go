@@ -4,6 +4,7 @@
 package sctp
 
 import (
+	"encoding/binary"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -80,5 +81,70 @@ func TestParamOutgoingResetRequest_Failure(t *testing.T) {
 		actual := &paramOutgoingResetRequest{}
 		_, err := actual.unmarshal(tc.binary)
 		assert.Errorf(t, err, "expected unmarshal #%d: '%s' to fail.", i, tc.name)
+	}
+}
+
+func makeOddLenOutgoingResetParam() []byte {
+	// Build a value that's 12 (fixed) + 1 = 13 bytes (invalid; rem=1)
+	val := make([]byte, 13)
+	binary.BigEndian.PutUint32(val[0:], 1) // reconfigRequestSequenceNumber
+	binary.BigEndian.PutUint32(val[4:], 2) // reconfigResponseSequenceNumber
+	binary.BigEndian.PutUint32(val[8:], 3) // senderLastTSN
+	val[12] = 0                            // stray odd byte
+
+	raw := make([]byte, 4+len(val))
+	binary.BigEndian.PutUint16(raw[0:], uint16(outSSNResetReq))
+	binary.BigEndian.PutUint16(raw[2:], uint16(4+len(val))) // nolint:gosec
+	copy(raw[4:], val)
+
+	return raw
+}
+
+func TestParamOutgoingResetRequest_InvalidOddStreamListLength(t *testing.T) {
+	b := makeOddLenOutgoingResetParam()
+
+	var p paramOutgoingResetRequest
+	_, err := p.unmarshal(b)
+	assert.Error(t, err)
+	assert.ErrorIs(t, err, ErrSSNResetRequestParamInvalidLength)
+}
+
+func TestParamOutgoingResetRequest_Marshal_LengthFormula(t *testing.T) {
+	cases := []struct {
+		name   string
+		ids    []uint16
+		expLen uint16 // header length field (includes 4-byte header)
+	}{
+		{"N=0 (reset all)", nil, 16},
+		{"N=1", []uint16{4}, 18},
+		{"N=2", []uint16{4, 5}, 20},
+		{"N=5", []uint16{1, 2, 3, 4, 5}, 26},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &paramOutgoingResetRequest{
+				paramHeader:                    paramHeader{typ: outSSNResetReq},
+				reconfigRequestSequenceNumber:  1,
+				reconfigResponseSequenceNumber: 2,
+				senderLastTSN:                  3,
+				streamIdentifiers:              tc.ids,
+			}
+
+			b, err := p.marshal()
+			assert.NoError(t, err)
+
+			gotLen := binary.BigEndian.Uint16(b[2:])
+			assert.Equal(t, tc.expLen, gotLen, "header length must be 16 + 2*N")
+
+			// Round trip to ensure unmarshal accepts these valid lengths.
+			var q paramOutgoingResetRequest
+			_, err = q.unmarshal(b)
+			assert.NoError(t, err)
+
+			// Expect same IDs back (empty or nil both acceptable; compare by length+content).
+			assert.Equal(t, len(tc.ids), len(q.streamIdentifiers))
+			assert.ElementsMatch(t, tc.ids, q.streamIdentifiers)
+		})
 	}
 }
