@@ -16,12 +16,6 @@ func sortChunksByTSN(a []*chunkPayloadData) {
 	})
 }
 
-func sortChunksBySSN(a []*chunkSet) {
-	sort.Slice(a, func(i, j int) bool {
-		return sna16LT(a[i].ssn, a[j].ssn)
-	})
-}
-
 // chunkSet is a set of chunks that share the same SSN.
 type chunkSet struct {
 	ssn    uint16 // used only with the ordered chunks
@@ -101,12 +95,19 @@ func (set *chunkSet) isComplete() bool {
 }
 
 type reassemblyQueue struct {
-	si              uint16
-	nextSSN         uint16 // expected SSN for next ordered message RFC 9260 sec 6.5, 6.6
-	ordered         []*chunkSet
-	unordered       []*chunkSet
+	si      uint16
+	nextSSN uint16 // expected SSN for next ordered message RFC 9260 sec 6.5, 6.6
+
+	ordered []*chunkSet
+	// Fast lookup for fragmented ordered messages by SSN (cleared once complete).
+	orderedIndex map[uint16]*chunkSet
+
+	unordered []*chunkSet
+	// Fast duplicate filter for unordered chunks by TSN.
+	unorderedIndex  map[uint32]*chunkPayloadData
 	unorderedChunks []*chunkPayloadData
-	nBytes          uint64
+
+	nBytes uint64
 }
 
 var errTryAgain = errors.New("try again")
@@ -120,11 +121,47 @@ func newReassemblyQueue(si uint16) *reassemblyQueue {
 	// value 65535, the next Stream Sequence Number MUST be set to 0. For unordered
 	// user messages, the Stream Sequence Number MUST NOT be changed.
 	return &reassemblyQueue{
-		si:        si,
-		nextSSN:   0, // From RFC 9260 Sec 6.5:
-		ordered:   make([]*chunkSet, 0),
-		unordered: make([]*chunkSet, 0),
+		si:             si,
+		nextSSN:        0, // From RFC 9260 Sec 6.5:
+		ordered:        make([]*chunkSet, 0),
+		orderedIndex:   make(map[uint16]*chunkSet),
+		unordered:      make([]*chunkSet, 0),
+		unorderedIndex: make(map[uint32]*chunkPayloadData),
 	}
+}
+
+// insertChunkByTSN keeps r.unorderedChunks sorted by TSN with a binary insertion.
+func (r *reassemblyQueue) insertChunkByTSN(chunk *chunkPayloadData) {
+	lo, hi := 0, len(r.unorderedChunks)
+	for lo < hi {
+		mid := (lo + hi) >> 1
+		if sna32LT(r.unorderedChunks[mid].tsn, chunk.tsn) {
+			lo = mid + 1
+		} else {
+			hi = mid
+		}
+	}
+
+	r.unorderedChunks = append(r.unorderedChunks, nil)
+	copy(r.unorderedChunks[lo+1:], r.unorderedChunks[lo:])
+	r.unorderedChunks[lo] = chunk
+}
+
+// insertSetBySSN keeps r.ordered sorted by SSN.
+func (r *reassemblyQueue) insertSetBySSN(cs *chunkSet) {
+	lo, hi := 0, len(r.ordered)
+	for lo < hi {
+		mid := (lo + hi) >> 1
+		if sna16LT(r.ordered[mid].ssn, cs.ssn) {
+			lo = mid + 1
+		} else {
+			hi = mid
+		}
+	}
+
+	r.ordered = append(r.ordered, nil)
+	copy(r.ordered[lo+1:], r.ordered[lo:])
+	r.ordered[lo] = cs
 }
 
 func (r *reassemblyQueue) push(chunk *chunkPayloadData) bool { //nolint:cyclop
@@ -135,16 +172,15 @@ func (r *reassemblyQueue) push(chunk *chunkPayloadData) bool { //nolint:cyclop
 	}
 
 	if chunk.unordered {
-		// Keep only one instance per TSN (duplicate DATA should not double count).
-		for _, c := range r.unorderedChunks {
-			if c.tsn == chunk.tsn {
-				return false
-			}
+		// O(1) duplicate filter by TSN.
+		if _, dup := r.unorderedIndex[chunk.tsn]; dup {
+			return false
 		}
+		r.unorderedIndex[chunk.tsn] = chunk
 
-		r.unorderedChunks = append(r.unorderedChunks, chunk)
+		// Maintain TSN order without full re-sort each time.
+		r.insertChunkByTSN(chunk)
 		atomic.AddUint64(&r.nBytes, uint64(len(chunk.userData)))
-		sortChunksByTSN(r.unorderedChunks)
 
 		// Scan unorderedChunks that are contiguous (in TSN)
 		cset = r.findCompleteUnorderedChunkSet()
@@ -166,36 +202,31 @@ func (r *reassemblyQueue) push(chunk *chunkPayloadData) bool { //nolint:cyclop
 
 	// Check if a fragmented chunkSet with the fragmented SSN already exists
 	if chunk.isFragmented() {
-		for _, set := range r.ordered {
-			// nolint:godox
-			// TODO: add caution around SSN wrapping here... this helps only a little bit
-			// by ensuring we don't add to an unfragmented cset (1 chunk). There's
-			// a case where if the SSN does wrap around, we may see the same SSN
-			// for a different chunk.
-
-			// nolint:godox
-			// TODO: this slice can get pretty big; it may be worth maintaining a map
-			// for O(1) lookups at the cost of 2x memory.
-
-			// Only add to an existing fragmented set with same SSN.
-			if set.ssn == chunk.streamSequenceNumber && set.chunks[0].isFragmented() {
-				cset = set
-
-				break
-			}
+		// O(1) lookup of an in-progress fragmented set.
+		if set, ok := r.orderedIndex[chunk.streamSequenceNumber]; ok && len(set.chunks) > 0 && set.chunks[0].isFragmented() {
+			cset = set
 		}
 	}
 
 	// If not found, create a new chunkSet
 	if cset == nil {
 		cset = newChunkSet(chunk.streamSequenceNumber, chunk.payloadType)
-		r.ordered = append(r.ordered, cset)
-		sortChunksBySSN(r.ordered)
+		// Index only fragmented sequences, single-chunk messages don't need lookup.
+		if chunk.isFragmented() {
+			r.orderedIndex[cset.ssn] = cset
+		}
+		r.insertSetBySSN(cset)
 	}
 
 	atomic.AddUint64(&r.nBytes, uint64(len(chunk.userData)))
 
-	return cset.push(chunk)
+	complete := cset.push(chunk)
+	if complete && chunk.isFragmented() {
+		// No more fragments will be added, drop from index.
+		delete(r.orderedIndex, cset.ssn)
+	}
+
+	return complete
 }
 
 func (r *reassemblyQueue) findCompleteUnorderedChunkSet() *chunkSet {
@@ -254,6 +285,11 @@ func (r *reassemblyQueue) findCompleteUnorderedChunkSet() *chunkSet {
 	r.unorderedChunks = append(
 		r.unorderedChunks[:startIdx],
 		r.unorderedChunks[startIdx+nChunks:]...)
+
+	// Drop from index (all these TSNs are now consumed into a complete set).
+	for _, c := range chunks {
+		delete(r.unorderedIndex, c.tsn)
+	}
 
 	chunkSet := newChunkSet(0, chunks[0].payloadType) // SSN ignored for unordered (RFC 9260 sec 6.6)
 	chunkSet.chunks = chunks
@@ -345,6 +381,9 @@ func (r *reassemblyQueue) forwardTSNForOrdered(lastSSN uint16) {
 				r.subtractNumBytes(len(c.userData))
 			}
 
+			// ensure index is clean too
+			delete(r.orderedIndex, set.ssn)
+
 			continue
 		}
 		keep = append(keep, set)
@@ -370,9 +409,11 @@ func (r *reassemblyQueue) forwardTSNForUnordered(newCumulativeTSN uint32) {
 		}
 		lastIdx = i
 	}
+
 	if lastIdx >= 0 {
 		for _, c := range r.unorderedChunks[0 : lastIdx+1] {
 			r.subtractNumBytes(len(c.userData))
+			delete(r.unorderedIndex, c.tsn)
 		}
 		r.unorderedChunks = r.unorderedChunks[lastIdx+1:]
 	}
