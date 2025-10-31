@@ -12,12 +12,11 @@ import (
 func TestAbortChunk(t *testing.T) {
 	t.Run("One error cause", func(t *testing.T) {
 		abort1 := &chunkAbort{
-			errorCauses: []errorCause{&errorCauseProtocolViolation{
-				errorCauseHeader: errorCauseHeader{code: protocolViolation},
-			}},
+			errorCauses: []errorCause{&errorCauseProtocolViolation{}},
 		}
 		bytes, err := abort1.marshal()
 		assert.NoError(t, err, "should succeed")
+		assert.Equal(t, protocolViolation, abort1.errorCauses[0].errorCauseCode())
 
 		abort2 := &chunkAbort{}
 		err = abort2.unmarshal(bytes)

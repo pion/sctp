@@ -10,6 +10,22 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+func TestErrorCauseValidation(t *testing.T) {
+	for _, raw := range [][]byte{nil, {0}, {0, 13}, {0, 13, 0}, {0, 13, 0, 3}, {0, 13, 0, 5}} {
+		_, err := buildErrorCause(raw)
+		if len(raw) < errorCauseHeaderLength {
+			assert.ErrorIs(t, err, ErrCauseTooShort)
+		} else {
+			assert.ErrorIs(t, err, ErrCauseLengthInvalid)
+		}
+		assert.ErrorIs(t, new(errorCauseHeader).unmarshal(raw), ErrInvalidSCTPChunk)
+	}
+
+	h := &errorCauseHeader{raw: make([]byte, maxErrorCauseValueLen+1)}
+	_, err := h.marshal()
+	assert.ErrorIs(t, err, ErrCauseLengthInvalid)
+}
+
 func TestChunkErrorUnrecognizedChunkType(t *testing.T) {
 	const chunkFlags byte = 0x00
 	orgUnrecognizedChunk := []byte{0xc0, 0x0, 0x0, 0x8, 0x0, 0x0, 0x0, 0x3}
