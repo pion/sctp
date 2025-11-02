@@ -4,6 +4,7 @@
 package sctp // nolint:dupl
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 )
@@ -21,10 +22,14 @@ See chunkInitCommon for the fixed headers
 	Reserved for ECN Capable (Note 2)   Optional    32768 (0x8000)
 	Host Name IP (Note 3)          		Optional    11
 	Supported IP Types (Note 4)    		Optional    12
+	Zero Checksum Acceptable (RFC 9653) Optional    32769 (0x8001)
 */
 type chunkInit struct {
 	chunkHeader
 	chunkInitCommon
+	// RFC 9653 Zero Checksum Acceptable negotiation
+	zcaPresent bool
+	zcaEDMID   uint32
 }
 
 // Init chunk errors.
@@ -63,6 +68,13 @@ func (i *chunkInit) unmarshal(raw []byte) error {
 		return fmt.Errorf("%w: %v", ErrChunkTypeInitUnmarshalFailed, err) //nolint:errorlint
 	}
 
+	// Parse RFC 9653 ZCA TLV (optional, at most once). Parameters start
+	// immediately after the fixed INIT common body.
+	if len(i.raw) >= initChunkMinLength {
+		present, edmid := scanZCAParamBytes(i.raw)
+		i.zcaPresent, i.zcaEDMID = present, edmid
+	}
+
 	return nil
 }
 
@@ -70,6 +82,13 @@ func (i *chunkInit) marshal() ([]byte, error) {
 	initShared, err := i.chunkInitCommon.marshal()
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrChunkTypeInitMarshalFailed, err) //nolint:errorlint
+	}
+
+	// Optionally append ZCA (avoid duplicates if chunkInitCommon already added one).
+	if i.zcaPresent {
+		if ok, _ := scanZCAParamBytes(initShared); !ok {
+			initShared = appendZCAParam(initShared, i.zcaEDMID)
+		}
 	}
 
 	i.chunkHeader.typ = ctInit
@@ -140,4 +159,57 @@ func (i *chunkInit) check() (abort bool, err error) {
 // String makes chunkInit printable.
 func (i *chunkInit) String() string {
 	return fmt.Sprintf("%s\n%s", i.chunkHeader, i.chunkInitCommon)
+}
+
+// ZeroChecksumEDMID returns (EDMID, present) negotiated via RFC 9653 ZCA.
+func (i *chunkInit) ZeroChecksumEDMID() (uint32, bool) {
+	return i.zcaEDMID, i.zcaPresent
+}
+
+// scanZCAParamBytes scans a parameter list (in the INIT/INIT-ACK value bytes)
+// for a single ZCA TLV and returns (isPresent, edmid, isDup).
+func scanZCAParamBytes(b []byte) (bool, uint32) {
+	const typZCA = uint16(zeroChecksumAcceptable)
+
+	off := initFixedValueLen
+	for {
+		if off+4 > len(b) { // not enough for a param header
+			return false, 0
+		}
+
+		typ := binary.BigEndian.Uint16(b[off : off+2])
+		length := int(binary.BigEndian.Uint16(b[off+2 : off+4]))
+
+		if length < 4 || off+length > len(b) { // malformed/truncated
+			return false, 0
+		}
+
+		if typ == typZCA && length == 8 {
+			edmid := binary.BigEndian.Uint32(b[off+4 : off+8])
+
+			return true, edmid
+		}
+
+		nxt := off + length
+
+		if rem := length & 3; rem != 0 { // 4-byte padding
+			nxt += 4 - rem
+		}
+
+		if nxt <= off || nxt > len(b) {
+			return false, 0
+		}
+
+		off = nxt
+	}
+}
+
+// appendZCAParam appends a single ZCA TLV.
+func appendZCAParam(dst []byte, edmid uint32) []byte {
+	var tlv [8]byte
+	binary.BigEndian.PutUint16(tlv[0:2], uint16(zeroChecksumAcceptable))
+	binary.BigEndian.PutUint16(tlv[2:4], 8)
+	binary.BigEndian.PutUint32(tlv[4:8], edmid)
+
+	return append(dst, tlv[:]...)
 }

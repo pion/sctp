@@ -20,11 +20,15 @@ See chunkInitCommon for the fixed headers
 	IPv6 IP (Note 1)               		Optional    6
 	Unrecognized Parameter              Optional    8
 	Reserved for ECN Capable (Note 2)   Optional    32768 (0x8000)
-	Host Name IP (Note 3)          		Optional    11<Paste>
+	Host Name IP (Note 3)          		Optional    11
+	Zero Checksum Acceptable (RFC 9653) Optional    32769 (0x8001)
 */
 type chunkInitAck struct {
 	chunkHeader
 	chunkInitCommon
+	// RFC 9653 Zero Checksum Acceptable negotiation
+	zcaPresent bool
+	zcaEDMID   uint32
 }
 
 // Init ack chunk errors.
@@ -62,6 +66,13 @@ func (i *chunkInitAck) unmarshal(raw []byte) error {
 		return fmt.Errorf("%w: %v", ErrInitAckUnmarshalFailed, err) //nolint:errorlint
 	}
 
+	// Parse RFC 9653 ZCA TLV (optional, at most once). Parameters start
+	// immediately after the fixed INIT-ACK common body.
+	if len(i.raw) >= initChunkMinLength {
+		present, edmid := scanZCAParamBytes(i.raw)
+		i.zcaPresent, i.zcaEDMID = present, edmid
+	}
+
 	return nil
 }
 
@@ -69,6 +80,13 @@ func (i *chunkInitAck) marshal() ([]byte, error) {
 	initShared, err := i.chunkInitCommon.marshal()
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInitCommonDataMarshalFailed, err) //nolint:errorlint
+	}
+
+	// Optionally append ZCA (avoid duplicates).
+	if i.zcaPresent {
+		if ok, _ := scanZCAParamBytes(initShared); !ok {
+			initShared = appendZCAParam(initShared, i.zcaEDMID)
+		}
 	}
 
 	i.chunkHeader.typ = ctInitAck
@@ -142,4 +160,8 @@ func (i *chunkInitAck) check() (abort bool, err error) {
 // String makes chunkInitAck printable.
 func (i *chunkInitAck) String() string {
 	return fmt.Sprintf("%s\n%s", i.chunkHeader, i.chunkInitCommon)
+}
+
+func (i *chunkInitAck) ZeroChecksumEDMID() (uint32, bool) {
+	return i.zcaEDMID, i.zcaPresent
 }
