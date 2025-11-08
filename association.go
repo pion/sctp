@@ -2149,21 +2149,26 @@ func (a *Association) handleReconfig(reconfigChunk *chunkReconfig) ([]*packet, e
 	a.log.Tracef("[%s] handleReconfig", a.name)
 
 	pp := make([]*packet, 0)
-
-	pkt, err := a.handleReconfigParam(reconfigChunk.paramA)
-	if err != nil {
-		return nil, err
-	}
-	if pkt != nil {
-		pp = append(pp, pkt)
+	if reconfigChunk.paramA != nil {
+		if pkt, err := a.handleReconfigParam(reconfigChunk.paramA); err != nil {
+			return nil, err
+		} else if pkt != nil {
+			pp = append(pp, pkt)
+		}
 	}
 
 	if reconfigChunk.paramB != nil {
-		pkt, err = a.handleReconfigParam(reconfigChunk.paramB)
-		if err != nil {
+		if pkt, err := a.handleReconfigParam(reconfigChunk.paramB); err != nil {
 			return nil, err
+		} else if pkt != nil {
+			pp = append(pp, pkt)
 		}
-		if pkt != nil {
+	}
+
+	for _, prm := range reconfigChunk.extras {
+		if pkt, err := a.handleReconfigParam(prm); err != nil {
+			return nil, err
+		} else if pkt != nil {
 			pp = append(pp, pkt)
 		}
 	}
