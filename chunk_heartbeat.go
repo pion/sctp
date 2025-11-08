@@ -9,7 +9,7 @@ import (
 )
 
 /*
-chunkHeartbeat represents an SCTP Chunk of type HEARTBEAT (RFC 9260 section 3.3.6)
+chunkHeartbeat represents an SCTP Chunk of type HEARTBEAT (RFC 9260 section 3.3.5).
 
 An endpoint sends this chunk to probe reachability of a destination address.
 The chunk MUST contain exactly one variable-length parameter:
@@ -45,12 +45,11 @@ func (h *chunkHeartbeat) unmarshal(raw []byte) error { //nolint:cyclop
 		return fmt.Errorf("%w: actually is %s", ErrChunkTypeNotHeartbeat, h.typ.String())
 	}
 
-	// if the body is completely empty, accept it but don't populate params.
+	// Accept an empty body for compatibility.
 	if len(h.raw) == 0 {
 		return nil
 	}
 
-	// need at least a parameter header present (TLV: 4 bytes minimum).
 	if len(h.raw) < initOptionalVarHeaderLength {
 		return fmt.Errorf("%w: %d", ErrHeartbeatNotLongEnoughInfo, len(h.raw))
 	}

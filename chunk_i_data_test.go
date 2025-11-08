@@ -76,11 +76,12 @@ func TestPayloadDataHeaderSizeAccounting(t *testing.T) {
 		data := &chunkPayloadData{
 			beginningFragment: true,
 			endingFragment:    true,
+			userData:          []byte{0x01},
 		}
 		dataRaw, err := data.marshal()
 		assert.NoError(t, err)
-		assert.Equal(t, int(dataChunkHeaderSize), len(dataRaw))
-		assert.Equal(t, int(dataChunkHeaderSize), data.chunkSize())
+		assert.Equal(t, int(dataChunkHeaderSize)+len(data.userData), len(dataRaw))
+		assert.Equal(t, int(dataChunkHeaderSize)+len(data.userData), data.chunkSize())
 
 		iData := &chunkPayloadData{
 			iData:             true,
