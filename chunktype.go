@@ -5,29 +5,32 @@ package sctp
 
 import "fmt"
 
-// chunkType is an enum for SCTP Chunk Type field
-// This field identifies the type of information contained in the
-// Chunk Value field.
+// chunkType identifies the kind of SCTP chunk carried in a packet.
 type chunkType uint8
 
-// List of known chunkType enums.
+// Known chunk types (RFC 9260). Values include the unrecognized-action
+// bits encoded in the high 2 bits of the type field.
 const (
-	ctPayloadData      chunkType = 0
-	ctInit             chunkType = 1
-	ctInitAck          chunkType = 2
-	ctSack             chunkType = 3
-	ctHeartbeat        chunkType = 4
-	ctHeartbeatAck     chunkType = 5
-	ctAbort            chunkType = 6
-	ctShutdown         chunkType = 7
-	ctShutdownAck      chunkType = 8
-	ctError            chunkType = 9
-	ctCookieEcho       chunkType = 10
-	ctCookieAck        chunkType = 11
-	ctCWR              chunkType = 13
-	ctShutdownComplete chunkType = 14
-	ctReconfig         chunkType = 130
-	ctForwardTSN       chunkType = 192
+	ctPayloadData      chunkType = 0  // DATA
+	ctInit             chunkType = 1  // INIT
+	ctInitAck          chunkType = 2  // INIT-ACK
+	ctSack             chunkType = 3  // SACK
+	ctHeartbeat        chunkType = 4  // HEARTBEAT
+	ctHeartbeatAck     chunkType = 5  // HEARTBEAT-ACK
+	ctAbort            chunkType = 6  // ABORT
+	ctShutdown         chunkType = 7  // SHUTDOWN
+	ctShutdownAck      chunkType = 8  // SHUTDOWN-ACK
+	ctError            chunkType = 9  // ERROR
+	ctCookieEcho       chunkType = 10 // COOKIE-ECHO
+	ctCookieAck        chunkType = 11 // COOKIE-ACK
+	ctECNE             chunkType = 12 // ECN Echo (ECNE)
+	ctCWR              chunkType = 13 // Congestion Window Reduced (CWR)
+	ctShutdownComplete chunkType = 14 // SHUTDOWN-COMPLETE
+	ctAuth             chunkType = 15 // AUTH (RFC 4895; referenced by RFC 9260)
+
+	// Extension chunks (values embed "skip" unrecognized-action semantics).
+	ctReconfig   chunkType = 130 // Re-configuration (RFC 6525)
+	ctForwardTSN chunkType = 192 // FORWARD-TSN (RFC 3758)
 )
 
 func (c chunkType) String() string { //nolint:cyclop
@@ -56,12 +59,16 @@ func (c chunkType) String() string { //nolint:cyclop
 		return "COOKIE-ECHO"
 	case ctCookieAck:
 		return "COOKIE-ACK"
+	case ctECNE:
+		return "ECNE"
 	case ctCWR:
-		return "ECNE" // Explicit Congestion Notification Echo
+		return "CWR"
 	case ctShutdownComplete:
 		return "SHUTDOWN-COMPLETE"
+	case ctAuth:
+		return "AUTH"
 	case ctReconfig:
-		return "RECONFIG" // Re-configuration
+		return "RECONFIG"
 	case ctForwardTSN:
 		return "FORWARD-TSN"
 	default:
