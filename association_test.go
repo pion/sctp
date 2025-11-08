@@ -3262,11 +3262,13 @@ func TestAssociation_HandlePacketInCookieWaitState(t *testing.T) {
 			// Prevent "use of close network connection" error on close.
 			skipClose: true,
 		},
-		"CoockeEcho": {
+		"CookieEcho": {
 			inputPacket: &packet{
 				sourcePort:      1,
 				destinationPort: 1,
-				chunks:          []chunk{&chunkCookieEcho{}},
+				chunks: []chunk{&chunkCookieEcho{
+					cookie: []byte{0x01},
+				}},
 			},
 		},
 		"HeartBeat": {
@@ -3280,7 +3282,11 @@ func TestAssociation_HandlePacketInCookieWaitState(t *testing.T) {
 			inputPacket: &packet{
 				sourcePort:      1,
 				destinationPort: 1,
-				chunks:          []chunk{&chunkPayloadData{}},
+				chunks: []chunk{&chunkPayloadData{
+					beginningFragment: true,         // B = 1
+					endingFragment:    true,         // E = 1
+					userData:          []byte{0x00}, // L > 0
+				}},
 			},
 		},
 		"Sack": {
