@@ -36,14 +36,15 @@ Ideally, we would like to add the following features as part of a [v2 refresh](h
 
 Feature | Reference | Progress
 --- | --- | ---
-RACK | [Paper](https://icnp20.cs.ucr.edu/proceedings/nipaa/RACK%20for%20SCTP.pdf)| [In review](https://github.com/pion/sctp/pull/390)
-TLP | [Parent issue](https://github.com/pion/sctp/issues/314) | [Would be implemented via RACK for SCTP](https://github.com/pion/sctp/issues/206#issuecomment-968265853)
+RACK (tail loss probing) | [Paper](https://icnp20.cs.ucr.edu/proceedings/nipaa/RACK%20for%20SCTP.pdf), [Comment](https://github.com/pion/sctp/issues/206#issuecomment-968265853)| [In review](https://github.com/pion/sctp/pull/390)
 Adaptive burst mitigation | [Paper, see section 5A](https://icnp20.cs.ucr.edu/proceedings/nipaa/RACK%20for%20SCTP.pdf)| [In review](https://github.com/pion/sctp/pull/394)
-Blocking writes | [1](https://github.com/pion/sctp/issues/77), [2](https://github.com/pion/sctp/issues/357) | [In progress](https://github.com/pion/sctp/issues/357#issuecomment-3382050767)
+Update to RFC 9260 | [Parent issue](https://github.com/pion/sctp/issues/402) | [In progress](https://github.com/pion/sctp/issues/402)
+Implement RFC 8260 | [Issue](https://github.com/pion/sctp/issues/435) | In progress (no PR available yet)
+Blocking writes | [1](https://github.com/pion/sctp/issues/77), [2](https://github.com/pion/sctp/issues/357) | [Potentially in progress](https://github.com/pion/sctp/issues/357#issuecomment-3382050767)
 association.listener (and better docs) | [1](https://github.com/pion/sctp/issues/74), [2](https://github.com/pion/sctp/issues/173) | Not started, [blocked by above](https://github.com/pion/sctp/issues/74#issuecomment-545550714)
 
 RFCs of interest:
-- [RFC 8312](https://www.rfc-editor.org/rfc/rfc8312.html) as it addresses the low utilization problem of [RFC 4960](https://www.rfc-editor.org/rfc/rfc4960.html) in fast long-distance networks as mentioned [here](https://github.com/pion/sctp/issues/218#issuecomment-3329690797).
+- [RFC 9438](https://datatracker.ietf.org/doc/rfc9438/) as it addresses the low utilization problem of [RFC 4960](https://www.rfc-editor.org/rfc/rfc4960.html) in fast long-distance networks as mentioned [here](https://github.com/pion/sctp/issues/218#issuecomment-3329690797).
 
 ### Roadmap
 The library is used as a part of our WebRTC implementation. Please refer to that [roadmap](https://github.com/pion/webrtc/issues/9) to track our major milestones.
