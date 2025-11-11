@@ -2476,7 +2476,8 @@ func TestStats(t *testing.T) {
 
 	<-conn.done
 
-	assert.NoError(t, conn.Close())
+	// ensure SCTP shuts down cleanly before reading counters
+	assert.NoError(t, assoc.Close())
 
 	conn.mu.Lock()
 	defer conn.mu.Unlock()
@@ -3796,4 +3797,211 @@ func TestConfigMTU(t *testing.T) {
 
 	require.NoError(t, a2.Close())
 	require.NoError(t, conn2.Close())
+}
+
+// helper to create N pending chunks sized to one MTU packet each.
+func enqueueMTUSizedChunks(t *testing.T, a *Association, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		c := &chunkPayloadData{
+			streamIdentifier:     1,
+			payloadType:          PayloadTypeWebRTCBinary,
+			beginningFragment:    true,
+			endingFragment:       true,
+			userData:             make([]byte, a.maxPayloadSize), // one DATA chunk ~= one MTU packet
+			streamSequenceNumber: uint16(i),                      //nolint:gosec // G115
+		}
+		a.pendingQueue.push(c)
+	}
+}
+
+func TestAdaptiveBurst_BudgetAndRefill(t *testing.T) {
+	lim := test.TimeOut(10 * time.Second)
+	defer lim.Stop()
+
+	br := test.NewBridge()
+	a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, 0)
+	require.NoError(t, err)
+	defer closeAssociationPair(br, a0, a1)
+
+	a0.lock.Lock()
+	// Enable TLR epoch with known RTT so round=0
+	a0.enableAdaptiveBurst = true
+	a0.tlrActive = true
+	a0.tlrRTT = 100 * time.Millisecond
+	a0.tlrStart = time.Now()
+
+	// Pretend we just received the first SACK in this TLR epoch.
+	a0.tlrRoundIndex = 0
+	a0.burstTokens = 2 // first refill, but we test with a smaller budget
+
+	// Make windows large so congestion control doesn't bind
+	a0.setCWND(64 * a0.MTU())
+	a0.setRWND(1 << 30)
+
+	// Queue 4 MTU-sized chunks => should produce ~4 packets (1 MTU each)
+	enqueueMTUSizedChunks(t, a0, 4)
+
+	// First ACK refill: test with 2 MTUs.
+	a0.burstTokens = 2
+
+	var pkts [][]byte
+	pkts = a0.gatherOutboundDataAndReconfigPackets(pkts)
+	require.Len(t, pkts, 2, "should not exceed per-ACK budget (2 MTUs)")
+	require.Equal(t, 0.0, a0.burstTokens)
+
+	// Emulate next SACK arrival refill (handleSack())
+	refill := a0.currentBurstLimitMTUsLocked(time.Now())
+	a0.burstTokens += float64(refill)
+	require.GreaterOrEqual(t, refill, 1.0)
+
+	// Send next burst, only 2 MTUs remain queued
+	pkts = nil
+	pkts = a0.gatherOutboundDataAndReconfigPackets(pkts)
+	require.Len(t, pkts, 2, "second burst should drain remaining 2 MTUs")
+
+	// With no budget left, another call should produce nothing
+	pkts = nil
+	pkts = a0.gatherOutboundDataAndReconfigPackets(pkts)
+	require.Len(t, pkts, 0, "no budget and no pending data left")
+
+	a0.lock.Unlock()
+}
+
+func TestAdaptiveBurst_UnlimitedOutsideTLR(t *testing.T) {
+	lim := test.TimeOut(10 * time.Second)
+	defer lim.Stop()
+
+	br := test.NewBridge()
+	a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, 0)
+	require.NoError(t, err)
+	defer closeAssociationPair(br, a0, a1)
+
+	a0.lock.Lock()
+	a0.enableAdaptiveBurst = true
+	a0.tlrActive = false // outside TLR
+	a0.setCWND(64 * a0.MTU())
+	a0.setRWND(1 << 30)
+
+	enqueueMTUSizedChunks(t, a0, 5)
+
+	// With no TLR, budget must be ignored (forced to -1 in gatherOutbound)
+	a0.burstTokens = 1
+
+	var pkts [][]byte
+	pkts = a0.gatherOutboundDataAndReconfigPackets(pkts)
+	// Should send all 5 MTU-sized packets
+	require.Len(t, pkts, 5)
+	a0.lock.Unlock()
+}
+
+// Verify adaptation knobs:
+// - round 0 subsequent loss lowers burstInitMTUs by 1.0 to floor 2.0
+// - later-round loss lowers burstSubseqMTUs by 0.25 to floor 1.25.
+func TestAdaptiveBurst_AdaptationKnobs(t *testing.T) {
+	lim := test.TimeOut(10 * time.Second)
+	defer lim.Stop()
+
+	br := test.NewBridge()
+	a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, 0)
+	require.NoError(t, err)
+	defer closeAssociationPair(br, a0, a1)
+
+	a0.lock.Lock()
+	a0.enableAdaptiveBurst = true
+	a0.tlrActive = true
+	a0.tlrRTT = 50 * time.Millisecond
+
+	// Round 0 loss impacts burstInitMTUs
+	a0.tlrStart = time.Now() // round=0
+	initialInit := 4.0
+	a0.burstInitMTUs = initialInit
+	a0.burstSubseqMTUs = 2.0
+
+	tsn0 := uint32(100)
+	a0.tlrRecordSentRoundLocked(tsn0) // records round 0
+	a0.tlrOnSubsequentLossLocked(tsn0)
+	require.Equal(t, initialInit-1.0, a0.burstInitMTUs)
+
+	// Floor at 2.0
+	a0.burstInitMTUs = 2.0
+	a0.tlrOnSubsequentLossLocked(tsn0)
+	require.Equal(t, 2.0, a0.burstInitMTUs)
+
+	// Later round loss impacts burstSubseqMTUs
+	a0.tlrStart = time.Now().Add(-2 * a0.tlrRTT) // force round >= 2
+	tsn1 := uint32(101)
+	a0.burstSubseqMTUs = 2.0
+	a0.tlrRecordSentRoundLocked(tsn1) // records later round
+	a0.tlrOnSubsequentLossLocked(tsn1)
+	require.Equal(t, 1.75, a0.burstSubseqMTUs)
+
+	// Floor at 1.25
+	a0.burstSubseqMTUs = 1.25
+	a0.tlrOnSubsequentLossLocked(tsn1)
+	require.Equal(t, 1.25, a0.burstSubseqMTUs)
+
+	a0.lock.Unlock()
+}
+
+// After finishing a TLR epoch without subsequent losses, every epoch
+// increments good-recovery counter, on reaching 16, knobs reset to defaults.
+func TestAdaptiveBurst_ResetAfterGoodRecoveries(t *testing.T) {
+	lim := test.TimeOut(10 * time.Second)
+	defer lim.Stop()
+
+	br := test.NewBridge()
+	a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, 0)
+	require.NoError(t, err)
+	defer closeAssociationPair(br, a0, a1)
+
+	a0.lock.Lock()
+	a0.enableAdaptiveBurst = true
+	a0.tlrActive = true
+	a0.inFastRecovery = false
+
+	// No pending retransmits -> epoch may end immediately
+	require.Equal(t, 0, a0.inflightQueue.size())
+
+	a0.burstInitMTUs = 2.75   // non-default
+	a0.burstSubseqMTUs = 1.50 // non-default
+	a0.tlrHadSubsequentLoss = false
+	a0.tlrGoodRecoveries = 15 // next good epoch ends should reset knobs
+
+	a0.tlrMaybeEndLocked()
+	require.False(t, a0.tlrActive)
+	require.Equal(t, 0, a0.tlrGoodRecoveries)
+	require.Equal(t, 4.0, a0.burstInitMTUs)
+	require.Equal(t, 2.0, a0.burstSubseqMTUs)
+	a0.lock.Unlock()
+}
+
+// If a TLR epoch ends with subsequent loss, good-recovery counter resets to 0
+// and knobs are not bumped to defaults (unless already at defaults).
+func TestAdaptiveBurst_EndWithLossDoesNotResetKnobs(t *testing.T) {
+	lim := test.TimeOut(10 * time.Second)
+	defer lim.Stop()
+
+	br := test.NewBridge()
+	a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, 0)
+	require.NoError(t, err)
+	defer closeAssociationPair(br, a0, a1)
+
+	a0.lock.Lock()
+	a0.enableAdaptiveBurst = true
+	a0.tlrActive = true
+	a0.inFastRecovery = false
+
+	a0.burstInitMTUs = 3.25
+	a0.burstSubseqMTUs = 1.50
+	a0.tlrHadSubsequentLoss = true
+	a0.tlrGoodRecoveries = 5
+
+	a0.tlrMaybeEndLocked()
+
+	require.False(t, a0.tlrActive)
+	require.Equal(t, 0, a0.tlrGoodRecoveries) // reset
+	require.Equal(t, 3.25, a0.burstInitMTUs)  // unchanged
+	require.Equal(t, 1.50, a0.burstSubseqMTUs)
+	a0.lock.Unlock()
 }
