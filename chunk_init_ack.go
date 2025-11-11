@@ -9,18 +9,21 @@ import (
 )
 
 /*
-chunkInitAck represents an SCTP Chunk of type INIT ACK
+chunkInitAck represents an SCTP Chunk of type INIT ACK (RFC 9260 section 3.3.2).
 
-See chunkInitCommon for the fixed headers
+See chunkInitCommon for the fixed headers.
 
-	Variable Parameters                  Status     Type Value
-	-------------------------------------------------------------
-	State Cookie                        Mandatory   7
-	IPv4 IP (Note 1)               		Optional    5
-	IPv6 IP (Note 1)               		Optional    6
-	Unrecognized Parameter              Optional    8
-	Reserved for ECN Capable (Note 2)   Optional    32768 (0x8000)
-	Host Name IP (Note 3)          		Optional    11<Paste>
+Variable Parameters                     Status     Type Value
+-------------------------------------------------------------
+State Cookie                            Mandatory  7
+IPv4 Address                            Optional   5
+IPv6 Address                            Optional   6
+Unrecognized Parameter                  Optional   8
+Reserved for ECN Capable                Optional   32768 (0x8000)
+Host Name Address                       Optional   11
+Supported Address Types                 Optional   12
+
+nolint:godot
 */
 type chunkInitAck struct {
 	chunkHeader
@@ -47,16 +50,14 @@ func (i *chunkInitAck) unmarshal(raw []byte) error {
 
 	if i.typ != ctInitAck {
 		return fmt.Errorf("%w: actually is %s", ErrChunkTypeNotInitAck, i.typ.String())
-	} else if len(i.raw) < initChunkMinLength {
+	}
+
+	if len(i.raw) < initChunkMinLength {
 		return fmt.Errorf("%w: %d actual: %d", ErrChunkNotLongEnoughForParams, initChunkMinLength, len(i.raw))
 	}
 
-	// The Chunk Flags field in INIT is reserved, and all bits in it should
-	// be set to 0 by the sender and ignored by the receiver.  The sequence
-	// of parameters within an INIT can be processed in any order.
-	if i.flags != 0 {
-		return ErrChunkTypeInitAckFlagZero
-	}
+	// RFC 9260: INIT ACK flags are reserved, sender sets to 0, receiver ignores.
+	// Do NOT fail if flags are non-zero.
 
 	if err := i.chunkInitCommon.unmarshal(i.raw); err != nil {
 		return fmt.Errorf("%w: %v", ErrInitAckUnmarshalFailed, err) //nolint:errorlint
@@ -72,68 +73,32 @@ func (i *chunkInitAck) marshal() ([]byte, error) {
 	}
 
 	i.chunkHeader.typ = ctInitAck
+	i.chunkHeader.flags = 0 // RFC 9260: sender MUST set INIT ACK flags to 0
 	i.chunkHeader.raw = initShared
 
 	return i.chunkHeader.marshal()
 }
 
 func (i *chunkInitAck) check() (abort bool, err error) {
-	// The receiver of the INIT ACK records the value of the Initiate Tag
-	// parameter.  This value MUST be placed into the Verification Tag
-	// field of every SCTP packet that the INIT ACK receiver transmits
-	// within this association.
-	//
-	// The Initiate Tag MUST NOT take the value 0.  See Section 5.3.1 for
-	// more on the selection of the Initiate Tag value.
-	//
-	// If the value of the Initiate Tag in a received INIT ACK chunk is
-	// found to be 0, the receiver MUST destroy the association
-	// discarding its TCB.  The receiver MAY send an ABORT for debugging
-	// purpose.
+	// Initiate Tag MUST NOT be 0.
 	if i.initiateTag == 0 {
-		abort = true
-
-		return abort, ErrChunkTypeInitAckInitateTagZero
+		return true, ErrChunkTypeInitAckInitateTagZero
 	}
 
-	// Defines the maximum number of streams the sender of this INIT ACK
-	// chunk allows the peer end to create in this association.  The
-	// value 0 MUST NOT be used.
-	//
-	// Note: There is no negotiation of the actual number of streams but
-	// instead the two endpoints will use the min(requested, offered).
-	// See Section 5.1.1 for details.
-	//
-	// Note: A receiver of an INIT ACK with the MIS value set to 0 SHOULD
-	// destroy the association discarding its TCB.
+	// MIS (inbound streams requested) MUST NOT be 0.
 	if i.numInboundStreams == 0 {
-		abort = true
-
-		return abort, ErrInitAckInboundStreamRequestZero
+		return true, ErrInitAckInboundStreamRequestZero
 	}
 
-	// Defines the number of outbound streams the sender of this INIT ACK
-	// chunk wishes to create in this association.  The value of 0 MUST
-	// NOT be used, and the value MUST NOT be greater than the MIS value
-	// sent in the INIT chunk.
-	//
-	// Note: A receiver of an INIT ACK with the OS value set to 0 SHOULD
-	// destroy the association discarding its TCB.
-
+	// OS (outbound streams requested) MUST NOT be 0.
+	// (Constraint "OS <= peer MIS from INIT" is enforced by association logic, not here.)
 	if i.numOutboundStreams == 0 {
-		abort = true
-
-		return abort, ErrInitAckOutboundStreamRequestZero
+		return true, ErrInitAckOutboundStreamRequestZero
 	}
 
-	// An SCTP receiver MUST be able to receive a minimum of 1500 bytes in
-	// one SCTP packet.  This means that an SCTP endpoint MUST NOT indicate
-	// less than 1500 bytes in its initial a_rwnd sent in the INIT or INIT
-	// ACK.
+	// a_rwnd MUST be >= 1500 bytes in INIT/INIT-ACK.
 	if i.advertisedReceiverWindowCredit < 1500 {
-		abort = true
-
-		return abort, ErrInitAckAdvertisedReceiver1500
+		return true, ErrInitAckAdvertisedReceiver1500
 	}
 
 	return false, nil
