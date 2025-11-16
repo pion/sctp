@@ -10,11 +10,12 @@ import (
 )
 
 /*
-chunkSelectiveAck represents an SCTP Chunk of type SACK
+chunkSelectiveAck represents an SCTP Chunk of type SACK (RFC 9260 section 3.3.4).
 
 This chunk is sent to the peer endpoint to acknowledge received DATA
 chunks and to inform the peer endpoint of gaps in the received
 subsequences of DATA chunks as represented by their TSNs.
+
 0                   1                   2                   3
 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -54,6 +55,8 @@ var (
 	ErrChunkTypeNotSack           = errors.New("ChunkType is not of type SACK")
 	ErrSackSizeNotLargeEnoughInfo = errors.New("SACK Chunk size is not large enough to contain header")
 	ErrSackSizeNotMatchPredicted  = errors.New("SACK Chunk size does not match predicted amount from header values")
+	ErrSackGapBlockInvalidRange   = errors.New("SACK gap ack block has invalid Start/End range")
+	ErrSackGapBlocksNotMonotonic  = errors.New("SACK gap ack blocks are not strictly increasing/non-overlapping")
 )
 
 // String makes gapAckBlock printable.
@@ -73,7 +76,7 @@ const (
 	selectiveAckHeaderSize = 12
 )
 
-func (s *chunkSelectiveAck) unmarshal(raw []byte) error {
+func (s *chunkSelectiveAck) unmarshal(raw []byte) error { //nolint:cyclop
 	if err := s.chunkHeader.unmarshal(raw); err != nil {
 		return err
 	}
@@ -89,20 +92,38 @@ func (s *chunkSelectiveAck) unmarshal(raw []byte) error {
 
 	s.cumulativeTSNAck = binary.BigEndian.Uint32(s.raw[0:])
 	s.advertisedReceiverWindowCredit = binary.BigEndian.Uint32(s.raw[4:])
-	s.gapAckBlocks = make([]gapAckBlock, binary.BigEndian.Uint16(s.raw[8:]))
-	s.duplicateTSN = make([]uint32, binary.BigEndian.Uint16(s.raw[10:]))
+	nGap := int(binary.BigEndian.Uint16(s.raw[8:]))
+	nDup := int(binary.BigEndian.Uint16(s.raw[10:]))
 
-	if len(s.raw) != selectiveAckHeaderSize+(4*len(s.gapAckBlocks)+(4*len(s.duplicateTSN))) {
+	if len(s.raw) != selectiveAckHeaderSize+4*nGap+4*nDup {
 		return ErrSackSizeNotMatchPredicted
 	}
 
 	offset := selectiveAckHeaderSize
-	for i := range s.gapAckBlocks {
-		s.gapAckBlocks[i].start = binary.BigEndian.Uint16(s.raw[offset:])
-		s.gapAckBlocks[i].end = binary.BigEndian.Uint16(s.raw[offset+2:])
+	blocks := make([]gapAckBlock, nGap)
+	var prevEnd uint16
+
+	for i := 0; i < nGap; i++ {
+		start := binary.BigEndian.Uint16(s.raw[offset:])
+		end := binary.BigEndian.Uint16(s.raw[offset+2:])
 		offset += 4
+
+		if start == 0 || end < start {
+			return ErrSackGapBlockInvalidRange
+		}
+
+		if i > 0 && start <= prevEnd { // must be strictly increasing, no overlap
+			return ErrSackGapBlocksNotMonotonic
+		}
+
+		blocks[i] = gapAckBlock{start: start, end: end}
+		prevEnd = end
 	}
-	for i := range s.duplicateTSN {
+
+	s.gapAckBlocks = blocks
+	s.duplicateTSN = make([]uint32, nDup)
+
+	for i := 0; i < nDup; i++ {
 		s.duplicateTSN[i] = binary.BigEndian.Uint32(s.raw[offset:])
 		offset += 4
 	}
@@ -110,24 +131,52 @@ func (s *chunkSelectiveAck) unmarshal(raw []byte) error {
 	return nil
 }
 
-func (s *chunkSelectiveAck) marshal() ([]byte, error) {
-	sackRaw := make([]byte, selectiveAckHeaderSize+(4*len(s.gapAckBlocks)+(4*len(s.duplicateTSN))))
-	binary.BigEndian.PutUint32(sackRaw[0:], s.cumulativeTSNAck)
-	binary.BigEndian.PutUint32(sackRaw[4:], s.advertisedReceiverWindowCredit)
-	binary.BigEndian.PutUint16(sackRaw[8:], uint16(len(s.gapAckBlocks)))  //nolint:gosec // G115
-	binary.BigEndian.PutUint16(sackRaw[10:], uint16(len(s.duplicateTSN))) //nolint:gosec // G115
+func (s *chunkSelectiveAck) marshal() ([]byte, error) { //nolint:cyclop
+	// validate strictly increasing, non-overlapping (contiguous is ok)
+	var prevEnd uint16
+	for i, g := range s.gapAckBlocks {
+		if g.start == 0 || g.end < g.start {
+			return nil, ErrSackGapBlockInvalidRange
+		}
+
+		if i > 0 && g.start <= prevEnd {
+			return nil, ErrSackGapBlocksNotMonotonic
+		}
+
+		prevEnd = g.end
+	}
+
+	sackRaw := make([]byte, selectiveAckHeaderSize+(4*len(s.gapAckBlocks))+(4*len(s.duplicateTSN)))
 	offset := selectiveAckHeaderSize
-	for _, g := range s.gapAckBlocks {
+
+	prevEnd = 0
+	for i, g := range s.gapAckBlocks {
+		if g.start == 0 || g.end < g.start {
+			return nil, ErrSackGapBlockInvalidRange
+		}
+
+		if i > 0 && g.start <= prevEnd {
+			return nil, ErrSackGapBlocksNotMonotonic
+		}
+
 		binary.BigEndian.PutUint16(sackRaw[offset:], g.start)
 		binary.BigEndian.PutUint16(sackRaw[offset+2:], g.end)
+		prevEnd = g.end
 		offset += 4
 	}
+
 	for _, t := range s.duplicateTSN {
 		binary.BigEndian.PutUint32(sackRaw[offset:], t)
 		offset += 4
 	}
 
+	binary.BigEndian.PutUint32(sackRaw[0:], s.cumulativeTSNAck)
+	binary.BigEndian.PutUint32(sackRaw[4:], s.advertisedReceiverWindowCredit)
+	binary.BigEndian.PutUint16(sackRaw[8:], uint16(len(s.gapAckBlocks)))  //nolint:gosec // G115
+	binary.BigEndian.PutUint16(sackRaw[10:], uint16(len(s.duplicateTSN))) //nolint:gosec // G115
+
 	s.chunkHeader.typ = ctSack
+	s.chunkHeader.flags = 0 // RFC 9260: SACK flags must be 0
 	s.chunkHeader.raw = sackRaw
 
 	return s.chunkHeader.marshal()
@@ -139,7 +188,7 @@ func (s *chunkSelectiveAck) check() (abort bool, err error) {
 
 // String makes chunkSelectiveAck printable.
 func (s *chunkSelectiveAck) String() string {
-	res := fmt.Sprintf("SACK cumTsnAck=%d arwnd=%d dupTsn=%d",
+	res := fmt.Sprintf("SACK cumTsnAck=%d arwnd=%d dupTsn=%v",
 		s.cumulativeTSNAck,
 		s.advertisedReceiverWindowCredit,
 		s.duplicateTSN)

@@ -10,12 +10,10 @@ import (
 )
 
 /*
-chunkInitCommon represents an SCTP Chunk body of type INIT and INIT ACK
+chunkInitCommon represents an SCTP Chunk body of type INIT and INIT ACK (RFC 9260 section 3.3.2)
 
  0                   1                   2                   3
  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|   Type = 1    |  Chunk Flags  |      Chunk Length             |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |                         Initiate Tag                          |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -29,9 +27,6 @@ chunkInitCommon represents an SCTP Chunk body of type INIT and INIT ACK
 |              Optional/Variable-Length Parameters              |
 |                                                               |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-
-The INIT chunk contains the following parameters.  Unless otherwise
-noted, each parameter MUST only be included once in the INIT chunk.
 
 Fixed Parameters                     Status
 ----------------------------------------------
@@ -61,81 +56,102 @@ const (
 var (
 	ErrInitChunkParseParamTypeFailed = errors.New("failed to parse param type")
 	ErrInitAckMarshalParam           = errors.New("unable to marshal parameter for INIT/INITACK")
+
+	// New stricter parsing errors (RFC 9260).
+	ErrInitChunkMinLength      = errors.New("chunk init common body smaller than minimum length")
+	ErrInitParamHeaderTooShort = errors.New("remaining bytes smaller than parameter header")
+	ErrInitParamLengthInvalid  = errors.New("parameter length invalid or exceeds remaining bytes")
+	ErrInitTrailingGarbage     = errors.New("trailing non-zero bytes after parameters")
 )
 
-func (i *chunkInitCommon) unmarshal(raw []byte) error {
+func (i *chunkInitCommon) unmarshal(raw []byte) error { //nolint:cyclop
+	if len(raw) < initChunkMinLength {
+		return fmt.Errorf("%w: %d", ErrInitChunkMinLength, len(raw))
+	}
+
 	i.initiateTag = binary.BigEndian.Uint32(raw[0:])
 	i.advertisedReceiverWindowCredit = binary.BigEndian.Uint32(raw[4:])
 	i.numOutboundStreams = binary.BigEndian.Uint16(raw[8:])
 	i.numInboundStreams = binary.BigEndian.Uint16(raw[10:])
 	i.initialTSN = binary.BigEndian.Uint32(raw[12:])
 
-	// https://tools.ietf.org/html/rfc4960#section-3.2.1
-	//
-	// Chunk values of SCTP control chunks consist of a chunk-type-specific
-	// header of required fields, followed by zero or more parameters.  The
-	// optional and variable-length parameters contained in a chunk are
-	// defined in a Type-Length-Value format as shown below.
-	//
-	// 0                   1                   2                   3
-	// 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-	// |          Parameter Type       |       Parameter Length        |
-	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-	// |                                                               |
-	// |                       Parameter Value                         |
-	// |                                                               |
-	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-
 	offset := initChunkMinLength
-	remaining := len(raw) - offset
-	for remaining > 0 {
-		if remaining > initOptionalVarHeaderLength {
-			var pHeader paramHeader
-			if err := pHeader.unmarshal(raw[offset:]); err != nil {
-				return fmt.Errorf("%w: %v", ErrInitChunkParseParamTypeFailed, err) //nolint:errorlint
+	for {
+		remaining := len(raw) - offset
+		if remaining == 0 {
+			break // no params
+		}
+
+		if remaining < initOptionalVarHeaderLength {
+			if !allZero(raw[offset:]) {
+				return ErrInitParamHeaderTooShort
 			}
 
-			p, err := buildParam(pHeader.typ, raw[offset:])
-			if err != nil {
-				i.unrecognizedParams = append(i.unrecognizedParams, pHeader)
-			} else {
-				i.params = append(i.params, p)
-			}
-
-			padding := getPadding(pHeader.length())
-			offset += pHeader.length() + padding
-			remaining -= pHeader.length() + padding
-		} else {
 			break
 		}
+
+		var pHeader paramHeader
+		if err := pHeader.unmarshal(raw[offset:]); err != nil {
+			return fmt.Errorf("%w: %w", ErrInitChunkParseParamTypeFailed, err)
+		}
+
+		plen := pHeader.length()
+		if plen < initOptionalVarHeaderLength || plen > remaining {
+			return ErrInitParamLengthInvalid
+		}
+
+		if p, err := buildParam(pHeader.typ, raw[offset:offset+plen]); err != nil {
+			i.unrecognizedParams = append(i.unrecognizedParams, pHeader)
+		} else {
+			i.params = append(i.params, p)
+		}
+
+		offset += plen
+
+		// parameters (except the last) are aligned to 4 bytes
+		// move to next 4-byte boundary without overrunning the chunk body.
+		if offset < len(raw) {
+			pad := getPadding(offset)
+			if pad != 0 {
+				if offset+pad > len(raw) {
+					// the last parameter wasn't padded and we reached end-of-body, so clamp it.
+					offset = len(raw)
+				} else {
+					offset += pad
+				}
+			}
+		}
+	}
+
+	// reject if anything remains and is not zero.
+	if offset < len(raw) && !allZero(raw[offset:]) {
+		return ErrInitTrailingGarbage
 	}
 
 	return nil
 }
 
 func (i *chunkInitCommon) marshal() ([]byte, error) {
-	out := make([]byte, initChunkMinLength)
-	binary.BigEndian.PutUint32(out[0:], i.initiateTag)
-	binary.BigEndian.PutUint32(out[4:], i.advertisedReceiverWindowCredit)
-	binary.BigEndian.PutUint16(out[8:], i.numOutboundStreams)
-	binary.BigEndian.PutUint16(out[10:], i.numInboundStreams)
-	binary.BigEndian.PutUint32(out[12:], i.initialTSN)
+	// Build fixed header separately
+	hdr := make([]byte, initChunkMinLength)
+	binary.BigEndian.PutUint32(hdr[0:], i.initiateTag)
+	binary.BigEndian.PutUint32(hdr[4:], i.advertisedReceiverWindowCredit)
+	binary.BigEndian.PutUint16(hdr[8:], i.numOutboundStreams)
+	binary.BigEndian.PutUint16(hdr[10:], i.numInboundStreams)
+	binary.BigEndian.PutUint32(hdr[12:], i.initialTSN)
+
+	out := make([]byte, 0, initChunkMinLength)
+	out = append(out, hdr...)
+
 	for idx, p := range i.params {
 		pp, err := p.marshal()
 		if err != nil {
-			return nil, fmt.Errorf("%w: %v", ErrInitAckMarshalParam, err) //nolint:errorlint
+			return nil, fmt.Errorf("%w: %w", ErrInitAckMarshalParam, err)
 		}
 
-		out = append(out, pp...) //nolint:makezero // TODO: fix
+		out = append(out, pp...)
 
-		// Chunks (including Type, Length, and Value fields) are padded out
-		// by the sender with all zero bytes to be a multiple of 4 bytes
-		// long.  This padding MUST NOT be more than 3 bytes in total.  The
-		// Chunk Length value does not include terminating padding of the
-		// chunk.  *However, it does include padding of any variable-length
-		// parameter except the last parameter in the chunk.*  The receiver
-		// MUST ignore the padding.
+		// pad every parameter except the last to a 4-byte boundary
 		if idx != len(i.params)-1 {
 			out = padByte(out, getPadding(len(pp)))
 		}
@@ -165,4 +181,15 @@ func (i chunkInitCommon) String() string {
 	}
 
 	return res
+}
+
+// allZero returns true if every byte is 0x00.
+func allZero(b []byte) bool {
+	for _, v := range b {
+		if v != 0 {
+			return false
+		}
+	}
+
+	return true
 }

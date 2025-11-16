@@ -9,25 +9,12 @@ import (
 )
 
 /*
-Abort represents an SCTP Chunk of type ABORT
+Abort represents an SCTP Chunk of type ABORT (RFC 9260).
 
-The ABORT chunk is sent to the peer of an association to close the
-association.  The ABORT chunk may contain Cause Parameters to inform
-the receiver about the reason of the abort.  DATA chunks MUST NOT be
-bundled with ABORT.  Control chunks (except for INIT, INIT ACK, and
-SHUTDOWN COMPLETE) MAY be bundled with an ABORT, but they MUST be
-placed before the ABORT in the SCTP packet or they will be ignored by
-the receiver.
-
-	 0                   1                   2                   3
-	 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-	+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-	|   Type = 6    |Reserved     |T|           Length              |
-	+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-	|                                                               |
-	|                   zero or more Error Causes                   |
-	|                                                               |
-	+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+The ABORT chunk closes the association. It may contain zero or more
+Error Cause TLVs. DATA MUST NOT be bundled with ABORT. Control chunks
+(except INIT, INIT ACK, and SHUTDOWN COMPLETE) MAY be bundled but MUST
+precede the ABORT in the packet.
 */
 type chunkAbort struct {
 	chunkHeader
@@ -38,48 +25,91 @@ type chunkAbort struct {
 var (
 	ErrChunkTypeNotAbort     = errors.New("ChunkType is not of type ABORT")
 	ErrBuildAbortChunkFailed = errors.New("failed build Abort Chunk")
+
+	// Stricter parsing.
+	ErrAbortCauseTooShort      = errors.New("remaining bytes smaller than error cause header")
+	ErrAbortCauseLengthInvalid = errors.New("error cause length invalid or exceeds remaining bytes")
+	ErrAbortTrailingNonZero    = errors.New("non-zero trailing bytes after last error cause")
 )
 
-func (a *chunkAbort) unmarshal(raw []byte) error {
+func (a *chunkAbort) unmarshal(raw []byte) error { //nolint:cyclop
 	if err := a.chunkHeader.unmarshal(raw); err != nil {
 		return err
 	}
-
 	if a.typ != ctAbort {
 		return fmt.Errorf("%w: actually is %s", ErrChunkTypeNotAbort, a.typ.String())
 	}
 
-	offset := chunkHeaderSize
-	for len(raw)-offset >= 4 {
-		e, err := buildErrorCause(raw[offset:])
+	a.errorCauses = a.errorCauses[:0]
+
+	body := a.raw
+
+	offset := 0
+	for {
+		remaining := len(body) - offset
+		if remaining == 0 {
+			break
+		}
+		if remaining < 4 {
+			return ErrAbortCauseTooShort
+		}
+
+		e, err := buildErrorCause(body[offset:])
 		if err != nil {
 			return fmt.Errorf("%w: %v", ErrBuildAbortChunkFailed, err) //nolint:errorlint
 		}
 
-		offset += int(e.length())
+		clen := int(e.length())
+		if clen < 4 || clen > remaining {
+			return ErrAbortCauseLengthInvalid
+		}
+
 		a.errorCauses = append(a.errorCauses, e)
+		offset += clen
+
+		// 4-byte inter-cause padding (not after last)
+		if offset < len(body) { //nolint:nestif
+			pad := getPadding(clen)
+			if pad != 0 {
+				if offset+pad > len(body) {
+					return ErrAbortCauseLengthInvalid
+				}
+
+				if !allZero(body[offset : offset+pad]) {
+					return ErrAbortTrailingNonZero
+				}
+				offset += pad
+			}
+		}
 	}
 
 	return nil
 }
 
 func (a *chunkAbort) marshal() ([]byte, error) {
-	a.chunkHeader.typ = ctAbort
-	a.flags = 0x00
-	a.raw = []byte{}
-	for _, ec := range a.errorCauses {
+	out := make([]byte, 0)
+	for i, ec := range a.errorCauses {
 		raw, err := ec.marshal()
 		if err != nil {
 			return nil, err
 		}
-		a.raw = append(a.raw, raw...)
+
+		out = append(out, raw...)
+		if i != len(a.errorCauses)-1 {
+			out = padByte(out, getPadding(len(raw)))
+		}
 	}
+
+	a.chunkHeader.typ = ctAbort
+	// sender MUST only use the T bit, clear any other bits if set.
+	a.chunkHeader.flags = a.flags & 0x01
+	a.chunkHeader.raw = out
 
 	return a.chunkHeader.marshal()
 }
 
 func (a *chunkAbort) check() (abort bool, err error) {
-	return false, nil
+	return true, nil
 }
 
 // String makes chunkAbort printable.

@@ -11,12 +11,12 @@ import (
 )
 
 /*
-chunkPayloadData represents an SCTP Chunk of type DATA
+chunkPayloadData represents an SCTP Chunk of type DATA (RFC 9260 section 3.3.1)
 
 	 0                   1                   2                   3
 	 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 	+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-	|   Type = 0    | Reserved|U|B|E|    Length                     |
+	|   Type = 0    | Res |I|U|B|E|            Length               |
 	+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 	|                              TSN                              |
 	+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -29,23 +29,10 @@ chunkPayloadData represents an SCTP Chunk of type DATA
 	|                                                               |
 	+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 
-An unfragmented user message shall have both the B and E bits set to
-'1'.  Setting both B and E bits to '0' indicates a middle fragment of
-a multi-fragment user message, as summarized in the following table:
-
-	   B E                  Description
-	============================================================
-	|  1 0 | First piece of a fragmented user message          |
-	+----------------------------------------------------------+
-	|  0 0 | Middle piece of a fragmented user message         |
-	+----------------------------------------------------------+
-	|  0 1 | Last piece of a fragmented user message           |
-	+----------------------------------------------------------+
-	|  1 1 | Unfragmented message                              |
-	============================================================
-	|             Table 1: Fragment Description Flags          |
-	============================================================
+An unfragmented user message MUST have both the B and E bits set to 1.
+Setting both B and E to 0 indicates a middle fragment: see Table 4 in RFC 9260.
 */
+
 type chunkPayloadData struct {
 	chunkHeader
 
@@ -66,7 +53,7 @@ type chunkPayloadData struct {
 
 	// Partial-reliability parameters used only by sender
 	since        time.Time
-	nSent        uint32 // number of transmission made for this chunk
+	nSent        uint32 // number of transmissions made for this chunk
 	_abandoned   bool
 	_allInflight bool // valid only with the first fragment
 
@@ -83,7 +70,7 @@ const (
 	payloadDataUnorderedBitmask        = 4
 	payloadDataImmediateSACK           = 8
 
-	payloadDataHeaderSize = 12
+	payloadDataHeaderSize = 12 // TSN(4) + SID(2) + SSN(2) + PPID(4)
 )
 
 // PayloadProtocolIdentifier is an enum for DataChannel payload types.
@@ -103,6 +90,8 @@ const (
 // Data chunk errors.
 var (
 	ErrChunkPayloadSmall = errors.New("packet is smaller than the header size")
+	// RFC 9260 section 3.3.1: Length MUST be 16 + L with L > 0 (exclude padding).
+	ErrDATAZeroUserData = errors.New("DATA chunk carries no user data (L must be > 0)")
 )
 
 func (p PayloadProtocolIdentifier) String() string {
@@ -135,16 +124,27 @@ func (p *chunkPayloadData) unmarshal(raw []byte) error {
 	if len(p.raw) < payloadDataHeaderSize {
 		return ErrChunkPayloadSmall
 	}
+
 	p.tsn = binary.BigEndian.Uint32(p.raw[0:])
 	p.streamIdentifier = binary.BigEndian.Uint16(p.raw[4:])
 	p.streamSequenceNumber = binary.BigEndian.Uint16(p.raw[6:])
 	p.payloadType = PayloadProtocolIdentifier(binary.BigEndian.Uint32(p.raw[8:]))
+
+	// L > 0 (RFC 9260 section 3.3.1)
 	p.userData = p.raw[payloadDataHeaderSize:]
+	if len(p.userData) == 0 {
+		return ErrDATAZeroUserData
+	}
 
 	return nil
 }
 
 func (p *chunkPayloadData) marshal() ([]byte, error) {
+	// L > 0 (RFC 9260 section 3.3.1)
+	if len(p.userData) == 0 {
+		return nil, ErrDATAZeroUserData
+	}
+
 	payRaw := make([]byte, payloadDataHeaderSize+len(p.userData))
 
 	binary.BigEndian.PutUint32(payRaw[0:], p.tsn)
@@ -153,18 +153,22 @@ func (p *chunkPayloadData) marshal() ([]byte, error) {
 	binary.BigEndian.PutUint32(payRaw[8:], uint32(p.payloadType))
 	copy(payRaw[payloadDataHeaderSize:], p.userData)
 
+	// Only set the defined bits; reserved bits implicitly 0 on transmit
 	flags := uint8(0)
 	if p.endingFragment {
-		flags = 1
+		flags |= payloadDataEndingFragmentBitmask
 	}
+
 	if p.beginningFragment {
-		flags |= 1 << 1
+		flags |= payloadDataBeginingFragmentBitmask
 	}
+
 	if p.unordered {
-		flags |= 1 << 2
+		flags |= payloadDataUnorderedBitmask
 	}
+
 	if p.immediateSack {
-		flags |= 1 << 3
+		flags |= payloadDataImmediateSACK
 	}
 
 	p.chunkHeader.flags = flags
