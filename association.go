@@ -3271,9 +3271,7 @@ func (a *Association) onRackAfterSACK( // nolint:gocognit,cyclop,gocyclo
 
 	// 3) Loss marking on ACK: any outstanding chunk whose (send_time + reoWnd) < newestDeliveredSendTime
 	// is lost (RACK for SCTP section 2A)
-	if !a.rackDeliveredTime.IsZero() && a.rackReoWnd > 0 && a.inflightQueue.size() > 0 {
-		marked := false
-
+	if !a.rackDeliveredTime.IsZero() {
 		for i := a.cumulativeTSNAckPoint + 1; ; i++ {
 			chunk, ok := a.inflightQueue.get(i)
 			if !ok {
@@ -3284,26 +3282,19 @@ func (a *Association) onRackAfterSACK( // nolint:gocognit,cyclop,gocyclo
 				continue
 			}
 
-			// If this candidate is not overdue yet, then all later chunks (with
-			// >= send time) are also not overdue, so we can stop scanning.
-			if !chunk.since.Add(a.rackReoWnd).Before(a.rackDeliveredTime) {
-				break
+			if chunk.since.Add(a.rackReoWnd).Before(a.rackDeliveredTime) {
+				chunk.retransmit = true
+				a.log.Tracef("[%s] RACK: mark lost tsn=%d (sent=%v, delivered=%v, reoWnd=%v)",
+					a.name, chunk.tsn, chunk.since, a.rackDeliveredTime, a.rackReoWnd)
 			}
-
-			// Overdue: mark for retransmission
-			chunk.retransmit = true
-			marked = true
-			a.log.Tracef("[%s] RACK: mark lost tsn=%d (sent=%v, delivered=%v, reoWnd=%v)",
-				a.name, chunk.tsn, chunk.since, a.rackDeliveredTime, a.rackReoWnd)
 		}
-
-		if marked {
-			a.awakeWriteLoop()
-		}
+		// if we marked anything then wake the writer
+		a.awakeWriteLoop()
 	}
 
 	// 4) Arm the RACK timer if there are still outstanding but not-yet-overdue chunks (RACK for SCTP section 2A)
-	if a.inflightQueue.size() > 0 && !a.rackDeliveredTime.IsZero() && a.rackReoWnd > 0 {
+	if a.inflightQueue.size() > 0 && !a.rackDeliveredTime.IsZero() {
+		// RackRTT = RTT of the most recently delivered packet
 		rackRTT := max(now.Sub(a.rackDeliveredTime), time.Duration(0))
 		a.startRackTimer(rackRTT + a.rackReoWnd) // RACK for SCTP section 2A
 	} else {
@@ -3362,7 +3353,7 @@ func (a *Association) onRackTimeout() {
 }
 
 func (a *Association) onRackTimeoutLocked() { //nolint:cyclop
-	if !a.rackEnabled || a.rackDeliveredTime.IsZero() || a.rackReoWnd <= 0 {
+	if !a.rackEnabled || a.rackDeliveredTime.IsZero() {
 		return
 	}
 
@@ -3378,14 +3369,11 @@ func (a *Association) onRackTimeoutLocked() { //nolint:cyclop
 			continue
 		}
 
-		if !chunk.since.Add(a.rackReoWnd).Before(a.rackDeliveredTime) {
-			// First eligible chunk that is not overdue: all later ones are even newer.
-			break
+		if chunk.since.Add(a.rackReoWnd).Before(a.rackDeliveredTime) {
+			chunk.retransmit = true
+			marked = true
+			a.log.Tracef("[%s] RACK timer: mark lost tsn=%d", a.name, chunk.tsn)
 		}
-
-		chunk.retransmit = true
-		marked = true
-		a.log.Tracef("[%s] RACK timer: mark lost tsn=%d", a.name, chunk.tsn)
 	}
 
 	if marked {
