@@ -6,6 +6,7 @@ package sctp
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -1553,9 +1554,18 @@ func (a *Association) handleInitAck(pkt *packet, initChunkAck *chunkInitAck) err
 // The caller should hold the lock.
 func (a *Association) handleHeartbeat(c *chunkHeartbeat) []*packet {
 	a.log.Tracef("[%s] chunkHeartbeat", a.name)
-	hbi, ok := c.params[0].(*paramHeartbeatInfo)
+
+	if len(c.params) == 0 {
+		a.log.Warnf("[%s] Heartbeat without ParamHeartbeatInfo (no params)", a.name)
+
+		return nil
+	}
+
+	info, ok := c.params[0].(*paramHeartbeatInfo)
 	if !ok {
-		a.log.Warnf("[%s] failed to handle Heartbeat, no ParamHeartbeatInfo", a.name)
+		a.log.Warnf("[%s] Heartbeat without ParamHeartbeatInfo (got %T)", a.name, c.params[0])
+
+		return nil
 	}
 
 	return pack(&packet{
@@ -1565,11 +1575,54 @@ func (a *Association) handleHeartbeat(c *chunkHeartbeat) []*packet {
 		chunks: []chunk{&chunkHeartbeatAck{
 			params: []param{
 				&paramHeartbeatInfo{
-					heartbeatInformation: hbi.heartbeatInformation,
+					heartbeatInformation: info.heartbeatInformation,
 				},
 			},
 		}},
 	})
+}
+
+// The caller should hold the lock.
+func (a *Association) handleHeartbeatAck(c *chunkHeartbeatAck) {
+	a.log.Tracef("[%s] chunkHeartbeatAck", a.name)
+
+	if len(c.params) == 0 {
+		return
+	}
+
+	info, ok := c.params[0].(*paramHeartbeatInfo)
+	if !ok {
+		a.log.Warnf("[%s] HeartbeatAck without ParamHeartbeatInfo", a.name)
+
+		return
+	}
+
+	// active RTT probe: if heartbeatInformation is exactly 8 bytes, treat it
+	// as a big-endian unix nano timestamp.
+	if len(info.heartbeatInformation) == 8 {
+		ns := binary.BigEndian.Uint64(info.heartbeatInformation)
+		if ns > math.MaxInt64 {
+			// Malformed or future-unsafe value; ignore this heartbeat-ack.
+			a.log.Warnf("[%s] HB RTT: timestamp overflows int64, ignoring", a.name)
+
+			return
+		}
+
+		sentNanos := int64(ns)
+		sent := time.Unix(0, sentNanos)
+		now := time.Now()
+
+		if !sent.IsZero() && !now.Before(sent) {
+			rttMs := now.Sub(sent).Seconds() * 1000.0
+			srtt := a.rtoMgr.setNewRTT(rttMs)
+			a.srtt.Store(srtt)
+
+			a.rackMinRTTWnd.Push(now, now.Sub(sent))
+
+			a.log.Tracef("[%s] HB RTT: measured=%.3fms srtt=%.3fms rto=%.3fms",
+				a.name, rttMs, srtt, a.rtoMgr.getRTO())
+		}
+	}
 }
 
 // The caller should hold the lock.
@@ -3023,9 +3076,11 @@ func (a *Association) handleChunk(receivedPacket *packet, receivedChunk chunk) e
 		}
 		a.log.Debugf("[%s] Error chunk, with following errors: %s", a.name, errStr)
 
-	// Note: chunkHeartbeatAck not handled?
 	case *chunkHeartbeat:
 		packets = a.handleHeartbeat(receivedChunk)
+
+	case *chunkHeartbeatAck:
+		a.handleHeartbeatAck(receivedChunk)
 
 	case *chunkCookieEcho:
 		packets = a.handleCookieEcho(receivedChunk)
@@ -3651,8 +3706,11 @@ func (a *Association) onPTOTimer() {
 
 func (a *Association) onPTOTimerLocked() {
 	// if nothing is inflight, PTO should not drive TLR.
+	// use PTO as a chance to probe RTT via HEARTBEAT instead of retransmitting DATA.
 	if a.inflightQueue.size() == 0 {
 		a.stopPTOTimer()
+		a.log.Tracef("[%s] PTO idle: sending active HEARTBEAT for RTT probe", a.name)
+		a.sendActiveHeartbeatLocked()
 
 		return
 	}
@@ -3665,7 +3723,7 @@ func (a *Association) onPTOTimerLocked() {
 		a.tlrApplyAdditionalLossLocked(currTime)
 	}
 
-	// Prefer unsent data if any
+	// If we have unsent data, PTO should just wake the writer.
 	if a.pendingQueue.size() > 0 {
 		a.awakeWriteLoop()
 
@@ -3897,4 +3955,45 @@ func (a *Association) tlrAllowSendLocked(budgetScaled *int64, consumed *bool, es
 	*consumed = true
 
 	return true
+}
+
+// ActiveHeartbeat sends a HEARTBEAT chunk on the association to perform an
+// on-demand RTT measurement without application payload.
+//
+// It is safe to call from outside; it will take the association lock and
+// be a no-op if the association is not established.
+func (a *Association) ActiveHeartbeat() {
+	a.lock.Lock()
+	defer a.lock.Unlock()
+
+	if a.getState() != established {
+		return
+	}
+
+	a.sendActiveHeartbeatLocked()
+}
+
+// caller must hold a.lock.
+func (a *Association) sendActiveHeartbeatLocked() {
+	now := time.Now().UnixNano()
+	buf := make([]byte, 8)
+	binary.BigEndian.PutUint64(buf, uint64(now)) //nolint:gosec // time.now() will never be negative
+
+	info := &paramHeartbeatInfo{heartbeatInformation: buf}
+
+	hb := &chunkHeartbeat{
+		chunkHeader: chunkHeader{
+			typ:   ctHeartbeat,
+			flags: 0,
+		},
+		params: []param{info},
+	}
+
+	a.controlQueue.push(&packet{
+		verificationTag: a.peerVerificationTag,
+		sourcePort:      a.sourcePort,
+		destinationPort: a.destinationPort,
+		chunks:          []chunk{hb},
+	})
+	a.awakeWriteLoop()
 }
