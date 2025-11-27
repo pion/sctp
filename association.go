@@ -578,7 +578,13 @@ func (a *Association) Abort(reason string) {
 
 	a.lock.Unlock()
 
+	// short bound for abort flush.
+	_ = a.netConn.SetWriteDeadline(time.Now().Add(200 * time.Millisecond))
 	a.awakeWriteLoop()
+
+	// unblock readLoop even if the underlying TCP connection is half-open.
+	// We want Abort to return promptly during shutdown.
+	_ = a.netConn.SetReadDeadline(time.Now())
 
 	// Wait for readLoop to end
 	<-a.readLoopCloseCh

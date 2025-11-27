@@ -2691,6 +2691,10 @@ func (c *dumbConn2) RemoteAddr() net.Addr {
 	return c.remoteAddr
 }
 
+func (c *dumbConn2) SetDeadline(time.Time) error      { return nil }
+func (c *dumbConn2) SetReadDeadline(time.Time) error  { return nil }
+func (c *dumbConn2) SetWriteDeadline(time.Time) error { return nil }
+
 func (c *dumbConn2) inboundHandler(packet []byte) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
@@ -2878,6 +2882,156 @@ loop:
 func noErrorClose(t *testing.T, closeF func() error) {
 	t.Helper()
 	require.NoError(t, closeF())
+}
+
+// blockingCloseConn simulates a TCP/TLS connection where Close blocks, and Read
+// only unblocks when a past read deadline is set.
+type blockingCloseConn struct {
+	readBlocked  chan struct{}
+	closeBlocked chan struct{}
+	once         sync.Once
+}
+
+func newBlockingCloseConn() *blockingCloseConn {
+	return &blockingCloseConn{
+		readBlocked:  make(chan struct{}),
+		closeBlocked: make(chan struct{}),
+	}
+}
+
+func (c *blockingCloseConn) unblockRead() {
+	c.once.Do(func() { close(c.readBlocked) })
+}
+
+func (c *blockingCloseConn) Read(_ []byte) (int, error) {
+	<-c.readBlocked
+
+	return 0, os.ErrDeadlineExceeded
+}
+
+func (c *blockingCloseConn) Write(p []byte) (int, error) { return len(p), nil }
+
+func (c *blockingCloseConn) Close() error {
+	<-c.closeBlocked
+	c.unblockRead()
+
+	return nil
+}
+
+func (c *blockingCloseConn) LocalAddr() net.Addr                { return &net.IPAddr{} }
+func (c *blockingCloseConn) RemoteAddr() net.Addr               { return &net.IPAddr{} }
+func (c *blockingCloseConn) SetDeadline(_ time.Time) error      { return nil }
+func (c *blockingCloseConn) SetWriteDeadline(_ time.Time) error { return nil }
+
+func (c *blockingCloseConn) SetReadDeadline(t time.Time) error {
+	if !t.IsZero() && !t.After(time.Now()) {
+		c.unblockRead()
+	}
+
+	return nil
+}
+
+func TestAssociationAbortUnblocksStuckRead(t *testing.T) {
+	conn := newBlockingCloseConn()
+	assoc := createAssociation(Config{
+		NetConn:       conn,
+		LoggerFactory: logging.NewDefaultLoggerFactory(),
+	})
+	assoc.init(false)
+
+	done := make(chan struct{})
+	go func() {
+		assoc.Abort("abort read")
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		require.FailNow(t, "Abort did not return while read loop was blocked")
+	}
+
+	close(conn.closeBlocked)
+}
+
+// blockingWriteConn simulates a connection whose Write blocks until a write
+// deadline is set, SetWriteDeadline unblocks the pending Write immediately.
+type blockingWriteConn struct {
+	readBlocked         chan struct{}
+	writeBlocked        chan struct{}
+	writeDeadlineCalled chan struct{}
+	unblockReadOnce     sync.Once
+	unblockWriteOnce    sync.Once
+}
+
+func newBlockingWriteConn() *blockingWriteConn {
+	return &blockingWriteConn{
+		readBlocked:         make(chan struct{}),
+		writeBlocked:        make(chan struct{}),
+		writeDeadlineCalled: make(chan struct{}, 1),
+	}
+}
+
+func (c *blockingWriteConn) Read(_ []byte) (int, error) {
+	<-c.readBlocked
+
+	return 0, os.ErrDeadlineExceeded
+}
+
+func (c *blockingWriteConn) Write(p []byte) (int, error) {
+	<-c.writeBlocked
+
+	return len(p), nil
+}
+
+func (c *blockingWriteConn) Close() error                  { return nil }
+func (c *blockingWriteConn) LocalAddr() net.Addr           { return &net.IPAddr{} }
+func (c *blockingWriteConn) RemoteAddr() net.Addr          { return &net.IPAddr{} }
+func (c *blockingWriteConn) SetDeadline(_ time.Time) error { return nil }
+
+func (c *blockingWriteConn) SetWriteDeadline(_ time.Time) error {
+	c.unblockWriteOnce.Do(func() { close(c.writeBlocked) })
+	select {
+	case c.writeDeadlineCalled <- struct{}{}:
+	default:
+	}
+
+	return nil
+}
+
+func (c *blockingWriteConn) SetReadDeadline(t time.Time) error {
+	if !t.IsZero() && !t.After(time.Now()) {
+		c.unblockReadOnce.Do(func() { close(c.readBlocked) })
+	}
+
+	return nil
+}
+
+func TestAssociationAbortSetsWriteDeadline(t *testing.T) {
+	conn := newBlockingWriteConn()
+	assoc := createAssociation(Config{
+		NetConn:       conn,
+		LoggerFactory: logging.NewDefaultLoggerFactory(),
+	})
+	assoc.init(false)
+
+	done := make(chan struct{})
+	go func() {
+		assoc.Abort("abort write deadline")
+		close(done)
+	}()
+
+	select {
+	case <-conn.writeDeadlineCalled:
+	case <-time.After(200 * time.Millisecond):
+		require.FailNow(t, "Abort did not call SetWriteDeadline")
+	}
+
+	select {
+	case <-done:
+	case <-time.After(300 * time.Millisecond):
+		require.FailNow(t, "Abort did not return promptly")
+	}
 }
 
 // readMyNextTSN uses a lock to read the myNextTSN field of the association.
