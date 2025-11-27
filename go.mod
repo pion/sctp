@@ -17,9 +17,5 @@ require (
 
 go 1.21
 
-retract (
-	// Retract version with broken checksum handling.
-	v1.8.40
-	// Retract version with ZeroChecksum misinterpretation (bi-directional/global handling)
-	v1.8.12
-)
+// Retract version with ZeroChecksum misinterpretation (bi-directional/global handling)
+retract v1.8.12
