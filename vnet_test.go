@@ -693,7 +693,7 @@ func TestCookieEchoRetransmission(t *testing.T) {
 // later DATA arrives before earlier DATA. Under a RACK regression, rackMinRTT would never increases,
 // causing reoWnd to be too small and marking packets sent at high RTT as spuriously lost.
 func TestRACK_RTTSwitch_Reordering_NoDrop(t *testing.T) { //nolint:gocyclo,cyclop,maintidx
-	lim := test.TimeOut(10 * time.Second)
+	lim := test.TimeOut(15 * time.Second)
 	defer lim.Stop()
 
 	loggerFactory := logging.NewDefaultLoggerFactory()
@@ -896,7 +896,7 @@ func TestRACK_RTTSwitch_Reordering_NoDrop(t *testing.T) { //nolint:gocyclo,cyclo
 
 		seen := make(map[byte]bool, numMessages)
 		buf := make([]byte, 4096)
-		deadline := time.Now().Add(10 * time.Second)
+		deadline := time.Now().Add(15 * time.Second)
 
 		for len(seen) < numMessages && time.Now().Before(deadline) {
 			_ = stream.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
@@ -941,17 +941,16 @@ func TestRACK_RTTSwitch_Reordering_NoDrop(t *testing.T) { //nolint:gocyclo,cyclo
 	}
 
 	// check FR stats reported.
-	// we can uncomment this to check the FR stats.
-	// I tested it and it works fine on the pch07/rack-sctp branch.
-	//	cs := <-clientStatsCh
-	//	ss := <-serverStatsCh
-	//
-	//	if assert.True(t, cs.ok, "client assoc/stats unavailable") {
-	//		assert.LessOrEqual(t, cs.fr, uint64(2),
-	//			"client fast retransmits should be low")
-	//	}
-	//	if assert.True(t, ss.ok, "server assoc/stats unavailable") {
-	//		assert.LessOrEqual(t, ss.fr, uint64(2),
-	//			"server fast retransmits should be low")
-	//	}
+	cs := <-clientStatsCh
+	ss := <-serverStatsCh
+
+	if assert.True(t, cs.ok, "client assoc/stats unavailable") {
+		assert.LessOrEqual(t, cs.fr, uint64(2),
+			"client fast retransmits should be low")
+	}
+
+	if assert.True(t, ss.ok, "server assoc/stats unavailable") {
+		assert.LessOrEqual(t, ss.fr, uint64(2),
+			"server fast retransmits should be low")
+	}
 }

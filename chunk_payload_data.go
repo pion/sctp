@@ -75,6 +75,10 @@ type chunkPayloadData struct {
 	retransmit bool
 
 	head *chunkPayloadData // link to the head of the fragment
+
+	rackPrev   *chunkPayloadData
+	rackNext   *chunkPayloadData
+	rackInList bool
 }
 
 const (

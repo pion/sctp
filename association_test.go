@@ -1808,9 +1808,9 @@ func TestAssocCongestionControl(t *testing.T) { //nolint:cyclop,maintidx
 	}
 
 	// 1) Send 4 packets. drop the first one.
-	// 2) Last 3 packet will be received, which triggers fast-retransmission
-	// 3) The first one is retransmitted, which makes s1 readable
-	// Above should be done before RTO occurs (fast recovery)
+	// 2) Last 3 packets will be received, which triggers loss recovery RACK/TLP.
+	// 3) The first one is retransmitted, which makes s1 readable.
+	// Above should be done before RTO occurs.
 	t.Run("Fast retransmission", func(t *testing.T) {
 		lim := test.TimeOut(time.Second * 10)
 		defer lim.Stop()
@@ -1826,17 +1826,20 @@ func TestAssocCongestionControl(t *testing.T) { //nolint:cyclop,maintidx
 		s0, s1, err := establishSessionPair(br, a0, a1, si)
 		assert.NoError(t, err, "failed to establish session pair")
 
-		br.DropNextNWrites(0, 1) // drop the next write
+		// 1) Send 4 packets, drop the first one.
+		// 2) Last 3 packets will be received, which triggers loss recovery
+		//    (either classic Fast Retransmit or RACK/TLP).
+		// 3) The first one is retransmitted, and s1 should see all 4 in order.
+		br.DropNextNWrites(0, 1) // drop the next write from a0
 
 		for i := 0; i < 4; i++ {
-			binary.BigEndian.PutUint32(sbuf, uint32(i)) //nolint:gosec // G115 uint32 sequence number
+			binary.BigEndian.PutUint32(sbuf, uint32(i)) //nolint:gosec // G115
 			n, err = s0.WriteSCTP(sbuf, PayloadTypeWebRTCBinary)
 			assert.NoError(t, err, "WriteSCTP failed")
-			assert.Equal(t, n, len(sbuf), "unexpected length of received data")
+			assert.Equal(t, len(sbuf), n, "unexpected length of sent data")
 		}
 
-		// process packets for 500 msec, assuming that the fast retrans/recover
-		// should complete within 500 msec.
+		// process packets for 500 msec; recovery should complete without relying on RTO
 		for i := 0; i < 50; i++ {
 			br.Tick()
 			time.Sleep(10 * time.Millisecond)
@@ -1860,21 +1863,25 @@ func TestAssocCongestionControl(t *testing.T) { //nolint:cyclop,maintidx
 				return
 			}
 			assert.Equal(t, len(sbuf), n, "unexpected length of received data")
-			assert.Equal(t, i, int(binary.BigEndian.Uint32(rbuf)), "unexpected length of received data")
-			assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
+			assert.Equal(t, i, int(binary.BigEndian.Uint32(rbuf)), "unexpected payload sequence")
+			assert.Equal(t, PayloadTypeWebRTCBinary, ppi, "unexpected ppi")
 		}
 
-		a0.lock.RLock()
-		inFastRecovery := a0.inFastRecovery
-		a0.lock.RUnlock()
-		assert.False(t, inFastRecovery, "should not be in fast-recovery")
-
+		// Log stats for debugging / sanity
 		t.Logf("nDATAs      : %d\n", a1.stats.getNumDATAs())
 		t.Logf("nSACKs      : %d\n", a0.stats.getNumSACKsReceived())
 		t.Logf("nAckTimeouts: %d\n", a1.stats.getNumAckTimeouts())
 		t.Logf("nFastRetrans: %d\n", a0.stats.getNumFastRetrans())
+		t.Logf("nT3Timeouts : %d\n", a0.stats.getNumT3Timeouts())
 
-		assert.Equal(t, uint64(1), a0.stats.getNumFastRetrans(), "should be 1")
+		// With RACK enabled, recovery may happen without classic fast retransmit.
+		// Require recovery before RTO; allow FR count to be 0 or 1.
+		assert.Zero(t, a0.stats.getNumT3Timeouts(),
+			"recovery should complete before any T3 RTO")
+
+		fr := a0.stats.getNumFastRetrans()
+		assert.Truef(t, fr == 0 || fr == 1,
+			"expected fast retrans 0 or 1 (RACK may bypass FR), got %d", fr)
 
 		closeAssociationPair(br, a0, a1)
 	})
@@ -2476,7 +2483,8 @@ func TestStats(t *testing.T) {
 
 	<-conn.done
 
-	assert.NoError(t, conn.Close())
+	// ensure SCTP shuts down cleanly before reading counters
+	assert.NoError(t, assoc.Close())
 
 	conn.mu.Lock()
 	defer conn.mu.Unlock()
@@ -3950,4 +3958,467 @@ func TestConfigMTU(t *testing.T) {
 
 	require.NoError(t, a2.Close())
 	require.NoError(t, conn2.Close())
+}
+
+// makes an Association without starting read/write loops, skips init(), just the minimal state.
+func newRackTestAssoc(t *testing.T) *Association {
+	t.Helper()
+
+	lg := logging.NewDefaultLoggerFactory()
+	assoc := createAssociation(Config{
+		LoggerFactory: lg,
+	})
+
+	// Put the association into a sane "established" state with fresh queues.
+	assoc.setState(established)
+	assoc.peerVerificationTag = 1
+	assoc.sourcePort = defaultSCTPSrcDstPort
+	assoc.destinationPort = defaultSCTPSrcDstPort
+
+	// Deterministic TSN base.
+	assoc.initialTSN = 100
+	assoc.myNextTSN = 102 // we'll populate TSN=100,101 manually below
+	assoc.cumulativeTSNAckPoint = 99
+	assoc.advancedPeerTSNAckPoint = 99
+
+	// fresh queues
+	assoc.inflightQueue = newPayloadQueue()
+	assoc.payloadQueue = newReceivePayloadQueue(getMaxTSNOffset(assoc.maxReceiveBufferSize))
+
+	// RACK defaults for tests
+	assoc.rackEnabled = true
+	assoc.rackReorderingSeen = false
+	assoc.rackReoWndFloor = 0
+
+	// Have a non-zero SRTT so SRTT-bounding code runs deterministically.
+	assoc.srtt.Store(float64(100.0)) // 100 ms
+
+	return assoc
+}
+
+func mkChunk(tsn uint32, since time.Time) *chunkPayloadData {
+	return &chunkPayloadData{
+		streamIdentifier:     1,
+		streamSequenceNumber: 1,
+		beginningFragment:    true,
+		endingFragment:       true,
+		userData:             []byte("x"),
+		tsn:                  tsn,
+		since:                since,
+		nSent:                1, // original transmission
+	}
+}
+
+func TestRACK_EnabledDefaultAndDisableOption(t *testing.T) {
+	// default -> enabled
+	a := createAssociation(Config{LoggerFactory: logging.NewDefaultLoggerFactory()})
+	assert.True(t, a.rackEnabled, "RACK should be enabled by default")
+
+	// DisableRACK -> disabled
+	b := createAssociation(Config{
+		LoggerFactory: logging.NewDefaultLoggerFactory(),
+		DisableRACK:   true,
+	})
+	assert.False(t, b.rackEnabled, "RACK should be disabled when DisableRACK is set")
+}
+
+func TestRACK_MarkLossOnACK(t *testing.T) {
+	assoc := newRackTestAssoc(t)
+
+	assoc.lock.Lock()
+
+	assoc.rackEnabled = true
+	if assoc.rackMinRTTWnd == nil {
+		assoc.rackMinRTTWnd = newWindowedMin(30 * time.Second)
+	}
+
+	// MinRTT = 40ms → base reoWnd = 10ms
+	assoc.rackMinRTT = 40 * time.Millisecond
+	assoc.rackReoWnd = 10 * time.Millisecond
+
+	now := time.Now()
+	olderSend := now.Add(-50 * time.Millisecond)
+	newerSend := now.Add(-1 * time.Millisecond)
+
+	// Outstanding: TSN=100 (older), TSN=101 (newer, just delivered)
+	cOld := mkChunk(100, olderSend)
+	cNew := mkChunk(101, newerSend)
+
+	// Treat them as original transmissions.
+	cOld.nSent = 1
+	cNew.nSent = 1
+
+	assoc.inflightQueue.pushNoCheck(cOld)
+	assoc.inflightQueue.pushNoCheck(cNew)
+
+	// Track them in the RACK xmit-time list (ordered by send time).
+	assoc.rackInsert(cOld)
+	assoc.rackInsert(cNew)
+
+	assoc.lock.Unlock()
+
+	// Simulate an ACK that delivers TSN 101 with send-time newerSend.
+	assoc.onRackAfterSACK(
+		true,                 // deliveredFound
+		newerSend,            // newestDeliveredSendTime
+		101,                  // newestDeliveredOrigTSN
+		&chunkSelectiveAck{}, // SACK contents don't matter for this test
+	)
+
+	got, ok := assoc.inflightQueue.get(100)
+	require.True(t, ok, "TSN 100 should still be in inflightQueue")
+	require.NotNil(t, got)
+	assert.True(t, got.retransmit, "RACK should mark older TSN lost on ACK")
+}
+
+func TestRACK_TimerMarksLost(t *testing.T) {
+	assoc := newRackTestAssoc(t)
+
+	assoc.lock.Lock()
+	assoc.rackEnabled = true
+
+	// Reordering window and delivered time such that the chunk is clearly overdue.
+	assoc.rackReoWnd = 10 * time.Millisecond
+	assoc.rackDeliveredTime = time.Now()
+
+	now := time.Now()
+	olderSend := now.Add(-50 * time.Millisecond)
+
+	// One outstanding original transmission far in the past.
+	c := mkChunk(100, olderSend)
+	c.nSent = 1
+
+	assoc.inflightQueue.pushNoCheck(c)
+	assoc.rackInsert(c)
+	assoc.lock.Unlock()
+
+	// Simulate the RACK timer firing.
+	assoc.onRackTimeout()
+
+	got, ok := assoc.inflightQueue.get(100)
+	require.True(t, ok, "TSN 100 should still be in inflightQueue")
+	require.NotNil(t, got)
+	assert.True(t, got.retransmit, "RACK timer should mark overdue original as lost")
+}
+
+func TestRACK_DSACKInflatesAndDecays(t *testing.T) {
+	assoc := newRackTestAssoc(t)
+
+	assoc.rackMinRTT = 100 * time.Millisecond
+	assoc.rackReoWnd = 25 * time.Millisecond // base is 25ms; will inflate by +25ms
+	assoc.rackKeepInflatedRecoveries = 0
+
+	// DSACK (duplicate TSN) present -> inflate by max(minRTT/4, floor) and set counter=16
+	sack := &chunkSelectiveAck{
+		cumulativeTSNAck: 99,
+		duplicateTSN:     []uint32{123},
+	}
+
+	// Note that we're checking for 15 and 14 instead of 16 and 15 because it immediately
+	// decrements when not in fast recovery.
+	assoc.onRackAfterSACK(false, time.Time{}, 0, sack)
+	assert.Equal(t, 50*time.Millisecond, assoc.rackReoWnd, "reoWnd should inflate on DSACK")
+	assert.Equal(t, 15, assoc.rackKeepInflatedRecoveries, "keep-inflated counter should be 15")
+
+	// When not in fast recovery, the counter decays each pass.
+	assoc.inFastRecovery = false
+	assoc.onRackAfterSACK(false, time.Time{}, 0, &chunkSelectiveAck{})
+	assert.Equal(t, 14, assoc.rackKeepInflatedRecoveries)
+
+	// Drive counter to zero and ensure reoWnd resets to base (minRTT/4).
+	assoc.rackKeepInflatedRecoveries = 1
+	assoc.onRackAfterSACK(false, time.Time{}, 0, &chunkSelectiveAck{})
+	assert.Equal(t, 0, assoc.rackKeepInflatedRecoveries)
+	assert.Equal(t, 25*time.Millisecond, assoc.rackReoWnd, "reoWnd should reset to base after decay")
+}
+
+func TestRACK_SuppressReoWndDuringRecovery_NoReorderingSeen(t *testing.T) {
+	assoc := newRackTestAssoc(t)
+
+	// Start with an empty rolling window (no RTT samples).
+	assoc.rackReoWnd = 40 * time.Millisecond
+	assoc.rackReorderingSeen = false
+	assoc.inFastRecovery = true
+
+	// During recovery with no reordering observed, reoWnd must go to zero.
+	assoc.onRackAfterSACK(false, time.Time{}, 0, &chunkSelectiveAck{})
+	assert.Equal(t, time.Duration(0), assoc.rackReoWnd, "reoWnd should be suppressed during recovery w/o reordering")
+
+	assoc.inFastRecovery = false
+	assoc.onRackAfterSACK(false, time.Time{}, 0, &chunkSelectiveAck{})
+	assert.Equal(t, time.Duration(0), assoc.rackReoWnd, "reoWnd should stay 0 until a minRTT sample exists")
+
+	now := time.Now()
+	assoc.rackMinRTTWnd.Push(now, 120*time.Millisecond)
+
+	assoc.onRackAfterSACK(false, time.Time{}, 0, &chunkSelectiveAck{})
+	assert.Equal(
+		t,
+		30*time.Millisecond,
+		assoc.rackReoWnd,
+		"reoWnd should re-initialize to base (minRTT/4) after first sample",
+	)
+}
+
+func TestRACK_ReoWndBoundedBySRTT(t *testing.T) {
+	a := newRackTestAssoc(t)
+
+	// Set a very large reoWnd, and a small SRTT (10ms).
+	a.rackReoWnd = 200 * time.Millisecond
+	a.srtt.Store(float64(10.0))
+
+	// Any onRackAfterSACK pass should bound reoWnd by SRTT.
+	a.onRackAfterSACK(false, time.Time{}, 0, &chunkSelectiveAck{})
+	assert.Equal(t, 10*time.Millisecond, a.rackReoWnd, "reoWnd must be bounded by SRTT")
+}
+
+func TestRACK_PTO_ProbesLatestOutstanding_WhenNoPending(t *testing.T) {
+	assoc := newRackTestAssoc(t)
+
+	// Two outstanding, none acked/abandoned.
+	now := time.Now()
+	c0 := mkChunk(100, now.Add(-10*time.Millisecond))
+	c1 := mkChunk(101, now)
+	assoc.inflightQueue.pushNoCheck(c0)
+	assoc.inflightQueue.pushNoCheck(c1)
+
+	// No pending -> PTO should mark latest outstanding for retransmit.
+	assoc.onPTOTimer()
+
+	got0, _ := assoc.inflightQueue.get(100)
+	got1, _ := assoc.inflightQueue.get(101)
+	require.NotNil(t, got0)
+	require.NotNil(t, got1)
+
+	assert.False(t, got0.retransmit, "older TSN should not be probed by PTO")
+	assert.True(t, got1.retransmit, "latest outstanding should be probed by PTO")
+}
+
+func TestRACK_PTO_DoesNotProbe_WhenPendingExists(t *testing.T) {
+	assoc := newRackTestAssoc(t)
+
+	// One outstanding
+	assoc.inflightQueue.pushNoCheck(mkChunk(100, time.Now()))
+
+	// Add something pending (generic non-nil chunk).
+	assoc.pendingQueue.push(&chunkPayloadData{
+		streamIdentifier:  2,
+		beginningFragment: true,
+		endingFragment:    true,
+		userData:          []byte("pending"),
+	})
+
+	// With pending data, PTO should NOT mark retransmit and simply wake sender.
+	assoc.onPTOTimer()
+
+	got, _ := assoc.inflightQueue.get(100)
+	require.NotNil(t, got)
+	assert.False(t, got.retransmit, "PTO must prefer sending pending data over probing")
+}
+
+// helper to create N pending chunks sized to one MTU packet each.
+func enqueueMTUSizedChunks(t *testing.T, a *Association, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		c := &chunkPayloadData{
+			streamIdentifier:     1,
+			payloadType:          PayloadTypeWebRTCBinary,
+			beginningFragment:    true,
+			endingFragment:       true,
+			userData:             make([]byte, a.maxPayloadSize), // one DATA chunk ~= one MTU packet
+			streamSequenceNumber: uint16(i),                      //nolint:gosec // G115
+		}
+		a.pendingQueue.push(c)
+	}
+}
+
+func TestAdaptiveBurst_BudgetAndRefill(t *testing.T) {
+	lim := test.TimeOut(10 * time.Second)
+	defer lim.Stop()
+
+	br := test.NewBridge()
+	a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, 0)
+	require.NoError(t, err)
+	defer closeAssociationPair(br, a0, a1)
+
+	a0.lock.Lock()
+	// Enable TLR epoch with known RTT so round=0
+	a0.enableAdaptiveBurst = true
+	a0.tlrActive = true
+	a0.tlrRTT = 100 * time.Millisecond
+	a0.tlrStart = time.Now()
+
+	// Pretend we just received the first SACK in this TLR epoch.
+	a0.tlrRoundIndex = 0
+	a0.burstTokens = 2 // first refill, but we test with a smaller budget
+
+	// Make windows large so congestion control doesn't bind
+	a0.setCWND(64 * a0.MTU())
+	a0.setRWND(1 << 30)
+
+	// Queue 4 MTU-sized chunks => should produce ~4 packets (1 MTU each)
+	enqueueMTUSizedChunks(t, a0, 4)
+
+	// First ACK refill: test with 2 MTUs.
+	a0.burstTokens = 2
+
+	var pkts [][]byte
+	pkts = a0.gatherOutboundDataAndReconfigPackets(pkts)
+	require.Len(t, pkts, 2, "should not exceed per-ACK budget (2 MTUs)")
+	require.Equal(t, 0.0, a0.burstTokens)
+
+	// Emulate next SACK arrival refill (handleSack())
+	refill := a0.currentBurstLimitMTUsLocked(time.Now())
+	a0.burstTokens += float64(refill)
+	require.GreaterOrEqual(t, refill, 1.0)
+
+	// Send next burst, only 2 MTUs remain queued
+	pkts = nil
+	pkts = a0.gatherOutboundDataAndReconfigPackets(pkts)
+	require.Len(t, pkts, 2, "second burst should drain remaining 2 MTUs")
+
+	// With no budget left, another call should produce nothing
+	pkts = nil
+	pkts = a0.gatherOutboundDataAndReconfigPackets(pkts)
+	require.Len(t, pkts, 0, "no budget and no pending data left")
+
+	a0.lock.Unlock()
+}
+
+func TestAdaptiveBurst_UnlimitedOutsideTLR(t *testing.T) {
+	lim := test.TimeOut(10 * time.Second)
+	defer lim.Stop()
+
+	br := test.NewBridge()
+	a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, 0)
+	require.NoError(t, err)
+	defer closeAssociationPair(br, a0, a1)
+
+	a0.lock.Lock()
+	a0.enableAdaptiveBurst = true
+	a0.tlrActive = false // outside TLR
+	a0.setCWND(64 * a0.MTU())
+	a0.setRWND(1 << 30)
+
+	enqueueMTUSizedChunks(t, a0, 5)
+
+	// With no TLR, budget must be ignored (forced to -1 in gatherOutbound)
+	a0.burstTokens = 1
+
+	var pkts [][]byte
+	pkts = a0.gatherOutboundDataAndReconfigPackets(pkts)
+	// Should send all 5 MTU-sized packets
+	require.Len(t, pkts, 5)
+	a0.lock.Unlock()
+}
+
+// Verify adaptation knobs:
+// - round 0 subsequent loss lowers burstInitMTUs by 1.0 to floor 2.0
+// - later-round loss lowers burstSubseqMTUs by 0.25 to floor 1.25.
+func TestAdaptiveBurst_AdaptationKnobs(t *testing.T) {
+	lim := test.TimeOut(10 * time.Second)
+	defer lim.Stop()
+
+	br := test.NewBridge()
+	a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, 0)
+	require.NoError(t, err)
+	defer closeAssociationPair(br, a0, a1)
+
+	a0.lock.Lock()
+	a0.enableAdaptiveBurst = true
+	a0.tlrActive = true
+	a0.tlrRTT = 50 * time.Millisecond
+
+	// Round 0 loss impacts burstInitMTUs
+	a0.tlrStart = time.Now() // round=0
+	initialInit := 4.0
+	a0.burstInitMTUs = initialInit
+	a0.burstSubseqMTUs = 2.0
+
+	tsn0 := uint32(100)
+	a0.tlrRecordSentRoundLocked(tsn0) // records round 0
+	a0.tlrOnSubsequentLossLocked(tsn0)
+	require.Equal(t, initialInit-1.0, a0.burstInitMTUs)
+
+	// Floor at 2.0
+	a0.burstInitMTUs = 2.0
+	a0.tlrOnSubsequentLossLocked(tsn0)
+	require.Equal(t, 2.0, a0.burstInitMTUs)
+
+	// Later round loss impacts burstSubseqMTUs
+	a0.tlrStart = time.Now().Add(-2 * a0.tlrRTT) // force round >= 2
+	tsn1 := uint32(101)
+	a0.burstSubseqMTUs = 2.0
+	a0.tlrRecordSentRoundLocked(tsn1) // records later round
+	a0.tlrOnSubsequentLossLocked(tsn1)
+	require.Equal(t, 1.75, a0.burstSubseqMTUs)
+
+	// Floor at 1.25
+	a0.burstSubseqMTUs = 1.25
+	a0.tlrOnSubsequentLossLocked(tsn1)
+	require.Equal(t, 1.25, a0.burstSubseqMTUs)
+
+	a0.lock.Unlock()
+}
+
+// After finishing a TLR epoch without subsequent losses, every epoch
+// increments good-recovery counter, on reaching 16, knobs reset to defaults.
+func TestAdaptiveBurst_ResetAfterGoodRecoveries(t *testing.T) {
+	lim := test.TimeOut(10 * time.Second)
+	defer lim.Stop()
+
+	br := test.NewBridge()
+	a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, 0)
+	require.NoError(t, err)
+	defer closeAssociationPair(br, a0, a1)
+
+	a0.lock.Lock()
+	a0.enableAdaptiveBurst = true
+	a0.tlrActive = true
+	a0.inFastRecovery = false
+
+	// No pending retransmits -> epoch may end immediately
+	require.Equal(t, 0, a0.inflightQueue.size())
+
+	a0.burstInitMTUs = 2.75   // non-default
+	a0.burstSubseqMTUs = 1.50 // non-default
+	a0.tlrHadSubsequentLoss = false
+	a0.tlrGoodRecoveries = 15 // next good epoch ends should reset knobs
+
+	a0.tlrMaybeEndLocked()
+	require.False(t, a0.tlrActive)
+	require.Equal(t, 0, a0.tlrGoodRecoveries)
+	require.Equal(t, 4.0, a0.burstInitMTUs)
+	require.Equal(t, 2.0, a0.burstSubseqMTUs)
+	a0.lock.Unlock()
+}
+
+// If a TLR epoch ends with subsequent loss, good-recovery counter resets to 0
+// and knobs are not bumped to defaults (unless already at defaults).
+func TestAdaptiveBurst_EndWithLossDoesNotResetKnobs(t *testing.T) {
+	lim := test.TimeOut(10 * time.Second)
+	defer lim.Stop()
+
+	br := test.NewBridge()
+	a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, 0)
+	require.NoError(t, err)
+	defer closeAssociationPair(br, a0, a1)
+
+	a0.lock.Lock()
+	a0.enableAdaptiveBurst = true
+	a0.tlrActive = true
+	a0.inFastRecovery = false
+
+	a0.burstInitMTUs = 3.25
+	a0.burstSubseqMTUs = 1.50
+	a0.tlrHadSubsequentLoss = true
+	a0.tlrGoodRecoveries = 5
+
+	a0.tlrMaybeEndLocked()
+
+	require.False(t, a0.tlrActive)
+	require.Equal(t, 0, a0.tlrGoodRecoveries) // reset
+	require.Equal(t, 3.25, a0.burstInitMTUs)  // unchanged
+	require.Equal(t, 1.50, a0.burstSubseqMTUs)
+	a0.lock.Unlock()
 }

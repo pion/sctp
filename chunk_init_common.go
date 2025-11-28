@@ -166,3 +166,14 @@ func (i chunkInitCommon) String() string {
 
 	return res
 }
+
+// allZero returns true if every byte is 0x00.
+func allZero(b []byte) bool {
+	for _, v := range b {
+		if v != 0 {
+			return false
+		}
+	}
+
+	return true
+}
