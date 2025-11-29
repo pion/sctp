@@ -18,7 +18,7 @@ var castagnoliTable = crc32.MakeTable(crc32.Castagnoli) // nolint:gochecknogloba
 var fourZeroes [4]byte // nolint:gochecknoglobals
 
 /*
-Packet represents an SCTP packet, defined in https://tools.ietf.org/html/rfc4960#section-3
+Packet represents an SCTP packet, defined in https://tools.ietf.org/html/rfc9260#section-3
 An SCTP packet is composed of a common header and chunks.  A chunk
 contains either control information or user data.
 
@@ -39,7 +39,7 @@ contains either control information or user data.
 	 0                   1                   2                   3
 	 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 	+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-	|     Source Value Number      |     Destination Value Number   |
+	|     Source Port Number       |     Destination Port Number    |
 	+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 	|                      Verification Tag                         |
 	+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -65,6 +65,25 @@ var (
 	ErrChecksumMismatch            = errors.New("checksum mismatch theirs")
 )
 
+// unmarshal parses an SCTP packet and verifies its checksum.
+//
+// RFC 9260 section 6.8: every packet MUST be protected with CRC32c; receivers verify it.
+// RFC 9653 adds an extension (ZCA) that allows a receiver to accept a packet
+// whose checksum is incorrect but equal to zero, when an alternate error
+// detection method is active for the path (ex: SCTP-over-DTLS) and ZCA has
+// been negotiated.
+//
+// doChecksum indicates whether ZCA is active for the *receiving path*:
+//   - doChecksum == true  : accept a packet if the only checksum issue is that
+//     it is exactly zero (ZCA + path constraints satisfied).
+//   - doChecksum == false : strict 9260 verification; any checksum mismatch fails.
+//
+// Higher layers MUST only pass doChecksum=true if the peer advertised ZCA
+// in INIT/INIT-ACK and the current path meets the method’s constraints
+// (ex: DTLS). This function does not relax sender-side rules: packets that
+// contain INIT or COOKIE ECHO MUST still carry a correct CRC32c (enforced in marshal()).
+//
+// See RFC 9653 section 5.1 and section 5.3.
 func (p *packet) unmarshal(doChecksum bool, raw []byte) error { //nolint:cyclop
 	if len(raw) < packetHeaderSize {
 		return fmt.Errorf("%w: raw only %d bytes, %d is the minimum length", ErrPacketRawTooSmall, len(raw), packetHeaderSize)
@@ -72,20 +91,13 @@ func (p *packet) unmarshal(doChecksum bool, raw []byte) error { //nolint:cyclop
 
 	offset := packetHeaderSize
 
-	// Check if doing CRC32c is required.
-	// Without having SCTP AUTH implemented, this depends only on the type
-	// og the first chunk.
-	if offset+chunkHeaderSize <= len(raw) {
-		switch chunkType(raw[offset]) {
-		case ctInit, ctCookieEcho:
-			doChecksum = true
-		default:
-		}
-	}
+	// always compute CRC32c (RFC 9260 section 6.8).
 	theirChecksum := binary.LittleEndian.Uint32(raw[8:])
-	if theirChecksum != 0 || doChecksum {
-		ourChecksum := generatePacketChecksum(raw)
-		if theirChecksum != ourChecksum {
+	ourChecksum := generatePacketChecksum(raw)
+	if theirChecksum != ourChecksum {
+		// RFC 9653: if (a) checksum is zero and (b) caller indicates ZCA is active
+		// and method constraints are met, accept; otherwise error.
+		if !doChecksum || theirChecksum != 0 {
 			return fmt.Errorf("%w: %d ours: %d", ErrChecksumMismatch, theirChecksum, ourChecksum)
 		}
 	}
@@ -148,6 +160,16 @@ func (p *packet) unmarshal(doChecksum bool, raw []byte) error { //nolint:cyclop
 	return nil
 }
 
+// marshal builds an SCTP packet.
+//
+// If doChecksum == true, a zero checksum is written (RFC 9653) unless
+// the packet contains a restricted chunk (INIT or COOKIE ECHO), in which case
+// a correct CRC32c is always written (RFC 9653 section 5.2). If doChecksum == false,
+// a correct CRC32c is always written (RFC 9260 section 6.8).
+//
+// The caller sets doChecksum=true only when the peer has advertised ZCA and
+// the current path satisfies the alternate method’s constraints (e.g., DTLS).
+// For OOTB responses and other control paths, always marshal with doChecksum=false.
 func (p *packet) marshal(doChecksum bool) ([]byte, error) {
 	raw := make([]byte, packetHeaderSize)
 
@@ -171,17 +193,25 @@ func (p *packet) marshal(doChecksum bool) ([]byte, error) {
 		}
 	}
 
-	if doChecksum {
-		// golang CRC32C uses reflected input and reflected output, the
-		// net result of this is to have the bytes flipped compared to
-		// the non reflected variant that the spec expects.
-		//
-		// Use LittleEndian.PutUint32 to avoid flipping the bytes in to
-		// the spec compliant checksum order
+	if doChecksum && !hasRestrictedChunk(p.chunks) {
+		binary.LittleEndian.PutUint32(raw[8:], 0)
+	} else {
 		binary.LittleEndian.PutUint32(raw[8:], generatePacketChecksum(raw))
 	}
 
 	return raw, nil
+}
+
+// restrictedChunks per RFC 9653 section 5.2: INIT and COOKIE ECHO.
+func hasRestrictedChunk(chs []chunk) bool {
+	for _, c := range chs {
+		switch c.(type) {
+		case *chunkInit, *chunkCookieEcho:
+			return true
+		}
+	}
+
+	return false
 }
 
 func generatePacketChecksum(raw []byte) (sum uint32) {
@@ -215,11 +245,13 @@ func (p *packet) String() string {
 // TryMarshalUnmarshal attempts to marshal and unmarshal a message. Added for fuzzing.
 func TryMarshalUnmarshal(msg []byte) int {
 	p := &packet{}
+	// Strict mode first (RFC 9260): require valid CRC32c.
 	err := p.unmarshal(false, msg)
 	if err != nil {
 		return 0
 	}
 
+	// Strict send (emit CRC32c).
 	_, err = p.marshal(false)
 	if err != nil {
 		return 0
