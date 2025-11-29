@@ -4,6 +4,7 @@
 package sctp
 
 import (
+	"bytes"
 	"encoding/binary"
 	"testing"
 
@@ -104,12 +105,11 @@ func TestPacketMarshal(t *testing.T) {
 	pkt := &packet{}
 
 	headerOnly := []byte{0x13, 0x88, 0x13, 0x88, 0x00, 0x00, 0x00, 0x00, 0x06, 0xa9, 0x00, 0xe1}
-	assert.NoError(t, pkt.unmarshal(true, headerOnly), "Unmarshal failed for SCTP packet with no chunks")
+	require.NoError(t, pkt.unmarshal(true, headerOnly))
 
 	headerOnlyMarshaled, err := pkt.marshal(true)
-	if assert.NoError(t, err, "Marshal failed for SCTP packet with no chunks") {
-		assert.Equal(t, headerOnly, headerOnlyMarshaled, "Unmarshal/Marshaled header only packet did not match \nheaderOnly: % 02x \nheaderOnlyMarshaled % 02x", headerOnly, headerOnlyMarshaled)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, headerOnly, headerOnlyMarshaled)
 }
 
 func BenchmarkPacketGenerateChecksum(b *testing.B) {
@@ -118,4 +118,84 @@ func BenchmarkPacketGenerateChecksum(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		_ = generatePacketChecksum(data[:])
 	}
+}
+
+func FuzzPacketStrictRoundTrip(f *testing.F) {
+	raw, err := (&packet{
+		sourcePort:      5000,
+		destinationPort: 5000,
+		verificationTag: 0x01020304,
+		chunks:          []chunk{&chunkCookieAck{}},
+	}).marshal(true)
+	require.NoError(f, err)
+	f.Add(raw)
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		var pkt packet
+		if err := pkt.unmarshal(true, data); err != nil {
+			return
+		}
+
+		out, err := pkt.marshal(true)
+		if err != nil {
+			// Some malformed chunks are tolerated on receive so bundled chunks can still be processed.
+			return
+		}
+
+		assert.NoError(t, (&packet{}).unmarshal(true, out))
+	})
+}
+
+func FuzzPacketZeroChecksumAcceptance(f *testing.F) {
+	raw, err := (&packet{
+		sourcePort:      9,
+		destinationPort: 9,
+		verificationTag: 1,
+		chunks:          []chunk{&chunkCookieAck{}},
+	}).marshal(true)
+	require.NoError(f, err)
+	f.Add(raw)
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		if err := (&packet{}).unmarshal(true, data); err != nil {
+			return
+		}
+
+		// CRC32c can itself be zero, in which case clearing it changes nothing.
+		if binary.LittleEndian.Uint32(data[8:]) == 0 {
+			return
+		}
+
+		rawZero := bytes.Clone(data)
+		clear(rawZero[8:packetHeaderSize])
+		assert.ErrorIs(t, (&packet{}).unmarshal(true, rawZero), ErrChecksumMismatch)
+
+		if len(rawZero) > packetHeaderSize {
+			switch chunkType(rawZero[packetHeaderSize]) {
+			case ctInit, ctCookieEcho:
+				assert.ErrorIs(t, (&packet{}).unmarshal(false, rawZero), ErrChecksumMismatch)
+
+				return
+			default:
+			}
+		}
+		assert.NoError(t, (&packet{}).unmarshal(false, rawZero))
+	})
+}
+
+func FuzzTryMarshalUnmarshal(f *testing.F) {
+	f.Add([]byte{0, 0, 0, 0})
+
+	raw, err := (&packet{
+		sourcePort:      7,
+		destinationPort: 7,
+		verificationTag: 0xdeadbeef,
+		chunks:          []chunk{&chunkCookieAck{}},
+	}).marshal(true)
+	require.NoError(f, err)
+	f.Add(raw)
+
+	f.Fuzz(func(_ *testing.T, data []byte) {
+		TryMarshalUnmarshal(data)
+	})
 }

@@ -4,9 +4,11 @@
 package sctp
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestInitChunk(t *testing.T) {
@@ -57,7 +59,8 @@ func TestChromeChunk1Init(t *testing.T) {
 	err := pkt.unmarshal(true, rawPkt)
 	assert.NoError(t, err)
 
-	rawPkt2, err := pkt.marshal(true)
+	// INIT still requires a computed CRC32c when zero checksums are allowed.
+	rawPkt2, err := pkt.marshal(false)
 	assert.NoError(t, err)
 
 	assert.Equal(t, rawPkt, rawPkt2)
@@ -90,13 +93,23 @@ func TestChromeChunk2InitAck(t *testing.T) {
 		0x00, 0x06, 0x00, 0x01, 0x00, 0x00, 0x80, 0x03, 0x00, 0x06, 0x80, 0xc1, 0x00, 0x00, 0xca, 0x0c, 0x21, 0x11,
 		0xce, 0xf4, 0xfc, 0xb3, 0x66, 0x99, 0x4f, 0xdb, 0x4f, 0x95, 0x6b, 0x6f, 0x3b, 0xb1, 0xdb, 0x5a,
 	}
-	err := pkt.unmarshal(true, rawPkt)
-	assert.NoError(t, err)
 
-	rawPkt2, err := pkt.marshal(true)
-	assert.NoError(t, err)
+	require.NoError(t, pkt.unmarshal(true, rawPkt))
 
-	assert.Equal(t, rawPkt, rawPkt2)
+	rawStrict, err := pkt.marshal(true)
+	require.NoError(t, err)
+	assert.Equal(t, rawPkt, rawStrict)
+
+	// A peer that advertised Zero Checksum Acceptable can receive an INIT ACK with a zero checksum.
+	rawZero, err := pkt.marshal(false)
+	require.NoError(t, err)
+
+	expZero := bytes.Clone(rawPkt)
+	clear(expZero[8:packetHeaderSize])
+	assert.Equal(t, expZero, rawZero)
+
+	assert.ErrorIs(t, (&packet{}).unmarshal(true, rawZero), ErrChecksumMismatch)
+	assert.NoError(t, (&packet{}).unmarshal(false, rawZero))
 }
 
 func TestInitMarshalUnmarshal(t *testing.T) {

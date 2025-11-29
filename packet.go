@@ -19,7 +19,7 @@ var castagnoliTable = crc32.MakeTable(crc32.Castagnoli) // nolint:gochecknogloba
 var fourZeroes [4]byte // nolint:gochecknoglobals
 
 /*
-Packet represents an SCTP packet, defined in https://tools.ietf.org/html/rfc4960#section-3
+Packet represents an SCTP packet, defined in https://www.rfc-editor.org/rfc/rfc9260.html#section-3.
 An SCTP packet is composed of a common header and chunks.  A chunk
 contains either control information or user data.
 
@@ -40,7 +40,7 @@ contains either control information or user data.
 	 0                   1                   2                   3
 	 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 	+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-	|     Source Value Number      |     Destination Value Number   |
+	|     Source Port Number       |     Destination Port Number    |
 	+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 	|                      Verification Tag                         |
 	+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -66,25 +66,30 @@ var (
 	ErrChecksumMismatch            = errors.New("checksum mismatch theirs")
 )
 
-func (p *packet) unmarshal(doChecksum bool, raw []byte) error { //nolint:cyclop
+// unmarshal parses an SCTP packet and verifies its checksum.
+//
+// With requireChecksum set, the packet must have a valid CRC32c (RFC 9260 section 6.8).
+// The caller may clear requireChecksum if it advertised Zero Checksum Acceptable
+// and the path uses the advertised error detection method (RFC 9653 section 5.3).
+// Nonzero checksums and packets starting with INIT or COOKIE ECHO are always verified.
+func (p *packet) unmarshal(requireChecksum bool, raw []byte) error { //nolint:cyclop
 	if len(raw) < packetHeaderSize {
 		return fmt.Errorf("%w: raw only %d bytes, %d is the minimum length", ErrPacketRawTooSmall, len(raw), packetHeaderSize)
 	}
 
 	offset := packetHeaderSize
 
-	// Check if doing CRC32c is required.
-	// Without having SCTP AUTH implemented, this depends only on the type
-	// of the first chunk.
-	if offset+chunkHeaderSize <= len(raw) {
+	// INIT and COOKIE ECHO come first in their packets. SCTP AUTH is unsupported.
+	if !requireChecksum && offset+chunkHeaderSize <= len(raw) {
 		switch chunkType(raw[offset]) {
 		case ctInit, ctCookieEcho:
-			doChecksum = true
+			requireChecksum = true
 		default:
 		}
 	}
+
 	theirChecksum := binary.LittleEndian.Uint32(raw[8:])
-	if theirChecksum != 0 || doChecksum {
+	if theirChecksum != 0 || requireChecksum {
 		ourChecksum := generatePacketChecksum(raw)
 		if theirChecksum != ourChecksum {
 			return fmt.Errorf("%w: %d ours: %d", ErrChecksumMismatch, theirChecksum, ourChecksum)
@@ -171,7 +176,12 @@ func (p *packet) unmarshal(doChecksum bool, raw []byte) error { //nolint:cyclop
 	return nil
 }
 
-func (p *packet) marshal(doChecksum bool) ([]byte, error) {
+// marshal builds an SCTP packet.
+//
+// The caller may clear requireChecksum for a peer that advertised Zero Checksum
+// Acceptable when the path uses the advertised error detection method. Packets
+// containing INIT or COOKIE ECHO always carry a computed CRC32c (RFC 9653 section 5.2).
+func (p *packet) marshal(requireChecksum bool) ([]byte, error) {
 	raw := make([]byte, packetHeaderSize)
 
 	// Populate static headers
@@ -194,17 +204,23 @@ func (p *packet) marshal(doChecksum bool) ([]byte, error) {
 		}
 	}
 
-	if doChecksum {
-		// golang CRC32C uses reflected input and reflected output, the
-		// net result of this is to have the bytes flipped compared to
-		// the non reflected variant that the spec expects.
-		//
-		// Use LittleEndian.PutUint32 to avoid flipping the bytes in to
-		// the spec compliant checksum order
+	if requireChecksum || chunkMandatoryChecksum(p.chunks) {
+		// Go's reflected CRC32c is written in little-endian SCTP wire order.
 		binary.LittleEndian.PutUint32(raw[8:], generatePacketChecksum(raw))
 	}
 
 	return raw, nil
+}
+
+func chunkMandatoryChecksum(chunks []chunk) bool {
+	for _, c := range chunks {
+		switch c.(type) {
+		case *chunkInit, *chunkCookieEcho:
+			return true
+		}
+	}
+
+	return false
 }
 
 func generatePacketChecksum(raw []byte) (sum uint32) {
@@ -239,12 +255,12 @@ func (p *packet) String() string {
 // TryMarshalUnmarshal attempts to marshal and unmarshal a message. Added for fuzzing.
 func TryMarshalUnmarshal(msg []byte) int {
 	p := &packet{}
-	err := p.unmarshal(false, msg)
+	err := p.unmarshal(true, msg)
 	if err != nil {
 		return 0
 	}
 
-	_, err = p.marshal(false)
+	_, err = p.marshal(true)
 	if err != nil {
 		return 0
 	}
