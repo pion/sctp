@@ -75,7 +75,7 @@ func (p *packet) unmarshal(doChecksum bool, raw []byte) error { //nolint:cyclop
 
 	// Check if doing CRC32c is required.
 	// Without having SCTP AUTH implemented, this depends only on the type
-	// og the first chunk.
+	// of the first chunk.
 	if offset+chunkHeaderSize <= len(raw) {
 		switch chunkType(raw[offset]) {
 		case ctInit, ctCookieEcho:
