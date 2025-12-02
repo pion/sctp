@@ -269,10 +269,11 @@ type Config struct {
 	NetConn              net.Conn
 	MaxReceiveBufferSize uint32
 	MaxMessageSize       uint32
-	EnableZeroChecksum   bool
-	LoggerFactory        logging.LoggerFactory
-	BlockWrite           bool
-	MTU                  uint32
+	// EnableZeroChecksum enables RFC 9653 and should only be used when SCTP is carried over DTLS.
+	EnableZeroChecksum bool
+	LoggerFactory      logging.LoggerFactory
+	BlockWrite         bool
+	MTU                uint32
 
 	// congestion control configuration
 	// RTOMax is the maximum retransmission timeout in milliseconds
@@ -724,24 +725,16 @@ func (a *Association) unregisterStream(s *Stream, err error) {
 	s.readNotifier.Broadcast()
 }
 
-func chunkMandatoryChecksum(cc []chunk) bool {
-	for _, c := range cc {
-		switch c.(type) {
-		case *chunkInit, *chunkCookieEcho:
-			return true
-		}
-	}
-
-	return false
-}
-
 func (a *Association) marshalPacket(p *packet) ([]byte, error) {
-	return p.marshal(!a.sendZeroChecksum || chunkMandatoryChecksum(p.chunks))
+	// RFC 9653: pass whether zero checksum is allowed on this path.
+	// packet.marshal() will still force a correct CRC for INIT/COOKIE ECHO.
+	return p.marshal(a.sendZeroChecksum)
 }
 
 func (a *Association) unmarshalPacket(raw []byte) (*packet, error) {
 	p := &packet{}
-	if err := p.unmarshal(!a.recvZeroChecksum, raw); err != nil {
+	// Unmarshal with ZCA mode: if a.recvZeroChecksum == true, accept zero checksums per RFC 9653.
+	if err := p.unmarshal(a.recvZeroChecksum, raw); err != nil {
 		return nil, err
 	}
 
@@ -1279,7 +1272,8 @@ func (a *Association) handleInit(pkt *packet, initChunk *chunkInit) ([]*packet, 
 				}
 			}
 		case *paramZeroChecksumAcceptable:
-			a.sendZeroChecksum = v.edmid == dtlsErrorDetectionMethod
+			// Only send zero if we allow ZCA and the peer accepts it.
+			a.sendZeroChecksum = a.recvZeroChecksum && (v.edmid == dtlsErrorDetectionMethod)
 		}
 	}
 
@@ -1365,18 +1359,19 @@ func (a *Association) handleInitAck(pkt *packet, initChunkAck *chunkInitAck) err
 
 	var cookieParam *paramStateCookie
 	for _, param := range initChunkAck.params {
-		switch v := param.(type) {
+		switch paramType := param.(type) {
 		case *paramStateCookie:
-			cookieParam = v
+			cookieParam = paramType
 		case *paramSupportedExtensions:
-			for _, t := range v.ChunkTypes {
+			for _, t := range paramType.ChunkTypes {
 				if t == ctForwardTSN {
 					a.log.Debugf("[%s] use ForwardTSN (on initAck)", a.name)
 					a.useForwardTSN = true
 				}
 			}
 		case *paramZeroChecksumAcceptable:
-			a.sendZeroChecksum = v.edmid == dtlsErrorDetectionMethod
+			// Only send zero if we allow ZCA and the peer accepts it.
+			a.sendZeroChecksum = a.recvZeroChecksum && (paramType.edmid == dtlsErrorDetectionMethod)
 		}
 	}
 
