@@ -3188,7 +3188,7 @@ func TestAssociationFastRtxWnd(t *testing.T) {
 	for i := 11; i < 14; i++ {
 		ack.gapAckBlocks[0].end = uint16(i) //nolint:gosec // G115
 		pkt := a1.createPacket([]chunk{&ack})
-		pktBuf, err1 := pkt.marshal(true)
+		pktBuf, err1 := pkt.marshal(false)
 		require.NoError(t, err1)
 		dbConn1.inboundHandler(pktBuf)
 	}
@@ -3219,7 +3219,7 @@ func TestAssociationFastRtxWnd(t *testing.T) {
 	//nolint:gosec // G115
 	ack.gapAckBlocks = append(ack.gapAckBlocks, gapAckBlock{start: uint16(end), end: uint16(end)})
 	pkt := a1.createPacket([]chunk{&ack})
-	pktBuf, err := pkt.marshal(true)
+	pktBuf, err := pkt.marshal(false)
 	require.NoError(t, err)
 	dbConn1.inboundHandler(pktBuf)
 	require.Eventually(t, func() bool {
@@ -3258,7 +3258,7 @@ func TestAssociationMaxTSNOffset(t *testing.T) {
 		chunk.tsn = tsn
 		pp := a1.bundleDataChunksIntoPackets(chunks)
 		for _, p := range pp {
-			raw, err := p.marshal(true)
+			raw, err := p.marshal(false)
 			assert.NoError(t, err)
 
 			_, err = a1.netConn.Write(raw)
