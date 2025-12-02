@@ -22,6 +22,7 @@
 - [RFC 5061](https://www.rfc-editor.org/rfc/rfc5061.html) — Stream Control Transmission Protocol (SCTP) Dynamic Address Reconfiguration
 - [RFC 4895](https://www.rfc-editor.org/rfc/rfc4895.html) — Authenticated Chunks for the Stream Control Transmission Protocol (SCTP)
 - [RFC 1982](https://www.rfc-editor.org/rfc/rfc1982.html) — Serial Number Arithmetic
+- [RFC 9653](https://www.rfc-editor.org/rfc/rfc9653.html) — Zero Checksum for the Stream Control Transmission Protocol
 
 ### Partial implementations
 Pion only implements the subset of RFC 4960 that is required for WebRTC.
