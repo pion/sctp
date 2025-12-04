@@ -9,11 +9,9 @@ import (
 	"fmt"
 )
 
-// This chunk shall be used by the data sender to inform the data
-// receiver to adjust its cumulative received TSN point forward because
-// some missing TSNs are associated with data chunks that SHOULD NOT be
-// transmitted or retransmitted by the sender.
-//
+// This chunk is used by the sender to advance the cumulative TSN and
+// indicate per-stream sequence numbers that were skipped (RFC 9260).
+
 //  0                   1                   2                   3
 //  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -37,8 +35,7 @@ type chunkForwardTSN struct {
 	// any missing TSNs earlier than or equal to this value as received,
 	// and stop reporting them as gaps in any subsequent SACKs.
 	newCumulativeTSN uint32
-
-	streams []chunkForwardTSNStream
+	streams          []chunkForwardTSNStream
 }
 
 const (
@@ -48,8 +45,10 @@ const (
 
 // Forward TSN chunk errors.
 var (
-	ErrMarshalStreamFailed = errors.New("failed to marshal stream")
-	ErrChunkTooShort       = errors.New("chunk too short")
+	ErrMarshalStreamFailed          = errors.New("failed to marshal stream")
+	ErrChunkTooShort                = errors.New("chunk too short")
+	ErrChunkTypeNotForwardTSN       = errors.New("ChunkType is not of type FORWARD TSN")
+	ErrForwardTSNInvalidStreamBlock = errors.New("FORWARD TSN stream block section length invalid")
 )
 
 func (c *chunkForwardTSN) unmarshal(raw []byte) error {
@@ -57,50 +56,59 @@ func (c *chunkForwardTSN) unmarshal(raw []byte) error {
 		return err
 	}
 
+	if c.typ != ctForwardTSN {
+		return fmt.Errorf("%w: actually is %s", ErrChunkTypeNotForwardTSN, c.typ.String())
+	}
+
+	// flags are reserved: sender sets 0, receiver ignores.
+
 	if len(c.raw) < newCumulativeTSNLength {
 		return ErrChunkTooShort
 	}
 
-	c.newCumulativeTSN = binary.BigEndian.Uint32(c.raw[0:])
+	// remaining body MUST be a multiple of 4 (each stream block is 4 bytes).
+	if (len(c.raw)-newCumulativeTSNLength)%forwardTSNStreamLength != 0 {
+		return ErrForwardTSNInvalidStreamBlock
+	}
 
-	offset := newCumulativeTSNLength
-	remaining := len(c.raw) - offset
-	for remaining > 0 {
-		s := chunkForwardTSNStream{}
+	c.newCumulativeTSN = binary.BigEndian.Uint32(c.raw[0:4])
 
-		if err := s.unmarshal(c.raw[offset:]); err != nil {
+	c.streams = c.streams[:0]
+	for off := newCumulativeTSNLength; off < len(c.raw); off += forwardTSNStreamLength {
+		var s chunkForwardTSNStream
+		if err := s.unmarshal(c.raw[off:]); err != nil {
 			return fmt.Errorf("%w: %v", ErrMarshalStreamFailed, err) //nolint:errorlint
 		}
-
 		c.streams = append(c.streams, s)
-
-		offset += s.length()
-		remaining -= s.length()
 	}
 
 	return nil
 }
 
 func (c *chunkForwardTSN) marshal() ([]byte, error) {
-	out := make([]byte, newCumulativeTSNLength)
-	binary.BigEndian.PutUint32(out[0:], c.newCumulativeTSN)
+	out := make([]byte, 0, newCumulativeTSNLength+len(c.streams)*forwardTSNStreamLength)
+
+	var tsnBuf [4]byte
+	binary.BigEndian.PutUint32(tsnBuf[:], c.newCumulativeTSN)
+	out = append(out, tsnBuf[:]...)
 
 	for _, s := range c.streams {
 		b, err := s.marshal()
 		if err != nil {
 			return nil, fmt.Errorf("%w: %v", ErrMarshalStreamFailed, err) //nolint:errorlint
 		}
-		out = append(out, b...) //nolint:makezero // TODO: fix
+		out = append(out, b...)
 	}
 
-	c.typ = ctForwardTSN
-	c.raw = out
+	c.chunkHeader.typ = ctForwardTSN
+	c.chunkHeader.flags = 0 // sender MUST set to 0
+	c.chunkHeader.raw = out
 
 	return c.chunkHeader.marshal()
 }
 
 func (c *chunkForwardTSN) check() (abort bool, err error) {
-	return true, nil
+	return false, nil
 }
 
 // String makes chunkForwardTSN printable.
