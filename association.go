@@ -345,6 +345,10 @@ type Config struct {
 	rackReoWndFloor time.Duration
 	// Optional: receiver worst-case delayed-ACK for PTO when only one packet is in flight
 	rackWCDelAck time.Duration
+
+	// Local and remote SCTP init to use for SNAP
+	LocalSctpInit  []byte
+	RemoteSctpInit []byte
 }
 
 // Server accepts a SCTP stream over a conn.
@@ -370,7 +374,31 @@ func Client(config Config) (*Association, error) {
 }
 
 func createClientWithContext(ctx context.Context, config Config) (*Association, error) {
-	assoc := createAssociation(config)
+	var assoc *Association
+
+	if len(config.RemoteSctpInit) != 0 && len(config.LocalSctpInit) != 0 {
+		// SNAP, aka sctp-init in the SDP.
+		remote := &chunkInit{}
+		err := remote.unmarshal(config.RemoteSctpInit)
+		if err != nil {
+			return nil, err
+		}
+		local := &chunkInit{}
+		err = local.unmarshal(config.LocalSctpInit)
+		if err != nil {
+			return nil, err
+		}
+		assoc = createAssociationWithOutOfBandTokens(config, local, remote)
+		assoc.lock.Lock()
+		assoc.setState(established)
+		defer assoc.lock.Unlock()
+
+		go assoc.readLoop()
+		go assoc.writeLoop()
+
+		return assoc, nil
+	}
+	assoc = createAssociation(config)
 	assoc.init(true)
 
 	select {
@@ -391,6 +419,12 @@ func createClientWithContext(ctx context.Context, config Config) (*Association, 
 }
 
 func createAssociation(config Config) *Association {
+	tsn := globalMathRandomGenerator.Uint32()
+
+	return createAssociationWithTSN(config, tsn)
+}
+
+func createAssociationWithTSN(config Config, tsn uint32) *Association {
 	maxReceiveBufferSize := config.MaxReceiveBufferSize
 	if maxReceiveBufferSize == 0 {
 		maxReceiveBufferSize = initialRecvBufSize
@@ -406,7 +440,6 @@ func createAssociation(config Config) *Association {
 		mtu = initialMTU
 	}
 
-	tsn := globalMathRandomGenerator.Uint32()
 	assoc := &Association{
 		netConn:              config.NetConn,
 		maxReceiveBufferSize: maxReceiveBufferSize,
@@ -477,7 +510,7 @@ func createAssociation(config Config) *Association {
 		assoc.name = fmt.Sprintf("%p", assoc)
 	}
 
-	// RFC 4690 Sec 7.2.1
+	// RFC 4960 Sec 7.2.1
 	//  o  The initial cwnd before DATA transmission or after a sufficiently
 	//     long idle period MUST be set to min(4*MTU, max (2*MTU, 4380
 	//     bytes)).
@@ -492,6 +525,38 @@ func createAssociation(config Config) *Association {
 	assoc.t3RTX = newRTXTimer(timerT3RTX, assoc, noMaxRetrans, config.RTOMax)
 	assoc.tReconfig = newRTXTimer(timerReconfig, assoc, noMaxRetrans, config.RTOMax)
 	assoc.ackTimer = newAckTimer(assoc)
+
+	return assoc
+}
+
+func createAssociationWithOutOfBandTokens(config Config, localInit *chunkInit, remoteInit *chunkInit) *Association {
+	assoc := createAssociationWithTSN(config, localInit.initialTSN)
+	assoc.payloadQueue.init(remoteInit.initialTSN - 1)
+	assoc.myMaxNumInboundStreams = min16(localInit.numInboundStreams, remoteInit.numInboundStreams)
+	assoc.myMaxNumOutboundStreams = min16(localInit.numOutboundStreams, remoteInit.numOutboundStreams)
+	assoc.setRWND(min32(localInit.advertisedReceiverWindowCredit, remoteInit.advertisedReceiverWindowCredit))
+	assoc.peerVerificationTag = remoteInit.initiateTag
+	assoc.sourcePort = defaultSCTPSrcDstPort
+	assoc.destinationPort = defaultSCTPSrcDstPort
+	for _, param := range remoteInit.params {
+		switch v := param.(type) { // nolint:gocritic
+		case *paramSupportedExtensions:
+			for _, t := range v.ChunkTypes {
+				if t == ctForwardTSN {
+					assoc.log.Debugf("[%s] use ForwardTSN (on init)", assoc.name)
+					assoc.useForwardTSN = true
+				}
+			}
+		case *paramZeroChecksumAcceptable:
+			assoc.sendZeroChecksum = v.edmid == dtlsErrorDetectionMethod
+		}
+	}
+
+	if !assoc.useForwardTSN {
+		assoc.log.Warnf("[%s] not using ForwardTSN (on init)", assoc.name)
+	}
+
+	assoc.ssthresh = assoc.RWND()
 
 	return assoc
 }
@@ -1500,7 +1565,7 @@ func (a *Association) handleInitAck(pkt *packet, initChunkAck *chunkInitAck) err
 	a.setRWND(initChunkAck.advertisedReceiverWindowCredit)
 	a.log.Debugf("[%s] initial rwnd=%d", a.name, a.RWND())
 
-	// RFC 4690 Sec 7.2.1
+	// RFC 4960 Sec 7.2.1
 	//  o  The initial value of ssthresh MAY be arbitrarily high (for
 	//     example, implementations MAY use the size of the receiver
 	//     advertised window).
@@ -3996,4 +4061,22 @@ func (a *Association) sendActiveHeartbeatLocked() {
 		chunks:          []chunk{hb},
 	})
 	a.awakeWriteLoop()
+}
+
+// GenerateOutOfBandToken generates an out-of-band connection token (i.e. a
+// serialized SCTP INIT chunk) for use with SNAP.
+func GenerateOutOfBandToken(config Config) ([]byte, error) {
+	init := &chunkInit{}
+	init.initialTSN = globalMathRandomGenerator.Uint32()
+	init.numOutboundStreams = math.MaxUint16
+	init.numInboundStreams = math.MaxUint16
+	init.initiateTag = globalMathRandomGenerator.Uint32()
+	init.advertisedReceiverWindowCredit = config.MaxReceiveBufferSize
+	setSupportedExtensions(&init.chunkInitCommon)
+
+	if config.EnableZeroChecksum {
+		init.params = append(init.params, &paramZeroChecksumAcceptable{edmid: dtlsErrorDetectionMethod})
+	}
+
+	return init.marshal()
 }
