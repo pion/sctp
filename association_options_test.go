@@ -69,6 +69,12 @@ func TestAssociationOptions_Validation(t *testing.T) {
 		err := WithRTOMax(0).applyServer(&cfg)
 		assert.ErrorIs(t, err, errInvalidRTOMax)
 	})
+
+	t.Run("snap nil arguments", func(t *testing.T) {
+		var cfg Config
+		err := WithSNAP(nil, nil).applyServer(&cfg)
+		assert.NoError(t, err)
+	})
 }
 
 func TestClientWithOptions_ValidatesOptionValues(t *testing.T) {
