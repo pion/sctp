@@ -163,3 +163,12 @@ func WithCwndCAStep(cwndCAStep uint32) AssociationOption {
 		return nil
 	})
 }
+
+func WithSNAP(localSctpInit []byte, remoteSctpInit []byte) AssociationOption {
+	return sharedOption(func(c *Config) error {
+		c.LocalSctpInit = localSctpInit
+		c.RemoteSctpInit = remoteSctpInit
+
+		return nil
+	})
+}
