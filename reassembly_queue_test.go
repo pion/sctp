@@ -519,6 +519,45 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 		assert.Equal(t, 2, len(rq.ordered), "there should be two chunks")
 		assert.Equal(t, 6, rq.getNumBytes(), "num bytes mismatch")
 	})
+
+	t.Run("i-data ordered fragments by fsn", func(t *testing.T) {
+		rq := newReassemblyQueue(0)
+		orgPpi := PayloadTypeWebRTCBinary
+
+		chunk1 := &chunkPayloadData{
+			iData:                  true,
+			messageIdentifier:      0,
+			fragmentSequenceNumber: 1,
+			endingFragment:         true,
+			tsn:                    10,
+			streamIdentifier:       0,
+			userData:               []byte("B"),
+		}
+
+		complete := rq.push(chunk1)
+		assert.False(t, complete, "chunk set should not be complete yet")
+
+		chunk0 := &chunkPayloadData{
+			iData:                  true,
+			messageIdentifier:      0,
+			fragmentSequenceNumber: 0,
+			beginningFragment:      true,
+			tsn:                    5,
+			streamIdentifier:       0,
+			payloadType:            orgPpi,
+			userData:               []byte("A"),
+		}
+
+		complete = rq.push(chunk0)
+		assert.True(t, complete, "chunk set should be complete")
+
+		buf := make([]byte, 4)
+		n, ppi, err := rq.read(buf)
+		assert.NoError(t, err, "read() should succeed")
+		assert.Equal(t, 2, n, "should receive 2 bytes")
+		assert.Equal(t, orgPpi, ppi, "should have valid ppi")
+		assert.Equal(t, "AB", string(buf[:n]), "data should match")
+	})
 }
 
 func TestChunkSet(t *testing.T) {

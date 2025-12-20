@@ -54,11 +54,14 @@ type chunkPayloadData struct {
 	endingFragment    bool
 	immediateSack     bool
 
-	tsn                  uint32
-	streamIdentifier     uint16
-	streamSequenceNumber uint16
-	payloadType          PayloadProtocolIdentifier
-	userData             []byte
+	tsn                    uint32
+	streamIdentifier       uint16
+	streamSequenceNumber   uint16
+	messageIdentifier      uint32
+	fragmentSequenceNumber uint32
+	payloadType            PayloadProtocolIdentifier
+	userData               []byte
+	iData                  bool
 
 	// Whether this data chunk was acknowledged (received by peer)
 	acked         bool
@@ -88,6 +91,7 @@ const (
 	payloadDataImmediateSACK           = 8
 
 	payloadDataHeaderSize = 12
+	iDataHeaderSize       = 16
 )
 
 // PayloadProtocolIdentifier is an enum for DataChannel payload types.
@@ -136,19 +140,77 @@ func (p *chunkPayloadData) unmarshal(raw []byte) error {
 	p.beginningFragment = p.flags&payloadDataBeginingFragmentBitmask != 0
 	p.endingFragment = p.flags&payloadDataEndingFragmentBitmask != 0
 
-	if len(p.raw) < payloadDataHeaderSize {
-		return ErrChunkPayloadSmall
+	switch p.typ {
+	case ctPayloadData:
+		if len(p.raw) < payloadDataHeaderSize {
+			return ErrChunkPayloadSmall
+		}
+		p.tsn = binary.BigEndian.Uint32(p.raw[0:])
+		p.streamIdentifier = binary.BigEndian.Uint16(p.raw[4:])
+		p.streamSequenceNumber = binary.BigEndian.Uint16(p.raw[6:])
+		p.payloadType = PayloadProtocolIdentifier(binary.BigEndian.Uint32(p.raw[8:]))
+		p.userData = p.raw[payloadDataHeaderSize:]
+		p.iData = false
+	case ctIData:
+		if len(p.raw) < iDataHeaderSize {
+			return ErrChunkPayloadSmall
+		}
+		p.tsn = binary.BigEndian.Uint32(p.raw[0:])
+		p.streamIdentifier = binary.BigEndian.Uint16(p.raw[4:])
+		p.messageIdentifier = binary.BigEndian.Uint32(p.raw[8:])
+		if p.beginningFragment {
+			p.payloadType = PayloadProtocolIdentifier(binary.BigEndian.Uint32(p.raw[12:]))
+			p.fragmentSequenceNumber = 0
+		} else {
+			p.fragmentSequenceNumber = binary.BigEndian.Uint32(p.raw[12:])
+			p.payloadType = PayloadTypeUnknown
+		}
+		p.streamSequenceNumber = uint16(p.messageIdentifier) //nolint:gosec // lower 16 bits for API exposure
+		p.userData = p.raw[iDataHeaderSize:]
+		p.iData = true
+	default:
+		return fmt.Errorf("%w: unsupported payload data chunk type %d", ErrChunkTypeUnhandled, p.typ)
 	}
-	p.tsn = binary.BigEndian.Uint32(p.raw[0:])
-	p.streamIdentifier = binary.BigEndian.Uint16(p.raw[4:])
-	p.streamSequenceNumber = binary.BigEndian.Uint16(p.raw[6:])
-	p.payloadType = PayloadProtocolIdentifier(binary.BigEndian.Uint32(p.raw[8:]))
-	p.userData = p.raw[payloadDataHeaderSize:]
 
 	return nil
 }
 
-func (p *chunkPayloadData) marshal() ([]byte, error) {
+func (p *chunkPayloadData) marshal() ([]byte, error) { //nolint:cyclop
+	if p.isIData() { //nolint:nestif
+		payRaw := make([]byte, iDataHeaderSize+len(p.userData))
+
+		binary.BigEndian.PutUint32(payRaw[0:], p.tsn)
+		binary.BigEndian.PutUint16(payRaw[4:], p.streamIdentifier)
+		binary.BigEndian.PutUint16(payRaw[6:], 0)
+		binary.BigEndian.PutUint32(payRaw[8:], p.messageIdentifier)
+		if p.beginningFragment {
+			binary.BigEndian.PutUint32(payRaw[12:], uint32(p.payloadType))
+		} else {
+			binary.BigEndian.PutUint32(payRaw[12:], p.fragmentSequenceNumber)
+		}
+		copy(payRaw[iDataHeaderSize:], p.userData)
+
+		flags := uint8(0)
+		if p.endingFragment {
+			flags = 1
+		}
+		if p.beginningFragment {
+			flags |= 1 << 1
+		}
+		if p.unordered {
+			flags |= 1 << 2
+		}
+		if p.immediateSack {
+			flags |= 1 << 3
+		}
+
+		p.chunkHeader.flags = flags
+		p.chunkHeader.typ = ctIData
+		p.chunkHeader.raw = payRaw
+
+		return p.chunkHeader.marshal()
+	}
+
 	payRaw := make([]byte, payloadDataHeaderSize+len(p.userData))
 
 	binary.BigEndian.PutUint32(payRaw[0:], p.tsn)
@@ -184,6 +246,10 @@ func (p *chunkPayloadData) check() (abort bool, err error) {
 
 // String makes chunkPayloadData printable.
 func (p *chunkPayloadData) String() string {
+	if p.isIData() {
+		return fmt.Sprintf("%s\ntsn=%d mid=%d fsn=%d", p.chunkHeader, p.tsn, p.messageIdentifier, p.fragmentSequenceNumber)
+	}
+
 	return fmt.Sprintf("%s\n%d", p.chunkHeader, p.tsn)
 }
 
@@ -216,4 +282,16 @@ func (p *chunkPayloadData) setAllInflight() {
 
 func (p *chunkPayloadData) isFragmented() bool {
 	return p.head != nil || !p.beginningFragment || !p.endingFragment
+}
+
+func (p *chunkPayloadData) isIData() bool {
+	return p.iData || p.typ == ctIData
+}
+
+func (p *chunkPayloadData) chunkSize() int {
+	if p.isIData() {
+		return chunkHeaderSize + iDataHeaderSize + len(p.userData)
+	}
+
+	return chunkHeaderSize + payloadDataHeaderSize + len(p.userData)
 }
