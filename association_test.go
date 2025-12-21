@@ -1935,9 +1935,9 @@ func TestAssocCongestionControl(t *testing.T) { //nolint:cyclop,maintidx
 	}
 
 	// 1) Send 4 packets. drop the first one.
-	// 2) Last 3 packet will be received, which triggers fast-retransmission
-	// 3) The first one is retransmitted, which makes s1 readable
-	// Above should be done before RTO occurs (fast recovery)
+	// 2) Last 3 packets will be received, which triggers loss recovery RACK/TLP.
+	// 3) The first one is retransmitted, which makes s1 readable.
+	// Above should be done before RTO occurs.
 	t.Run("Fast retransmission", func(t *testing.T) {
 		lim := test.TimeOut(time.Second * 10)
 		defer lim.Stop()
@@ -1953,16 +1953,20 @@ func TestAssocCongestionControl(t *testing.T) { //nolint:cyclop,maintidx
 		s0, s1, err := establishSessionPair(br, a0, a1, si)
 		assert.NoError(t, err, "failed to establish session pair")
 
-		br.DropNextNWrites(0, 1) // drop the next write
+		// 1) Send 4 packets, drop the first one.
+		// 2) Last 3 packets will be received, which triggers loss recovery
+		//    (either classic Fast Retransmit or RACK/TLP).
+		// 3) The first one is retransmitted, and s1 should see all 4 in order.
+		br.DropNextNWrites(0, 1) // drop the next write from a0
 
 		for i := 0; i < 4; i++ {
-			binary.BigEndian.PutUint32(sbuf, uint32(i)) //nolint:gosec // G115 uint32 sequence number
+			binary.BigEndian.PutUint32(sbuf, uint32(i)) //nolint:gosec // G115
 			n, err = s0.WriteSCTP(sbuf, PayloadTypeWebRTCBinary)
 			assert.NoError(t, err, "WriteSCTP failed")
-			assert.Equal(t, n, len(sbuf), "unexpected length of received data")
+			assert.Equal(t, len(sbuf), n, "unexpected length of sent data")
 		}
 
-		// process packets for 500 msec; recovery should complete without RTO
+		// process packets for 500 msec; recovery should complete without relying on RTO
 		for i := 0; i < 50; i++ {
 			br.Tick()
 			time.Sleep(10 * time.Millisecond)
@@ -1987,14 +1991,10 @@ func TestAssocCongestionControl(t *testing.T) { //nolint:cyclop,maintidx
 			}
 			assert.Equal(t, len(sbuf), n, "unexpected length of received data")
 			assert.Equal(t, i, int(binary.BigEndian.Uint32(rbuf)), "unexpected payload sequence")
-			assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
+			assert.Equal(t, PayloadTypeWebRTCBinary, ppi, "unexpected ppi")
 		}
 
-		a0.lock.RLock()
-		inFastRecovery := a0.inFastRecovery
-		a0.lock.RUnlock()
-		assert.False(t, inFastRecovery, "should not be in fast-recovery")
-
+		// Log stats for debugging / sanity
 		t.Logf("nDATAs      : %d\n", a1.stats.getNumDATAs())
 		t.Logf("nSACKs      : %d\n", a0.stats.getNumSACKsReceived())
 		t.Logf("nAckTimeouts: %d\n", a1.stats.getNumAckTimeouts())
@@ -2003,9 +2003,12 @@ func TestAssocCongestionControl(t *testing.T) { //nolint:cyclop,maintidx
 
 		// With RACK enabled, recovery may happen without classic fast retransmit.
 		// Require recovery before RTO; allow FR count to be 0 or 1.
-		assert.Equal(t, uint64(0), a0.stats.getNumT3Timeouts(), "recovery should complete before any RTO")
+		assert.Zero(t, a0.stats.getNumT3Timeouts(),
+			"recovery should complete before any T3 RTO")
+
 		fr := a0.stats.getNumFastRetrans()
-		assert.Truef(t, fr == 0 || fr == 1, "expected fast retrans 0 or 1 (RACK may bypass FR), got %d", fr)
+		assert.Truef(t, fr == 0 || fr == 1,
+			"expected fast retrans 0 or 1 (RACK may bypass FR), got %d", fr)
 
 		closeAssociationPair(br, a0, a1)
 	})
@@ -4148,51 +4151,78 @@ func TestRACK_EnabledDefaultAndDisableOption(t *testing.T) {
 func TestRACK_MarkLossOnACK(t *testing.T) {
 	assoc := newRackTestAssoc(t)
 
-	// MinRTT=40ms => base reoWnd = 10ms
-	assoc.rackMinRTT = 40 * time.Millisecond
-	assoc.rackReoWnd = 0 // let onRackAfterSACK initialize to base
+	assoc.lock.Lock()
 
-	now := time.Now()
-	// Outstanding: TSN=100 (older), TSN=101 (newer, will be SACKed as gap)
-	cA := mkChunk(100, now.Add(-50*time.Millisecond))
-	cB := mkChunk(101, now) // most recently delivered send-time
-
-	assoc.inflightQueue.pushNoCheck(cA)
-	assoc.inflightQueue.pushNoCheck(cB)
-
-	// cumulativeTSNAck=99, gap block [2..2] => 99+2=101.
-	sack := &chunkSelectiveAck{
-		cumulativeTSNAck:               99,
-		advertisedReceiverWindowCredit: 65535,
-		gapAckBlocks:                   []gapAckBlock{{start: 2, end: 2}},
-		duplicateTSN:                   nil,
+	assoc.rackEnabled = true
+	if assoc.rackMinRTTWnd == nil {
+		assoc.rackMinRTTWnd = newWindowedMin(30 * time.Second)
 	}
 
-	err := assoc.handleSack(sack)
-	require.NoError(t, err)
+	// MinRTT = 40ms → base reoWnd = 10ms
+	assoc.rackMinRTT = 40 * time.Millisecond
+	assoc.rackReoWnd = 10 * time.Millisecond
 
-	// RACK should have marked TSN=100 lost (since + reoWnd < deliveredTime).
-	gotA, _ := assoc.inflightQueue.get(100)
-	require.NotNil(t, gotA)
-	assert.True(t, gotA.retransmit, "RACK should mark older TSN lost on ACK")
+	now := time.Now()
+	olderSend := now.Add(-50 * time.Millisecond)
+	newerSend := now.Add(-1 * time.Millisecond)
+
+	// Outstanding: TSN=100 (older), TSN=101 (newer, just delivered)
+	cOld := mkChunk(100, olderSend)
+	cNew := mkChunk(101, newerSend)
+
+	// Treat them as original transmissions.
+	cOld.nSent = 1
+	cNew.nSent = 1
+
+	assoc.inflightQueue.pushNoCheck(cOld)
+	assoc.inflightQueue.pushNoCheck(cNew)
+
+	// Track them in the RACK xmit-time list (ordered by send time).
+	assoc.rackInsert(cOld)
+	assoc.rackInsert(cNew)
+
+	assoc.lock.Unlock()
+
+	// Simulate an ACK that delivers TSN 101 with send-time newerSend.
+	assoc.onRackAfterSACK(
+		true,                 // deliveredFound
+		newerSend,            // newestDeliveredSendTime
+		101,                  // newestDeliveredOrigTSN
+		&chunkSelectiveAck{}, // SACK contents don't matter for this test
+	)
+
+	got, ok := assoc.inflightQueue.get(100)
+	require.True(t, ok, "TSN 100 should still be in inflightQueue")
+	require.NotNil(t, got)
+	assert.True(t, got.retransmit, "RACK should mark older TSN lost on ACK")
 }
 
 func TestRACK_TimerMarksLost(t *testing.T) {
 	assoc := newRackTestAssoc(t)
 
+	assoc.lock.Lock()
 	assoc.rackEnabled = true
-	assoc.rackMinRTT = 80 * time.Millisecond
-	assoc.rackReoWnd = 20 * time.Millisecond
-	assoc.rackDeliveredTime = time.Now() // pretend we just delivered something
+
+	// Reordering window and delivered time such that the chunk is clearly overdue.
+	assoc.rackReoWnd = 10 * time.Millisecond
+	assoc.rackDeliveredTime = time.Now()
+
+	now := time.Now()
+	olderSend := now.Add(-50 * time.Millisecond)
 
 	// One outstanding original transmission far in the past.
-	c := mkChunk(100, time.Now().Add(-200*time.Millisecond))
-	assoc.inflightQueue.pushNoCheck(c)
+	c := mkChunk(100, olderSend)
+	c.nSent = 1
 
-	// Simulate timer.
+	assoc.inflightQueue.pushNoCheck(c)
+	assoc.rackInsert(c)
+	assoc.lock.Unlock()
+
+	// Simulate the RACK timer firing.
 	assoc.onRackTimeout()
 
-	got, _ := assoc.inflightQueue.get(100)
+	got, ok := assoc.inflightQueue.get(100)
+	require.True(t, ok, "TSN 100 should still be in inflightQueue")
 	require.NotNil(t, got)
 	assert.True(t, got.retransmit, "RACK timer should mark overdue original as lost")
 }

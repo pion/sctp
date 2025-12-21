@@ -237,6 +237,9 @@ type Association struct {
 	rackHighestDeliveredOrigTSN uint32
 	rackReorderingSeen          bool // ever observed reordering for this association
 	rackKeepInflatedRecoveries  int  // keep inflated reoWnd for 16 loss recoveries
+	// RACK xmit-time ordered list
+	rackHead *chunkPayloadData
+	rackTail *chunkPayloadData
 
 	// Unified timer for RACK and PTO driven by a single goroutine.
 	// Deadlines are protected with timerMu.
@@ -921,8 +924,9 @@ func (a *Association) gatherOutboundFastRetransmissionPackets(rawPackets [][]byt
 
 		toFastRetrans := []*chunkPayloadData{}
 		fastRetransSize := commonHeaderSize
-
 		fastRetransWnd := max(a.MTU(), a.fastRtxWnd)
+		now := time.Now()
+
 		for i := 0; ; i++ {
 			chunkPayload, ok := a.inflightQueue.get(a.cumulativeTSNAckPoint + uint32(i) + 1) //nolint:gosec // G115
 			if !ok {
@@ -937,16 +941,6 @@ func (a *Association) gatherOutboundFastRetransmissionPackets(rawPackets [][]byt
 				continue
 			}
 
-			// RFC 4960 Sec 7.2.4 Fast Retransmit on Gap Reports
-			//  3)  Determine how many of the earliest (i.e., lowest TSN) DATA chunks
-			//      marked for retransmission will fit into a single packet, subject
-			//      to constraint of the path MTU of the destination transport
-			//      address to which the packet is being sent.  Call this value K.
-			//      Retransmit those K DATA chunks in a single packet.  When a Fast
-			//      Retransmit is being performed, the sender SHOULD ignore the value
-			//      of cwnd and SHOULD NOT delay retransmission for this single
-			//		packet.
-
 			dataChunkSize := dataChunkHeaderSize + uint32(len(chunkPayload.userData)) //nolint:gosec // G115
 			if fastRetransWnd < fastRetransSize+dataChunkSize {
 				break
@@ -954,7 +948,13 @@ func (a *Association) gatherOutboundFastRetransmissionPackets(rawPackets [][]byt
 
 			fastRetransSize += dataChunkSize
 			a.stats.incFastRetrans()
+
+			// Update for retransmission
 			chunkPayload.nSent++
+			chunkPayload.since = now
+			a.rackRemove(chunkPayload)
+			a.rackInsert(chunkPayload)
+
 			a.checkPartialReliabilityStatus(chunkPayload)
 			toFastRetrans = append(toFastRetrans, chunkPayload)
 			a.log.Tracef("[%s] fast-retransmit: tsn=%d sent=%d htna=%d",
@@ -1747,27 +1747,27 @@ func (a *Association) getOrCreateStream(
 //
 //nolint:gocognit,cyclop
 func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) (
-	map[uint16]int,
-	uint32,
-	time.Time,
-	uint32,
-	bool,
-	error,
+	bytesAckedPerStream map[uint16]int,
+	htna uint32,
+	newestDeliveredSendTime time.Time,
+	newestDeliveredOrigTSN uint32,
+	deliveredFound bool,
+	err error,
 ) {
-	bytesAckedPerStream := map[uint16]int{}
-	var newestDeliveredSendTime time.Time // send time of most recently delivered original chunk
-	var newestDeliveredOrigTSN uint32
-	var deliveredFound bool
+	bytesAckedPerStream = map[uint16]int{}
 	now := time.Now() // capture the time for this SACK
 
 	// New ack point, so pop all ACKed packets from inflightQueue
 	// We add 1 because the "currentAckPoint" has already been popped from the inflight queue
 	// For the first SACK we take care of this by setting the ackpoint to cumAck - 1
-	for i := a.cumulativeTSNAckPoint + 1; sna32LTE(i, selectiveAckChunk.cumulativeTSNAck); i++ {
-		chunkPayload, ok := a.inflightQueue.pop(i)
+	for idx := a.cumulativeTSNAckPoint + 1; sna32LTE(idx, selectiveAckChunk.cumulativeTSNAck); idx++ {
+		chunkPayload, ok := a.inflightQueue.pop(idx)
 		if !ok {
-			return nil, 0, time.Time{}, 0, false, fmt.Errorf("%w: %v", ErrInflightQueueTSNPop, i)
+			return nil, 0, time.Time{}, 0, false, fmt.Errorf("%w: %v", ErrInflightQueueTSNPop, idx)
 		}
+
+		// RACK: remove from xmit-time list since it's delivered
+		a.rackRemove(chunkPayload)
 
 		if !chunkPayload.acked { //nolint:nestif
 			// RFC 4960 sec 6.3.2.  Retransmission Timer Rules
@@ -1775,7 +1775,7 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 			//        with the earliest outstanding TSN for that address, restart the
 			//        T3-rtx timer for that address with its current RTO (if there is
 			//        still outstanding data on that address).
-			if i == a.cumulativeTSNAckPoint+1 {
+			if idx == a.cumulativeTSNAckPoint+1 {
 				// T3 timer needs to be reset. Stop it for now.
 				a.t3RTX.stop()
 			}
@@ -1798,38 +1798,44 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 			//        packets that were retransmitted (and thus for which it is
 			//        ambiguous whether the reply was for the first instance of the
 			//        chunk or for a later instance)
-			if chunkPayload.nSent == 1 && sna32GTE(chunkPayload.tsn, a.minTSN2MeasureRTT) {
-				a.minTSN2MeasureRTT = a.myNextTSN
-				rtt := now.Sub(chunkPayload.since).Seconds() * 1000.0
-				srtt := a.rtoMgr.setNewRTT(rtt)
-				a.srtt.Store(srtt)
+			if sna32GTE(chunkPayload.tsn, a.minTSN2MeasureRTT) {
+				// Only original transmissions for classic RTT measurement (Karn's rule)
+				if chunkPayload.nSent == 1 {
+					a.minTSN2MeasureRTT = a.myNextTSN
+					rtt := now.Sub(chunkPayload.since).Seconds() * 1000.0
+					srtt := a.rtoMgr.setNewRTT(rtt)
+					a.srtt.Store(srtt)
 
-				// RACK (NOT RFC 4960): track minRTT and latest delivered *original* send time
+					if a.rackEnabled {
+						// use a window to determine minRtt instead of a global min
+						// as the RTT can fluctuate, which can cause problems if going from a
+						// high RTT to a low RTT.
+						a.rackMinRTTWnd.Push(now, now.Sub(chunkPayload.since))
+					}
+
+					a.log.Tracef("[%s] SACK: measured-rtt=%f srtt=%f new-rto=%f",
+						a.name, rtt, srtt, a.rtoMgr.getRTO())
+				}
+
 				if a.rackEnabled {
-					// use a window to determine minRtt instead of a global min
-					// as the RTT can fluctuate, which can cause problems if going from a
-					// high RTT to a low RTT.
-					a.rackMinRTTWnd.Push(now, now.Sub(chunkPayload.since))
-
+					// RFC 8985 (RACK) sec 5.2: RACK.segment is the most recently sent
+					// segment that has been delivered, including retransmissions.
 					if chunkPayload.since.After(newestDeliveredSendTime) {
 						newestDeliveredSendTime = chunkPayload.since
 						newestDeliveredOrigTSN = chunkPayload.tsn
 						deliveredFound = true
 					}
 				}
-
-				a.log.Tracef("[%s] SACK: measured-rtt=%f srtt=%f new-rto=%f",
-					a.name, rtt, srtt, a.rtoMgr.getRTO())
 			}
-		}
 
-		if a.inFastRecovery && chunkPayload.tsn == a.fastRecoverExitPoint {
-			a.log.Debugf("[%s] exit fast-recovery", a.name)
-			a.inFastRecovery = false
+			if a.inFastRecovery && chunkPayload.tsn == a.fastRecoverExitPoint {
+				a.log.Debugf("[%s] exit fast-recovery", a.name)
+				a.inFastRecovery = false
+			}
 		}
 	}
 
-	htna := selectiveAckChunk.cumulativeTSNAck
+	htna = selectiveAckChunk.cumulativeTSNAck
 
 	// Mark selectively acknowledged chunks as "acked"
 	for _, g := range selectiveAckChunk.gapAckBlocks {
@@ -1839,6 +1845,9 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 			if !ok {
 				return nil, 0, time.Time{}, 0, false, fmt.Errorf("%w: %v", ErrTSNRequestNotExist, tsn)
 			}
+
+			// RACK: remove from xmit-time list since it's delivered
+			a.rackRemove(chunkPayload)
 
 			if !chunkPayload.acked { //nolint:nestif
 				nBytesAcked := a.inflightQueue.markAsAcked(tsn)
@@ -1852,30 +1861,35 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 
 				a.log.Tracef("[%s] tsn=%d has been sacked", a.name, chunkPayload.tsn)
 
-				if chunkPayload.nSent == 1 {
-					a.minTSN2MeasureRTT = a.myNextTSN
-					rtt := now.Sub(chunkPayload.since).Seconds() * 1000.0
-					srtt := a.rtoMgr.setNewRTT(rtt)
-					a.srtt.Store(srtt)
+				// RTT / RTO and RACK updates
+				if sna32GTE(chunkPayload.tsn, a.minTSN2MeasureRTT) {
+					// Only original transmissions for classic RTT measurement
+					if chunkPayload.nSent == 1 {
+						a.minTSN2MeasureRTT = a.myNextTSN
+						rtt := now.Sub(chunkPayload.since).Seconds() * 1000.0
+						srtt := a.rtoMgr.setNewRTT(rtt)
+						a.srtt.Store(srtt)
 
-					// RACK
+						if a.rackEnabled {
+							a.rackMinRTTWnd.Push(now, now.Sub(chunkPayload.since))
+						}
+
+						a.log.Tracef("[%s] SACK: measured-rtt=%f srtt=%f new-rto=%f",
+							a.name, rtt, srtt, a.rtoMgr.getRTO())
+					}
+
 					if a.rackEnabled {
-						a.rackMinRTTWnd.Push(now, now.Sub(chunkPayload.since))
-
 						if chunkPayload.since.After(newestDeliveredSendTime) {
 							newestDeliveredSendTime = chunkPayload.since
 							newestDeliveredOrigTSN = chunkPayload.tsn
 							deliveredFound = true
 						}
 					}
-
-					a.log.Tracef("[%s] SACK: measured-rtt=%f srtt=%f new-rto=%f",
-						a.name, rtt, srtt, a.rtoMgr.getRTO())
 				}
+			}
 
-				if sna32LT(htna, tsn) {
-					htna = tsn
-				}
+			if sna32LT(htna, tsn) {
+				htna = tsn
 			}
 		}
 	}
@@ -2485,16 +2499,14 @@ func (a *Association) movePendingDataChunkToInflightQueue(chunkPayload *chunkPay
 		a.log.Errorf("[%s] failed to pop from pending queue: %s", a.name, err.Error())
 	}
 
-	// Mark all fragements are in-flight now
 	if chunkPayload.endingFragment {
 		chunkPayload.setAllInflight()
 	}
 
-	// Assign TSN
+	// Assign TSN and original send time
 	chunkPayload.tsn = a.generateNextTSN()
-
-	chunkPayload.since = time.Now() // use to calculate RTT and also for maxPacketLifeTime
-	chunkPayload.nSent = 1          // being sent for the first time
+	chunkPayload.since = time.Now()
+	chunkPayload.nSent = 1
 
 	a.checkPartialReliabilityStatus(chunkPayload)
 
@@ -2511,6 +2523,9 @@ func (a *Association) movePendingDataChunkToInflightQueue(chunkPayload *chunkPay
 	)
 
 	a.inflightQueue.pushNoCheck(chunkPayload)
+
+	// RACK: track outstanding original transmissions by send time.
+	a.rackInsert(chunkPayload)
 }
 
 // popPendingDataChunksToSend pops chunks from the pending queues as many as
@@ -2671,6 +2686,7 @@ func (a *Association) checkPartialReliabilityStatus(chunkPayload *chunkPayloadDa
 		if stream.reliabilityType == ReliabilityTypeRexmit {
 			if chunkPayload.nSent >= stream.reliabilityValue {
 				chunkPayload.setAbandoned(true)
+				a.rackRemove(chunkPayload)
 				a.log.Tracef(
 					"[%s] marked as abandoned: tsn=%d ppi=%d (remix: %d)",
 					a.name, chunkPayload.tsn, chunkPayload.payloadType, chunkPayload.nSent,
@@ -2680,6 +2696,7 @@ func (a *Association) checkPartialReliabilityStatus(chunkPayload *chunkPayloadDa
 			elapsed := int64(time.Since(chunkPayload.since).Seconds() * 1000)
 			if elapsed >= int64(stream.reliabilityValue) {
 				chunkPayload.setAbandoned(true)
+				a.rackRemove(chunkPayload)
 				a.log.Tracef(
 					"[%s] marked as abandoned: tsn=%d ppi=%d (timed: %d)",
 					a.name, chunkPayload.tsn, chunkPayload.payloadType, elapsed,
@@ -2701,6 +2718,7 @@ func (a *Association) getDataPacketsToRetransmit() []*packet {
 	chunks := []*chunkPayloadData{}
 	var bytesToSend int
 	var done bool
+	now := time.Now()
 
 	for i := 0; !done; i++ {
 		chunkPayload, ok := a.inflightQueue.get(a.cumulativeTSNAckPoint + uint32(i) + 1) //nolint:gosec // G115
@@ -2724,7 +2742,11 @@ func (a *Association) getDataPacketsToRetransmit() []*packet {
 		chunkPayload.retransmit = false
 		bytesToSend += len(chunkPayload.userData)
 
+		// Update for retransmission
 		chunkPayload.nSent++
+		chunkPayload.since = now
+		a.rackRemove(chunkPayload)
+		a.rackInsert(chunkPayload)
 
 		a.checkPartialReliabilityStatus(chunkPayload)
 
@@ -3297,30 +3319,55 @@ func (a *Association) onRackAfterSACK( // nolint:gocognit,cyclop,gocyclo
 	// 3) Loss marking on ACK: any outstanding chunk whose (send_time + reoWnd) < newestDeliveredSendTime
 	// is lost (RACK for SCTP section 2A)
 	if !a.rackDeliveredTime.IsZero() {
-		for i := a.cumulativeTSNAckPoint + 1; ; i++ {
-			chunk, ok := a.inflightQueue.get(i)
-			if !ok {
-				break
-			}
+		marked := false
 
-			if chunk.acked || chunk.abandoned() || chunk.retransmit || chunk.nSent > 1 {
+		for chunk := a.rackHead; chunk != nil; {
+			next := chunk.rackNext // save in case we remove c
+
+			// but clean up if they exist.
+			if chunk.acked || chunk.abandoned() {
+				a.rackRemove(chunk)
+				chunk = next
+
 				continue
 			}
 
-			if chunk.since.Add(a.rackReoWnd).Before(a.rackDeliveredTime) {
-				chunk.retransmit = true
-				a.log.Tracef("[%s] RACK: mark lost tsn=%d (sent=%v, delivered=%v, reoWnd=%v)",
-					a.name, chunk.tsn, chunk.since, a.rackDeliveredTime, a.rackReoWnd)
+			if chunk.retransmit || chunk.nSent > 1 {
+				// Either already scheduled for retransmit or not an original send:
+				// skip but keep in list in case it's still outstanding.
+				chunk = next
+
+				continue
 			}
+
+			// Ordered by original send time. If this one is too new,
+			// all later ones are even newer -> short-circuit.
+			if !chunk.since.Add(a.rackReoWnd).Before(a.rackDeliveredTime) {
+				break
+			}
+
+			// Mark as lost by RACK.
+			chunk.retransmit = true
+			marked = true
+
+			// Remove from xmit-time list: we no longer need RACK for this TSN.
+			a.rackRemove(chunk)
+
+			a.log.Tracef("[%s] RACK: mark lost tsn=%d (sent=%v, delivered=%v, reoWnd=%v)",
+				a.name, chunk.tsn, chunk.since, a.rackDeliveredTime, a.rackReoWnd)
+
+			chunk = next
 		}
-		// if we marked anything then wake the writer
-		a.awakeWriteLoop()
+
+		if marked {
+			a.awakeWriteLoop()
+		}
 	}
 
 	// 4) Arm the RACK timer if there are still outstanding but not-yet-overdue chunks (RACK for SCTP section 2A)
-	if a.inflightQueue.size() > 0 && !a.rackDeliveredTime.IsZero() {
+	if a.rackHead != nil && !a.rackDeliveredTime.IsZero() {
 		// RackRTT = RTT of the most recently delivered packet
-		rackRTT := max(now.Sub(a.rackDeliveredTime), time.Duration(0))
+		rackRTT := max(time.Since(a.rackDeliveredTime), time.Duration(0))
 		a.startRackTimer(rackRTT + a.rackReoWnd) // RACK for SCTP section 2A
 	} else {
 		a.stopRackTimer()
@@ -3383,22 +3430,34 @@ func (a *Association) onRackTimeoutLocked() { //nolint:cyclop
 	}
 
 	marked := false
-	for i := a.cumulativeTSNAckPoint + 1; ; i++ {
-		chunk, ok := a.inflightQueue.get(i)
 
-		if !ok {
-			break
+	for chunk := a.rackHead; chunk != nil; {
+		next := chunk.rackNext
+
+		if chunk.acked || chunk.abandoned() {
+			a.rackRemove(chunk)
+			chunk = next
+
+			continue
 		}
+		if chunk.retransmit || chunk.nSent > 1 {
+			chunk = next
 
-		if chunk.acked || chunk.abandoned() || chunk.retransmit || chunk.nSent > 1 {
 			continue
 		}
 
-		if chunk.since.Add(a.rackReoWnd).Before(a.rackDeliveredTime) {
-			chunk.retransmit = true
-			marked = true
-			a.log.Tracef("[%s] RACK timer: mark lost tsn=%d", a.name, chunk.tsn)
+		if !chunk.since.Add(a.rackReoWnd).Before(a.rackDeliveredTime) {
+			// too new, later ones are newer so we can skip.
+			break
 		}
+
+		chunk.retransmit = true
+		marked = true
+		a.rackRemove(chunk)
+
+		a.log.Tracef("[%s] RACK timer: mark lost tsn=%d", a.name, chunk.tsn)
+
+		chunk = next
 	}
 
 	if marked {
@@ -3452,4 +3511,41 @@ func (a *Association) pokeTimerLoop() {
 	case a.timerUpdateCh <- struct{}{}:
 	default:
 	}
+}
+
+func (a *Association) rackInsert(c *chunkPayloadData) {
+	if !a.rackEnabled || c == nil || c.rackInList {
+		return
+	}
+
+	if a.rackTail != nil {
+		a.rackTail.rackNext = c
+		c.rackPrev = a.rackTail
+	} else {
+		a.rackHead = c
+	}
+	a.rackTail = c
+	c.rackInList = true
+}
+
+func (a *Association) rackRemove(chunk *chunkPayloadData) {
+	if !a.rackEnabled || chunk == nil || !chunk.rackInList {
+		return
+	}
+
+	if prev := chunk.rackPrev; prev != nil {
+		prev.rackNext = chunk.rackNext
+	} else {
+		a.rackHead = chunk.rackNext
+	}
+
+	if next := chunk.rackNext; next != nil {
+		next.rackPrev = chunk.rackPrev
+	} else {
+		a.rackTail = chunk.rackPrev
+	}
+
+	chunk.rackPrev = nil
+	chunk.rackNext = nil
+	chunk.rackInList = false
 }
