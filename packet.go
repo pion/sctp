@@ -94,16 +94,19 @@ func (p *packet) unmarshal(doChecksum bool, raw []byte) error { //nolint:cyclop
 	p.destinationPort = binary.BigEndian.Uint16(raw[2:])
 	p.verificationTag = binary.BigEndian.Uint32(raw[4:])
 
-	for {
-		// Exact match, no more chunks
-		if offset == len(raw) {
-			break
-		} else if offset+chunkHeaderSize > len(raw) {
-			return fmt.Errorf("%w: offset %d remaining %d", ErrParseSCTPChunkNotEnoughData, offset, len(raw))
+	for offset < len(raw) {
+		// guaranteed to be safe by loop condition
+		remaining := raw[offset:] // nolint:gosec
+
+		// must have at least a full chunk header to continue.
+		if len(remaining) < chunkHeaderSize {
+			return fmt.Errorf("%w: offset %d remaining %d", ErrParseSCTPChunkNotEnoughData, offset, len(remaining))
 		}
 
+		ctype := chunkType(remaining[0])
+
 		var dataChunk chunk
-		switch chunkType(raw[offset]) {
+		switch ctype {
 		case ctInit:
 			dataChunk = &chunkInit{}
 		case ctInitAck:
@@ -133,16 +136,31 @@ func (p *packet) unmarshal(doChecksum bool, raw []byte) error { //nolint:cyclop
 		case ctShutdownComplete:
 			dataChunk = &chunkShutdownComplete{}
 		default:
-			return fmt.Errorf("%w: %s", ErrUnmarshalUnknownChunkType, chunkType(raw[offset]).String())
+			return fmt.Errorf("%w: %s", ErrUnmarshalUnknownChunkType, ctype.String())
 		}
 
-		if err := dataChunk.unmarshal(raw[offset:]); err != nil {
+		if err := dataChunk.unmarshal(remaining); err != nil {
 			return err
 		}
 
 		p.chunks = append(p.chunks, dataChunk)
 		chunkValuePadding := getPadding(dataChunk.valueLength())
 		offset += chunkHeaderSize + dataChunk.valueLength() + chunkValuePadding
+	}
+
+	// if we overshot then should error.
+	if offset != len(raw) {
+		if offset > len(raw) {
+			overshoot := offset - len(raw)
+
+			return fmt.Errorf("%w: parsed past end of buffer by %d bytes (offset %d, length %d)",
+				ErrParseSCTPChunkNotEnoughData, overshoot, offset, len(raw))
+		}
+
+		remaining := len(raw) - offset
+
+		return fmt.Errorf("%w: unparsed data remaining: %d bytes (offset %d, length %d)",
+			ErrParseSCTPChunkNotEnoughData, remaining, offset, len(raw))
 	}
 
 	return nil
