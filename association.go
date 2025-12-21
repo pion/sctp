@@ -229,7 +229,6 @@ type Association struct {
 	ackTimer   *ackTimer
 
 	// RACK / TLP state
-	rackEnabled                 bool
 	rackReoWnd                  time.Duration // dynamic reordering window
 	rackMinRTT                  time.Duration // min observed RTT
 	rackMinRTTWnd               *windowedMin  // the window used to determine minRTT, defaults to 30s
@@ -307,14 +306,14 @@ type Config struct {
 	// Step of congestion window increase at Congestion Avoidance
 	CwndCAStep uint32
 
-	// Whether RACK loss detection is disabled (default: false, which means RACK is enabled)
-	DisableRACK bool
+	// The RACK configs are currently private as SCTP will be reworked to use the
+	// modern options pattern in a future release.
 	// Optional: size of window used to determine minimum RTT for RACK (defaults to 30s)
-	RACKMinRTTWnd time.Duration
+	rackMinRTTWnd time.Duration
 	// Optional: cap the minimum reordering window: 0 = use quarter-RTT
-	RACKReoWndFloor time.Duration
+	rackReoWndFloor time.Duration
 	// Optional: receiver worst-case delayed-ACK for PTO when only one packet is in flight
-	RACKWCDelAck time.Duration
+	rackWCDelAck time.Duration
 }
 
 // Server accepts a SCTP stream over a conn.
@@ -425,25 +424,19 @@ func createAssociation(config Config) *Association {
 	}
 
 	// RACK defaults
-	assoc.rackEnabled = true
-
-	if config.DisableRACK {
-		assoc.rackEnabled = false
-	} else if assoc.rackEnabled {
-		assoc.rackWCDelAck = config.RACKWCDelAck
-		if assoc.rackWCDelAck == 0 {
-			assoc.rackWCDelAck = 200 * time.Millisecond // WCDelAckT, RACK for SCTP section 2C
-		}
-
-		// defaults to 30s window to determine minRTT
-		assoc.rackMinRTTWnd = newWindowedMin(config.RACKMinRTTWnd)
-
-		assoc.timerUpdateCh = make(chan struct{}, 1)
-		go assoc.timerLoop()
-
-		assoc.rackReoWndFloor = config.RACKReoWndFloor // optional floor; usually 0
-		assoc.rackKeepInflatedRecoveries = 0
+	assoc.rackWCDelAck = config.rackWCDelAck
+	if assoc.rackWCDelAck == 0 {
+		assoc.rackWCDelAck = 200 * time.Millisecond // WCDelAckT, RACK for SCTP section 2C
 	}
+
+	// defaults to 30s window to determine minRTT
+	assoc.rackMinRTTWnd = newWindowedMin(config.rackMinRTTWnd)
+
+	assoc.timerUpdateCh = make(chan struct{}, 1)
+	go assoc.timerLoop()
+
+	assoc.rackReoWndFloor = config.rackReoWndFloor // optional floor; usually 0
+	assoc.rackKeepInflatedRecoveries = 0
 
 	if assoc.name == "" {
 		assoc.name = fmt.Sprintf("%p", assoc)
@@ -1806,25 +1799,21 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 					srtt := a.rtoMgr.setNewRTT(rtt)
 					a.srtt.Store(srtt)
 
-					if a.rackEnabled {
-						// use a window to determine minRtt instead of a global min
-						// as the RTT can fluctuate, which can cause problems if going from a
-						// high RTT to a low RTT.
-						a.rackMinRTTWnd.Push(now, now.Sub(chunkPayload.since))
-					}
+					// use a window to determine minRtt instead of a global min
+					// as the RTT can fluctuate, which can cause problems if going from a
+					// high RTT to a low RTT.
+					a.rackMinRTTWnd.Push(now, now.Sub(chunkPayload.since))
 
 					a.log.Tracef("[%s] SACK: measured-rtt=%f srtt=%f new-rto=%f",
 						a.name, rtt, srtt, a.rtoMgr.getRTO())
 				}
 
-				if a.rackEnabled {
-					// RFC 8985 (RACK) sec 5.2: RACK.segment is the most recently sent
-					// segment that has been delivered, including retransmissions.
-					if chunkPayload.since.After(newestDeliveredSendTime) {
-						newestDeliveredSendTime = chunkPayload.since
-						newestDeliveredOrigTSN = chunkPayload.tsn
-						deliveredFound = true
-					}
+				// RFC 8985 (RACK) sec 5.2: RACK.segment is the most recently sent
+				// segment that has been delivered, including retransmissions.
+				if chunkPayload.since.After(newestDeliveredSendTime) {
+					newestDeliveredSendTime = chunkPayload.since
+					newestDeliveredOrigTSN = chunkPayload.tsn
+					deliveredFound = true
 				}
 			}
 
@@ -1870,20 +1859,16 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 						srtt := a.rtoMgr.setNewRTT(rtt)
 						a.srtt.Store(srtt)
 
-						if a.rackEnabled {
-							a.rackMinRTTWnd.Push(now, now.Sub(chunkPayload.since))
-						}
+						a.rackMinRTTWnd.Push(now, now.Sub(chunkPayload.since))
 
 						a.log.Tracef("[%s] SACK: measured-rtt=%f srtt=%f new-rto=%f",
 							a.name, rtt, srtt, a.rtoMgr.getRTO())
 					}
 
-					if a.rackEnabled {
-						if chunkPayload.since.After(newestDeliveredSendTime) {
-							newestDeliveredSendTime = chunkPayload.since
-							newestDeliveredOrigTSN = chunkPayload.tsn
-							deliveredFound = true
-						}
+					if chunkPayload.since.After(newestDeliveredSendTime) {
+						newestDeliveredSendTime = chunkPayload.since
+						newestDeliveredOrigTSN = chunkPayload.tsn
+						deliveredFound = true
 					}
 				}
 			}
@@ -2139,9 +2124,7 @@ func (a *Association) handleSack(selectiveAckChunk *chunkSelectiveAck) error {
 	a.postprocessSack(state, cumTSNAckPointAdvanced)
 
 	// RACK
-	if a.rackEnabled {
-		a.onRackAfterSACK(deliveredFound, newestDeliveredSendTime, newestDeliveredOrigTSN, selectiveAckChunk)
-	}
+	a.onRackAfterSACK(deliveredFound, newestDeliveredSendTime, newestDeliveredOrigTSN, selectiveAckChunk)
 
 	return nil
 }
@@ -2718,7 +2701,7 @@ func (a *Association) getDataPacketsToRetransmit() []*packet {
 	chunks := []*chunkPayloadData{}
 	var bytesToSend int
 	var done bool
-	now := time.Now()
+	currRtxTimestamp := time.Now()
 
 	for i := 0; !done; i++ {
 		chunkPayload, ok := a.inflightQueue.get(a.cumulativeTSNAckPoint + uint32(i) + 1) //nolint:gosec // G115
@@ -2744,7 +2727,7 @@ func (a *Association) getDataPacketsToRetransmit() []*packet {
 
 		// Update for retransmission
 		chunkPayload.nSent++
-		chunkPayload.since = now
+		chunkPayload.since = currRtxTimestamp
 		a.rackRemove(chunkPayload)
 		a.rackInsert(chunkPayload)
 
@@ -3090,11 +3073,15 @@ func (a *Association) completeHandshake(handshakeErr error) bool {
 	return false
 }
 
-func (a *Association) startRackTimer(dur time.Duration) {
-	if !a.rackEnabled {
-		return
+func (a *Association) pokeTimerLoop() {
+	// enqueue a single wake-up without blocking.
+	select {
+	case a.timerUpdateCh <- struct{}{}:
+	default:
 	}
+}
 
+func (a *Association) startRackTimer(dur time.Duration) {
 	a.timerMu.Lock()
 
 	if dur <= 0 {
@@ -3109,10 +3096,6 @@ func (a *Association) startRackTimer(dur time.Duration) {
 }
 
 func (a *Association) stopRackTimer() {
-	if !a.rackEnabled {
-		return
-	}
-
 	a.timerMu.Lock()
 	a.rackDeadline = time.Time{}
 	a.timerMu.Unlock()
@@ -3121,10 +3104,6 @@ func (a *Association) stopRackTimer() {
 }
 
 func (a *Association) startPTOTimer(dur time.Duration) {
-	if !a.rackEnabled {
-		return
-	}
-
 	a.timerMu.Lock()
 
 	if dur <= 0 {
@@ -3139,10 +3118,6 @@ func (a *Association) startPTOTimer(dur time.Duration) {
 }
 
 func (a *Association) stopPTOTimer() {
-	if !a.rackEnabled {
-		return
-	}
-
 	a.timerMu.Lock()
 	a.ptoDeadline = time.Time{}
 	a.timerMu.Unlock()
@@ -3224,17 +3199,17 @@ func (a *Association) timerLoop() { //nolint:gocognit,cyclop
 			armed = false
 
 			// snapshot & clear due deadlines before firing to avoid races with re-arms.
-			now := time.Now()
+			currTime := time.Now()
 			var fireRack, firePTO bool
 
 			a.timerMu.Lock()
 
-			if !a.rackDeadline.IsZero() && !now.Before(a.rackDeadline) {
+			if !a.rackDeadline.IsZero() && !currTime.Before(a.rackDeadline) {
 				fireRack = true
 				a.rackDeadline = time.Time{}
 			}
 
-			if !a.ptoDeadline.IsZero() && !now.Before(a.ptoDeadline) {
+			if !a.ptoDeadline.IsZero() && !currTime.Before(a.ptoDeadline) {
 				firePTO = true
 				a.ptoDeadline = time.Time{}
 			}
@@ -3260,7 +3235,8 @@ func (a *Association) onRackAfterSACK( // nolint:gocognit,cyclop,gocyclo
 	newestDeliveredOrigTSN uint32,
 	sack *chunkSelectiveAck,
 ) {
-	now := time.Now()
+	// store the current time for when we check if it's needed in step 2 (whether we should maintain ReoWND)
+	currTime := time.Now()
 
 	// 1) Update highest delivered original TSN for reordering detection (section 2B)
 	if deliveredFound {
@@ -3276,7 +3252,7 @@ func (a *Association) onRackAfterSACK( // nolint:gocognit,cyclop,gocyclo
 	}
 
 	// 2) Maintain ReoWND (RACK for SCTP section 2B)
-	if minRTT := a.rackMinRTTWnd.Min(now); minRTT > 0 {
+	if minRTT := a.rackMinRTTWnd.Min(currTime); minRTT > 0 {
 		a.rackMinRTT = minRTT
 	}
 
@@ -3396,10 +3372,6 @@ func (a *Association) onRackAfterSACK( // nolint:gocognit,cyclop,gocyclo
 // schedulePTOAfterSendLocked starts/restarts the PTO timer when new data is transmitted.
 // Caller must hold a.lock.
 func (a *Association) schedulePTOAfterSendLocked() {
-	if !a.rackEnabled {
-		return
-	}
-
 	var pto time.Duration
 	if srttMs := a.SRTT(); srttMs > 0 {
 		srtt := time.Duration(srttMs * 1e6)
@@ -3425,7 +3397,7 @@ func (a *Association) onRackTimeout() {
 }
 
 func (a *Association) onRackTimeoutLocked() { //nolint:cyclop
-	if !a.rackEnabled || a.rackDeliveredTime.IsZero() {
+	if a.rackDeliveredTime.IsZero() {
 		return
 	}
 
@@ -3472,10 +3444,6 @@ func (a *Association) onPTOTimer() {
 }
 
 func (a *Association) onPTOTimerLocked() {
-	if !a.rackEnabled {
-		return
-	}
-
 	// Prefer unsent data if any
 	if a.pendingQueue.size() > 0 {
 		a.awakeWriteLoop()
@@ -3505,16 +3473,8 @@ func (a *Association) onPTOTimerLocked() {
 	}
 }
 
-func (a *Association) pokeTimerLoop() {
-	// enqueue a single wake-up without blocking.
-	select {
-	case a.timerUpdateCh <- struct{}{}:
-	default:
-	}
-}
-
 func (a *Association) rackInsert(c *chunkPayloadData) {
-	if !a.rackEnabled || c == nil || c.rackInList {
+	if c == nil || c.rackInList {
 		return
 	}
 
@@ -3529,7 +3489,7 @@ func (a *Association) rackInsert(c *chunkPayloadData) {
 }
 
 func (a *Association) rackRemove(chunk *chunkPayloadData) {
-	if !a.rackEnabled || chunk == nil || !chunk.rackInList {
+	if chunk == nil || !chunk.rackInList {
 		return
 	}
 

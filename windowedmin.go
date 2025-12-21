@@ -3,7 +3,10 @@
 
 package sctp
 
-import "time"
+import (
+	"sort"
+	"time"
+)
 
 // windowedMin maintains a monotonic deque of (time,value) to answer
 // the minimum over a sliding window efficiently.
@@ -28,14 +31,18 @@ func newWindowedMin(window time.Duration) *windowedMin {
 
 // prune removes elements older than (now - wnd).
 func (window *windowedMin) prune(now time.Time) {
-	cutoff := now.Add(-window.rackMinRTTWnd)
-	i := 0
-	for i < len(window.deque) && window.deque[i].t.Before(cutoff) {
-		i++
+	if len(window.deque) == 0 {
+		return
 	}
 
-	if i > 0 {
-		window.deque = window.deque[i:]
+	cutoff := now.Add(-window.rackMinRTTWnd)
+
+	firstValidTSAfterCutoff := sort.Search(len(window.deque), func(i int) bool {
+		return !window.deque[i].t.Before(cutoff) // no builtin func for >= cutoff time
+	})
+
+	if firstValidTSAfterCutoff > 0 {
+		window.deque = window.deque[firstValidTSAfterCutoff:]
 	}
 }
 

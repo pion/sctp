@@ -4112,7 +4112,6 @@ func newRackTestAssoc(t *testing.T) *Association {
 	assoc.payloadQueue = newReceivePayloadQueue(getMaxTSNOffset(assoc.maxReceiveBufferSize))
 
 	// RACK defaults for tests
-	assoc.rackEnabled = true
 	assoc.rackReorderingSeen = false
 	assoc.rackReoWndFloor = 0
 
@@ -4135,25 +4134,11 @@ func mkChunk(tsn uint32, since time.Time) *chunkPayloadData {
 	}
 }
 
-func TestRACK_EnabledDefaultAndDisableOption(t *testing.T) {
-	// default -> enabled
-	a := createAssociation(Config{LoggerFactory: logging.NewDefaultLoggerFactory()})
-	assert.True(t, a.rackEnabled, "RACK should be enabled by default")
-
-	// DisableRACK -> disabled
-	b := createAssociation(Config{
-		LoggerFactory: logging.NewDefaultLoggerFactory(),
-		DisableRACK:   true,
-	})
-	assert.False(t, b.rackEnabled, "RACK should be disabled when DisableRACK is set")
-}
-
 func TestRACK_MarkLossOnACK(t *testing.T) {
 	assoc := newRackTestAssoc(t)
 
 	assoc.lock.Lock()
 
-	assoc.rackEnabled = true
 	if assoc.rackMinRTTWnd == nil {
 		assoc.rackMinRTTWnd = newWindowedMin(30 * time.Second)
 	}
@@ -4201,7 +4186,6 @@ func TestRACK_TimerMarksLost(t *testing.T) {
 	assoc := newRackTestAssoc(t)
 
 	assoc.lock.Lock()
-	assoc.rackEnabled = true
 
 	// Reordering window and delivered time such that the chunk is clearly overdue.
 	assoc.rackReoWnd = 10 * time.Millisecond
