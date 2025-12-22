@@ -2610,7 +2610,7 @@ func TestStats(t *testing.T) {
 
 	<-conn.done
 
-	assert.NoError(t, conn.Close())
+	assert.NoError(t, assoc.Close())
 
 	conn.mu.Lock()
 	defer conn.mu.Unlock()
@@ -4324,4 +4324,339 @@ func TestRACK_PTO_DoesNotProbe_WhenPendingExists(t *testing.T) {
 	got, _ := assoc.inflightQueue.get(100)
 	require.NotNil(t, got)
 	assert.False(t, got.retransmit, "PTO must prefer sending pending data over probing")
+}
+
+func newTLRAssociationForTest(t *testing.T) (*Association, net.Conn) {
+	t.Helper()
+
+	c1, c2 := net.Pipe()
+
+	a := createAssociation(Config{
+		Name:          "tlr-test",
+		NetConn:       c1,
+		MTU:           1200,
+		LoggerFactory: logging.NewDefaultLoggerFactory(),
+		RTOMax:        1000,
+	})
+
+	return a, c2
+}
+
+func shutdownTLRAssociationForTest(a *Association, peer net.Conn) {
+	if peer != nil {
+		_ = peer.Close()
+	}
+
+	if a == nil {
+		return
+	}
+
+	a.closeWriteLoopOnce.Do(func() { close(a.closeWriteLoopCh) })
+	a.closeAllTimers()
+
+	_ = a.netConn.Close()
+}
+
+func pushPendingFullPacketChunks(t *testing.T, a *Association, n int) {
+	t.Helper()
+
+	userLen := int(a.MTU()) - int(commonHeaderSize+dataChunkHeaderSize)
+	assert.True(t, userLen > 0)
+
+	for i := 0; i < n; i++ {
+		a.pendingQueue.push(&chunkPayloadData{
+			streamIdentifier:  0,
+			beginningFragment: true,
+			endingFragment:    true,
+			userData:          make([]byte, userLen),
+		})
+	}
+}
+
+func pushInflightRetransmitFullPacketChunks(t *testing.T, a *Association, startTSN uint32, n int) {
+	t.Helper()
+
+	userLen := int(a.MTU()) - int(commonHeaderSize+dataChunkHeaderSize)
+	assert.True(t, userLen > 0)
+
+	for i := 0; i < n; i++ {
+		tsn := startTSN + uint32(i) //nolint:gosec
+		a.inflightQueue.pushNoCheck(&chunkPayloadData{
+			tsn:              tsn,
+			streamIdentifier: 0,
+			userData:         make([]byte, userLen),
+			nSent:            1,
+			retransmit:       true,
+		})
+	}
+}
+
+func TestTLR_AllowSend_BudgetGatingAndFirstSendAlwaysAllowed(t *testing.T) {
+	assoc, peer := newTLRAssociationForTest(t)
+	defer shutdownTLRAssociationForTest(assoc, peer)
+
+	assoc.lock.Lock()
+	assoc.tlrActive = true
+	assoc.tlrFirstRTT = true
+	assoc.tlrStartTime = time.Now()
+	assoc.tlrBurstFirstRTTUnits = tlrBurstDefaultFirstRTT
+	assoc.lock.Unlock()
+
+	t.Run("GatesAfterBudgetExhausted_FirstRTT_AllowsExactly4MTUsWorth", func(t *testing.T) {
+		assoc.lock.Lock()
+		defer assoc.lock.Unlock()
+
+		budget := assoc.tlrCurrentBurstBudgetScaledLocked()
+		consumed := false
+
+		allowed := 0
+		mtu := int(assoc.MTU())
+		for assoc.tlrAllowSendLocked(&budget, &consumed, mtu) {
+			allowed++
+		}
+
+		assert.Equal(t, 4, allowed)
+	})
+
+	t.Run("FirstSendAllowedEvenIfBudgetTooSmall", func(t *testing.T) {
+		assoc.lock.Lock()
+		defer assoc.lock.Unlock()
+
+		budget := int64(1000)
+		consumed := false
+
+		ok1 := assoc.tlrAllowSendLocked(&budget, &consumed, int(assoc.MTU()))
+		ok2 := assoc.tlrAllowSendLocked(&budget, &consumed, int(assoc.MTU()))
+
+		assert.True(t, ok1)
+		assert.False(t, ok2)
+		assert.True(t, consumed)
+		assert.Equal(t, int64(0), budget)
+	})
+}
+
+func TestTLR_Begin_SetsEndTSNToHighestOutstanding(t *testing.T) {
+	assoc, peer := newTLRAssociationForTest(t)
+	defer shutdownTLRAssociationForTest(assoc, peer)
+
+	assoc.lock.Lock()
+	defer assoc.lock.Unlock()
+
+	assoc.cumulativeTSNAckPoint = 99
+	pushInflightRetransmitFullPacketChunks(t, assoc, 100, 5) // TSN 100..104 exist
+
+	assoc.tlrBeginLocked()
+
+	assert.True(t, assoc.tlrActive)
+	assert.True(t, assoc.tlrFirstRTT)
+	assert.False(t, assoc.tlrHadAdditionalLoss)
+	assert.Equal(t, uint32(104), assoc.tlrEndTSN)
+	assert.False(t, assoc.tlrStartTime.IsZero())
+}
+
+func TestTLR_PhaseSwitchesToLaterOnAckProgress(t *testing.T) {
+	assoc, peer := newTLRAssociationForTest(t)
+	defer shutdownTLRAssociationForTest(assoc, peer)
+
+	assoc.lock.Lock()
+	defer assoc.lock.Unlock()
+
+	assoc.tlrActive = true
+	assoc.tlrFirstRTT = true
+	assoc.tlrStartTime = time.Now()
+	assoc.tlrEndTSN = assoc.cumulativeTSNAckPoint + 100 // ensure we don't finish
+	assoc.tlrBurstFirstRTTUnits = tlrBurstDefaultFirstRTT
+	assoc.tlrBurstLaterRTTUnits = tlrBurstDefaultLaterRTT
+
+	assoc.tlrMaybeFinishLocked(true) // ackProgress triggers phase change
+
+	assert.False(t, assoc.tlrFirstRTT)
+	assert.Equal(t, int64(tlrBurstDefaultLaterRTT), assoc.tlrCurrentBurstUnitsLocked())
+}
+
+func TestTLR_FirstRTTExpiresByTime_SRTTAndFallback(t *testing.T) {
+	assoc, peer := newTLRAssociationForTest(t)
+	defer shutdownTLRAssociationForTest(assoc, peer)
+
+	t.Run("UsesSRTTWhenAvailable", func(t *testing.T) {
+		assoc.lock.Lock()
+		defer assoc.lock.Unlock()
+
+		assoc.srtt.Store(float64(100)) // 100ms
+		now := time.Now()
+
+		assoc.tlrActive = true
+		assoc.tlrFirstRTT = true
+		assoc.tlrStartTime = now.Add(-150 * time.Millisecond)
+
+		assoc.tlrUpdatePhaseLocked(now)
+		assert.False(t, assoc.tlrFirstRTT)
+	})
+
+	t.Run("FallsBackTo1sWhenNoSRTT", func(t *testing.T) {
+		assoc.lock.Lock()
+		defer assoc.lock.Unlock()
+
+		assoc.srtt.Store(float64(0))
+		now := time.Now()
+
+		assoc.tlrActive = true
+		assoc.tlrFirstRTT = true
+		assoc.tlrStartTime = now.Add(-500 * time.Millisecond)
+
+		assoc.tlrUpdatePhaseLocked(now)
+		assert.True(t, assoc.tlrFirstRTT)
+
+		assoc.tlrStartTime = now.Add(-1100 * time.Millisecond)
+		assoc.tlrUpdatePhaseLocked(now)
+		assert.False(t, assoc.tlrFirstRTT)
+	})
+}
+
+func TestTLR_ApplyAdditionalLoss_FirstRTT_StepDownAndClamp(t *testing.T) {
+	assoc, peer := newTLRAssociationForTest(t)
+	defer shutdownTLRAssociationForTest(assoc, peer)
+
+	assoc.lock.Lock()
+	defer assoc.lock.Unlock()
+
+	assoc.srtt.Store(float64(1000))
+	now := time.Now()
+
+	assoc.tlrActive = true
+	assoc.tlrFirstRTT = true
+	assoc.tlrStartTime = now
+	assoc.tlrHadAdditionalLoss = false
+	assoc.tlrGoodOps = 7
+	assoc.tlrBurstFirstRTTUnits = tlrBurstDefaultFirstRTT
+	assoc.tlrBurstLaterRTTUnits = tlrBurstDefaultLaterRTT
+
+	assoc.tlrApplyAdditionalLossLocked(now.Add(10 * time.Millisecond))
+	assert.True(t, assoc.tlrHadAdditionalLoss)
+	assert.Equal(t, uint32(0), assoc.tlrGoodOps)
+	assert.Equal(t, int64(12), assoc.tlrBurstFirstRTTUnits) // 16-4
+	assert.Equal(t, int64(tlrBurstDefaultLaterRTT), assoc.tlrBurstLaterRTTUnits)
+
+	// should clamp at 8.
+	assoc.tlrApplyAdditionalLossLocked(now.Add(20 * time.Millisecond)) // 12 -> 8
+	assoc.tlrApplyAdditionalLossLocked(now.Add(30 * time.Millisecond)) // 8 -> 8 (clamped)
+	assert.Equal(t, int64(tlrBurstMinFirstRTT), assoc.tlrBurstFirstRTTUnits)
+}
+
+func TestTLR_ApplyAdditionalLoss_LaterRTT_StepDownAndClamp(t *testing.T) {
+	assoc, peer := newTLRAssociationForTest(t)
+	defer shutdownTLRAssociationForTest(assoc, peer)
+
+	assoc.lock.Lock()
+	defer assoc.lock.Unlock()
+
+	now := time.Now()
+
+	assoc.tlrActive = true
+	assoc.tlrFirstRTT = false
+	assoc.tlrStartTime = now.Add(-10 * time.Second) // irrelevant when tlrFirstRTT=false
+	assoc.tlrBurstFirstRTTUnits = tlrBurstDefaultFirstRTT
+	assoc.tlrBurstLaterRTTUnits = tlrBurstDefaultLaterRTT
+
+	for i := 0; i < 10; i++ {
+		assoc.tlrApplyAdditionalLossLocked(now)
+	}
+
+	assert.Equal(t, int64(tlrBurstDefaultFirstRTT), assoc.tlrBurstFirstRTTUnits)
+	assert.Equal(t, int64(tlrBurstMinLaterRTT), assoc.tlrBurstLaterRTTUnits) // clamped at 5
+}
+
+func TestTLR_MaybeFinish_EndsAndClearsState_AndGoodOpsReset(t *testing.T) {
+	assoc, peer := newTLRAssociationForTest(t)
+	defer shutdownTLRAssociationForTest(assoc, peer)
+
+	assoc.lock.Lock()
+	defer assoc.lock.Unlock()
+
+	// pretend about to complete the 16th "good op".
+	assoc.tlrActive = true
+	assoc.tlrFirstRTT = false
+	assoc.tlrHadAdditionalLoss = false
+	assoc.tlrEndTSN = 200
+	assoc.cumulativeTSNAckPoint = 200
+
+	assoc.tlrBurstFirstRTTUnits = tlrBurstMinFirstRTT
+	assoc.tlrBurstLaterRTTUnits = tlrBurstMinLaterRTT
+	assoc.tlrGoodOps = tlrGoodOpsResetThreshold - 1
+
+	assoc.tlrMaybeFinishLocked(false)
+
+	// finished -> cleared
+	assert.False(t, assoc.tlrActive)
+	assert.False(t, assoc.tlrFirstRTT)
+	assert.False(t, assoc.tlrHadAdditionalLoss)
+	assert.Equal(t, uint32(0), assoc.tlrEndTSN)
+
+	// reset after 16 good ops
+	assert.Equal(t, int64(tlrBurstDefaultFirstRTT), assoc.tlrBurstFirstRTTUnits)
+	assert.Equal(t, int64(tlrBurstDefaultLaterRTT), assoc.tlrBurstLaterRTTUnits)
+	assert.Equal(t, uint32(0), assoc.tlrGoodOps)
+}
+
+func TestTLR_PopPendingDataChunksToSend_RespectsBurstBudget_FirstRTT_OnePacketPerChunk(t *testing.T) {
+	assoc, peer := newTLRAssociationForTest(t)
+	defer shutdownTLRAssociationForTest(assoc, peer)
+
+	assoc.lock.Lock()
+	defer assoc.lock.Unlock()
+
+	assoc.setCWND(1_000_000)
+	assoc.setRWND(1_000_000)
+
+	assoc.tlrActive = true
+	assoc.tlrFirstRTT = true
+	assoc.tlrStartTime = time.Now()
+	assoc.tlrBurstFirstRTTUnits = tlrBurstDefaultFirstRTT // 4 MTU
+
+	pushPendingFullPacketChunks(t, assoc, 10)
+
+	budget := assoc.tlrCurrentBurstBudgetScaledLocked()
+	consumed := false
+
+	chunks, _ := assoc.popPendingDataChunksToSend(&budget, &consumed)
+
+	// 4 MTU burst, each chunk == 1 full MTU packet, so 4 chunks moved.
+	assert.Equal(t, 4, len(chunks))
+	assert.Equal(t, 4, assoc.inflightQueue.size())
+	assert.Equal(t, 6, assoc.pendingQueue.size())
+	assert.True(t, consumed)
+	assert.Equal(t, int64(0), budget)
+}
+
+func TestTLR_GetDataPacketsToRetransmit_RespectsBurstBudget_LaterRTT(t *testing.T) {
+	assoc, peer := newTLRAssociationForTest(t)
+	defer shutdownTLRAssociationForTest(assoc, peer)
+
+	assoc.lock.Lock()
+	defer assoc.lock.Unlock()
+
+	assoc.setCWND(1_000_000)
+	assoc.setRWND(1_000_000)
+
+	assoc.tlrActive = true
+	assoc.tlrFirstRTT = false
+	assoc.tlrBurstLaterRTTUnits = tlrBurstDefaultLaterRTT // 2 MTU
+	assoc.cumulativeTSNAckPoint = 99
+
+	// 6 full-MTU packets are eligible for retransmit.
+	pushInflightRetransmitFullPacketChunks(t, assoc, 100, 6)
+
+	budget := assoc.tlrCurrentBurstBudgetScaledLocked()
+	consumed := false
+
+	pkts := assoc.getDataPacketsToRetransmit(&budget, &consumed)
+
+	// Later RTT burst is 2 MTU; each retransmit is a full MTU packet => 2 packets.
+	assert.Equal(t, 2, len(pkts))
+	nChunks := 0
+	for _, p := range pkts {
+		nChunks += len(p.chunks)
+	}
+	assert.Equal(t, 2, nChunks)
+	assert.True(t, consumed)
 }
