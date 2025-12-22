@@ -117,6 +117,24 @@ const (
 	maxTSNOffset = 40000
 	// maxReconfigRequests is the maximum number of reconfig requests we will keep outstanding.
 	maxReconfigRequests = 1000
+
+	// TLR Adaptive burst mitigation uses quarter-MTU units.
+	// 1 MTU == 4 units, 0.25 MTU == 1 unit.
+	tlrUnitsPerMTU = 4
+
+	// Default burst limits.
+	tlrBurstDefaultFirstRTT = 16 // 4.0 MTU
+	tlrBurstDefaultLaterRTT = 8  // 2.0 MTU
+
+	// Minimum burst limits.
+	tlrBurstMinFirstRTT = 8 // 2.0 MTU
+	tlrBurstMinLaterRTT = 5 // 1.25 MTU
+
+	// Adaptation steps.
+	tlrBurstStepDownFirstRTT = 4 // reduce by 1.0 MTU
+	tlrBurstStepDownLaterRTT = 1 // reduce by 0.25 MTU
+
+	tlrGoodOpsResetThreshold = 16
 )
 
 func getAssociationStateString(assoc uint32) string {
@@ -282,6 +300,18 @@ type Association struct {
 
 	name string
 	log  logging.LeveledLogger
+
+	// Adaptive burst mitigation variables
+	tlrActive            bool
+	tlrFirstRTT          bool // first RTT of this TLR operation
+	tlrHadAdditionalLoss bool
+	tlrEndTSN            uint32 // recovery is done when cumAck >= tlrEndTSN
+
+	tlrBurstFirstRTTUnits int64 // quarter-MTU units
+	tlrBurstLaterRTTUnits int64 // quarter-MTU units
+
+	tlrGoodOps   uint32    // count of TLR ops completed w/o additional loss
+	tlrStartTime time.Time // time of first recovery RTT
 }
 
 // Config collects the arguments to createAssociation construction into
@@ -422,6 +452,10 @@ func createAssociation(config Config) *Association {
 		blockWrite:              config.BlockWrite,
 		writeNotify:             make(chan struct{}, 1),
 	}
+
+	// adaptive burst mitigation defaults
+	assoc.tlrBurstFirstRTTUnits = tlrBurstDefaultFirstRTT
+	assoc.tlrBurstLaterRTTUnits = tlrBurstDefaultLaterRTT
 
 	// RACK defaults
 	assoc.rackWCDelAck = config.rackWCDelAck
@@ -825,8 +859,8 @@ func (a *Association) handleInbound(raw []byte) error {
 }
 
 // The caller should hold the lock.
-func (a *Association) gatherDataPacketsToRetransmit(rawPackets [][]byte) [][]byte {
-	for _, p := range a.getDataPacketsToRetransmit() {
+func (a *Association) gatherDataPacketsToRetransmit(rawPackets [][]byte, budgetUnits *int64, consumed *bool) [][]byte {
+	for _, p := range a.getDataPacketsToRetransmit(budgetUnits, consumed) {
 		raw, err := a.marshalPacket(p)
 		if err != nil {
 			a.log.Warnf("[%s] failed to serialize a DATA packet to be retransmitted", a.name)
@@ -842,10 +876,15 @@ func (a *Association) gatherDataPacketsToRetransmit(rawPackets [][]byte) [][]byt
 // The caller should hold the lock.
 //
 //nolint:cyclop
-func (a *Association) gatherOutboundDataAndReconfigPackets(rawPackets [][]byte) [][]byte {
+func (a *Association) gatherOutboundDataAndReconfigPackets(
+	rawPackets [][]byte,
+	budgetUnits *int64,
+	consumed *bool,
+) [][]byte {
 	// Pop unsent data chunks from the pending queue to send as much as
 	// cwnd and rwnd allow.
-	chunks, sisToReset := a.popPendingDataChunksToSend()
+	chunks, sisToReset := a.popPendingDataChunksToSend(budgetUnits, consumed)
+
 	if len(chunks) > 0 {
 		// Start timer. (noop if already started)
 		a.log.Tracef("[%s] T3-rtx timer start (pt1)", a.name)
@@ -911,60 +950,112 @@ func (a *Association) gatherOutboundDataAndReconfigPackets(rawPackets [][]byte) 
 // The caller should hold the lock.
 //
 //nolint:cyclop
-func (a *Association) gatherOutboundFastRetransmissionPackets(rawPackets [][]byte) [][]byte {
-	if a.willRetransmitFast { //nolint:nestif
-		a.willRetransmitFast = false
+func (a *Association) gatherOutboundFastRetransmissionPackets( //nolint:gocognit
+	rawPackets [][]byte,
+	budgetScaled *int64,
+	consumed *bool,
+) [][]byte {
+	if !a.willRetransmitFast {
+		return rawPackets
+	}
+	a.willRetransmitFast = false
 
-		toFastRetrans := []*chunkPayloadData{}
-		fastRetransSize := commonHeaderSize
-		fastRetransWnd := max(a.MTU(), a.fastRtxWnd)
-		now := time.Now()
+	toFastRetrans := []*chunkPayloadData{}
+	fastRetransSize := int(commonHeaderSize)
+	fastRetransWnd := int(max(a.MTU(), a.fastRtxWnd))
+	now := time.Now()
 
-		for i := 0; ; i++ {
-			chunkPayload, ok := a.inflightQueue.get(a.cumulativeTSNAckPoint + uint32(i) + 1) //nolint:gosec // G115
-			if !ok {
-				break // end of pending data
-			}
+	// MTU bundling + burst budgeting tracker
+	bytesInPacket := 0
+	stopBundling := false
 
-			if chunkPayload.acked || chunkPayload.abandoned() {
+	for i := 0; ; i++ {
+		chunkPayload, ok := a.inflightQueue.get(a.cumulativeTSNAckPoint + uint32(i) + 1) //nolint:gosec // G115
+		if !ok {
+			break // end of pending data
+		}
+
+		if chunkPayload.acked || chunkPayload.abandoned() {
+			continue
+		}
+
+		if chunkPayload.nSent > 1 || chunkPayload.missIndicator < 3 {
+			continue
+		}
+
+		// include padding for sizing.
+		chunkBytes := int(dataChunkHeaderSize) + len(chunkPayload.userData)
+		chunkBytes += getPadding(chunkBytes)
+
+		// fast retransmit window cap
+		if fastRetransWnd < fastRetransSize+chunkBytes {
+			break
+		}
+
+		// MTU bundling + burst budget before mutating
+		for {
+			addBytes := chunkBytes
+
+			if bytesInPacket == 0 {
+				addBytes += int(commonHeaderSize)
+				if addBytes > int(a.MTU()) {
+					stopBundling = true
+
+					break
+				}
+			} else if bytesInPacket+chunkBytes > int(a.MTU()) {
+				// start a new packet and retry this same chunk as first in packet
+				bytesInPacket = 0
+
 				continue
 			}
 
-			if chunkPayload.nSent > 1 || chunkPayload.missIndicator < 3 {
-				continue
-			}
+			if !a.tlrAllowSendLocked(budgetScaled, consumed, addBytes) {
+				// budget exhausted, stop selecting any more fast-rtx chunks
+				stopBundling = true
 
-			dataChunkSize := dataChunkHeaderSize + uint32(len(chunkPayload.userData)) //nolint:gosec // G115
-			if fastRetransWnd < fastRetransSize+dataChunkSize {
 				break
 			}
 
-			fastRetransSize += dataChunkSize
-			a.stats.incFastRetrans()
-
-			// Update for retransmission
-			chunkPayload.nSent++
-			chunkPayload.since = now
-			a.rackRemove(chunkPayload)
-			a.rackInsert(chunkPayload)
-
-			a.checkPartialReliabilityStatus(chunkPayload)
-			toFastRetrans = append(toFastRetrans, chunkPayload)
-			a.log.Tracef("[%s] fast-retransmit: tsn=%d sent=%d htna=%d",
-				a.name, chunkPayload.tsn, chunkPayload.nSent, a.fastRecoverExitPoint)
-		}
-
-		if len(toFastRetrans) > 0 {
-			for _, p := range a.bundleDataChunksIntoPackets(toFastRetrans) {
-				raw, err := a.marshalPacket(p)
-				if err != nil {
-					a.log.Warnf("[%s] failed to serialize a DATA packet to be fast-retransmitted", a.name)
-
-					continue
-				}
-				rawPackets = append(rawPackets, raw)
+			if bytesInPacket == 0 {
+				bytesInPacket = int(commonHeaderSize)
 			}
+			bytesInPacket += chunkBytes
+
+			break
 		}
+
+		if stopBundling {
+			break
+		}
+
+		fastRetransSize += chunkBytes
+		a.stats.incFastRetrans()
+
+		// Update for retransmission
+		chunkPayload.nSent++
+		chunkPayload.since = now
+		a.rackRemove(chunkPayload)
+		a.rackInsert(chunkPayload)
+
+		a.checkPartialReliabilityStatus(chunkPayload)
+		toFastRetrans = append(toFastRetrans, chunkPayload)
+		a.log.Tracef("[%s] fast-retransmit: tsn=%d sent=%d htna=%d",
+			a.name, chunkPayload.tsn, chunkPayload.nSent, a.fastRecoverExitPoint)
+	}
+
+	if len(toFastRetrans) == 0 {
+		return rawPackets
+	}
+
+	for _, p := range a.bundleDataChunksIntoPackets(toFastRetrans) {
+		raw, err := a.marshalPacket(p)
+		if err != nil {
+			a.log.Warnf("[%s] failed to serialize a DATA packet to be fast-retransmitted", a.name)
+
+			continue
+		}
+		rawPackets = append(rawPackets, raw)
 	}
 
 	return rawPackets
@@ -1107,14 +1198,23 @@ func (a *Association) gatherOutbound() ([][]byte, bool) {
 
 	switch state {
 	case established:
-		rawPackets = a.gatherDataPacketsToRetransmit(rawPackets)
-		rawPackets = a.gatherOutboundDataAndReconfigPackets(rawPackets)
-		rawPackets = a.gatherOutboundFastRetransmissionPackets(rawPackets)
+		budgetUnits := a.tlrCurrentBurstBudgetScaledLocked()
+		consumed := false
+
+		rawPackets = a.gatherDataPacketsToRetransmit(rawPackets, &budgetUnits, &consumed)
+		rawPackets = a.gatherOutboundDataAndReconfigPackets(rawPackets, &budgetUnits, &consumed)
+		rawPackets = a.gatherOutboundFastRetransmissionPackets(rawPackets, &budgetUnits, &consumed)
+
+		// control traffic shouldn't be limited.
 		rawPackets = a.gatherOutboundSackPackets(rawPackets)
 		rawPackets = a.gatherOutboundForwardTSNPackets(rawPackets)
 	case shutdownPending, shutdownSent, shutdownReceived:
-		rawPackets = a.gatherDataPacketsToRetransmit(rawPackets)
-		rawPackets = a.gatherOutboundFastRetransmissionPackets(rawPackets)
+		budgetUnits := a.tlrCurrentBurstBudgetScaledLocked()
+		consumed := false
+
+		rawPackets = a.gatherDataPacketsToRetransmit(rawPackets, &budgetUnits, &consumed)
+		rawPackets = a.gatherOutboundFastRetransmissionPackets(rawPackets, &budgetUnits, &consumed)
+
 		rawPackets = a.gatherOutboundSackPackets(rawPackets)
 		rawPackets, ok = a.gatherOutboundShutdownPackets(rawPackets)
 	case shutdownAckSent:
@@ -1890,6 +1990,8 @@ func (a *Association) onCumulativeTSNAckPointAdvanced(totalBytesAcked int) {
 	if a.inflightQueue.size() == 0 {
 		a.log.Tracef("[%s] SACK: no more packet in-flight (pending=%d)", a.name, a.pendingQueue.size())
 		a.t3RTX.stop()
+		a.stopPTOTimer()
+		a.stopRackTimer()
 	} else {
 		a.log.Tracef("[%s] T3-rtx timer start (pt2)", a.name)
 		a.t3RTX.start(a.rtoMgr.getRTO())
@@ -1945,7 +2047,7 @@ func (a *Association) onCumulativeTSNAckPointAdvanced(totalBytesAcked int) {
 // The caller should hold the lock.
 //
 //nolint:cyclop
-func (a *Association) processFastRetransmission(
+func (a *Association) processFastRetransmission( //nolint:gocognit
 	cumTSNAckPoint uint32,
 	gapAckBlocks []gapAckBlock,
 	htna uint32,
@@ -1983,6 +2085,10 @@ func (a *Association) processFastRetransmission(
 			if !c.acked && !c.abandoned() && c.missIndicator < 3 {
 				c.missIndicator++
 				if c.missIndicator == 3 {
+					if a.tlrActive {
+						a.tlrApplyAdditionalLossLocked(time.Now())
+					}
+
 					if !a.inFastRecovery {
 						// 2)  If not in Fast Recovery, adjust the ssthresh and cwnd of the
 						//     destination address(es) to which the missing DATA chunks were
@@ -2125,6 +2231,10 @@ func (a *Association) handleSack(selectiveAckChunk *chunkSelectiveAck) error {
 
 	// RACK
 	a.onRackAfterSACK(deliveredFound, newestDeliveredSendTime, newestDeliveredOrigTSN, selectiveAckChunk)
+
+	// adaptive burst mitigation
+	ackProgress := cumTSNAckPointAdvanced || deliveredFound
+	a.tlrMaybeFinishLocked(ackProgress)
 
 	return nil
 }
@@ -2516,9 +2626,15 @@ func (a *Association) movePendingDataChunkToInflightQueue(chunkPayload *chunkPay
 // The caller should hold the lock.
 //
 //nolint:cyclop
-func (a *Association) popPendingDataChunksToSend() ([]*chunkPayloadData, []uint16) {
+func (a *Association) popPendingDataChunksToSend( //nolint:cyclop,gocognit
+	budgetScaled *int64,
+	consumed *bool,
+) ([]*chunkPayloadData, []uint16) {
 	chunks := []*chunkPayloadData{}
-	var sisToReset []uint16 // stream identifieres to reset
+	var sisToReset []uint16 // stream indentifiers to reset
+
+	// track current packet size for MTU bundling so budgeting is accurate.
+	bytesInPacket := 0
 
 	if a.pendingQueue.size() > 0 { //nolint:nestif
 		// RFC 4960 sec 6.1.  Transmission of DATA Chunks
@@ -2554,19 +2670,59 @@ func (a *Association) popPendingDataChunksToSend() ([]*chunkPayloadData, []uint1
 				break // no more rwnd
 			}
 
+			// compute current DATA chunk size including padding.
+			chunkBytes := int(dataChunkHeaderSize) + len(chunkPayload.userData)
+			chunkBytes += getPadding(chunkBytes)
+
+			// ensure MTU bundling matches bundleDataChunksIntoPackets().
+			addBytes := chunkBytes
+			if bytesInPacket == 0 {
+				addBytes += int(commonHeaderSize)
+				if addBytes > int(a.MTU()) {
+					break
+				}
+
+				// reserve budget for common header + first chunk.
+				if !a.tlrAllowSendLocked(budgetScaled, consumed, addBytes) {
+					break
+				}
+
+				bytesInPacket = int(commonHeaderSize)
+			} else {
+				// if it doesn't fit, start a new packet and retry same chunk.
+				if bytesInPacket+chunkBytes > int(a.MTU()) {
+					bytesInPacket = 0
+
+					continue
+				}
+
+				// reserve budget for the additional chunk bytes.
+				if !a.tlrAllowSendLocked(budgetScaled, consumed, chunkBytes) {
+					break
+				}
+			}
+
 			a.setRWND(a.RWND() - dataLen)
 
 			a.movePendingDataChunkToInflightQueue(chunkPayload)
 			chunks = append(chunks, chunkPayload)
+			bytesInPacket += chunkBytes
 		}
 
-		// the data sender can always have one DATA chunk in flight to the receiver
+		// allow one DATA chunk if nothing is inflight to the receiver.
 		if len(chunks) == 0 && a.inflightQueue.size() == 0 {
 			// Send zero window probe
 			c := a.pendingQueue.peek()
-			if c != nil {
-				a.movePendingDataChunkToInflightQueue(c)
-				chunks = append(chunks, c)
+			if c != nil && len(c.userData) > 0 {
+				// probe is a new packet: common header + chunk bytes.
+				chunkBytes := int(dataChunkHeaderSize) + len(c.userData)
+				chunkBytes += getPadding(chunkBytes)
+				addBytes := int(commonHeaderSize) + chunkBytes
+
+				if addBytes <= int(a.MTU()) && a.tlrAllowSendLocked(budgetScaled, consumed, addBytes) {
+					a.movePendingDataChunkToInflightQueue(c)
+					chunks = append(chunks, c)
+				}
 			}
 		}
 	}
@@ -2696,14 +2852,15 @@ func (a *Association) checkPartialReliabilityStatus(chunkPayload *chunkPayloadDa
 // getDataPacketsToRetransmit is called when T3-rtx is timed out and retransmit outstanding data chunks
 // that are not acked or abandoned yet.
 // The caller should hold the lock.
-func (a *Association) getDataPacketsToRetransmit() []*packet {
+func (a *Association) getDataPacketsToRetransmit(budgetScaled *int64, consumed *bool) []*packet { //nolint:cyclop
 	awnd := min32(a.CWND(), a.RWND())
 	chunks := []*chunkPayloadData{}
 	var bytesToSend int
-	var done bool
 	currRtxTimestamp := time.Now()
 
-	for i := 0; !done; i++ {
+	bytesInPacket := 0
+
+	for i := 0; ; i++ {
 		chunkPayload, ok := a.inflightQueue.get(a.cumulativeTSNAckPoint + uint32(i) + 1) //nolint:gosec // G115
 		if !ok {
 			break // end of pending data
@@ -2714,14 +2871,41 @@ func (a *Association) getDataPacketsToRetransmit() []*packet {
 		}
 
 		if i == 0 && int(a.RWND()) < len(chunkPayload.userData) {
-			// Send it as a zero window probe
-			done = true
+			// allow as zero window probe
 		} else if bytesToSend+len(chunkPayload.userData) > int(awnd) {
 			break
 		}
 
-		// reset the retransmit flag not to retransmit again before the next
-		// t3-rtx timer fires
+		chunkBytes := int(dataChunkHeaderSize) + len(chunkPayload.userData)
+		chunkBytes += getPadding(chunkBytes)
+
+		// retry as first chunk in a new packet if needed.
+		for {
+			addBytes := chunkBytes
+			if bytesInPacket == 0 {
+				addBytes += int(commonHeaderSize)
+				if addBytes > int(a.MTU()) {
+					return a.bundleDataChunksIntoPackets(chunks)
+				}
+			} else if bytesInPacket+chunkBytes > int(a.MTU()) {
+				bytesInPacket = 0
+
+				continue
+			}
+
+			// burst budget gate before mutating the chunk.
+			if !a.tlrAllowSendLocked(budgetScaled, consumed, addBytes) {
+				return a.bundleDataChunksIntoPackets(chunks)
+			}
+
+			if bytesInPacket == 0 {
+				bytesInPacket = int(commonHeaderSize)
+			}
+			bytesInPacket += chunkBytes
+
+			break
+		}
+
 		chunkPayload.retransmit = false
 		bytesToSend += len(chunkPayload.userData)
 
@@ -3294,7 +3478,7 @@ func (a *Association) onRackAfterSACK( // nolint:gocognit,cyclop,gocyclo
 
 	// 3) Loss marking on ACK: any outstanding chunk whose (send_time + reoWnd) < newestDeliveredSendTime
 	// is lost (RACK for SCTP section 2A)
-	if !a.rackDeliveredTime.IsZero() {
+	if !a.rackDeliveredTime.IsZero() { //nolint:nestif
 		marked := false
 
 		for chunk := a.rackHead; chunk != nil; {
@@ -3336,6 +3520,11 @@ func (a *Association) onRackAfterSACK( // nolint:gocognit,cyclop,gocyclo
 		}
 
 		if marked {
+			// loss detected during active TLR so we must reduce burst
+			if a.tlrActive {
+				a.tlrApplyAdditionalLossLocked(currTime)
+			}
+
 			a.awakeWriteLoop()
 		}
 	}
@@ -3351,6 +3540,12 @@ func (a *Association) onRackAfterSACK( // nolint:gocognit,cyclop,gocyclo
 
 	// 5) Re/schedule Tail Loss Probe (PTO) (RACK for SCTP section 2C)
 	// Triggered when new data is sent or cum-ack advances; we approximate by scheduling on every SACK that advanced
+	if a.inflightQueue.size() == 0 {
+		a.stopPTOTimer()
+
+		return
+	}
+
 	var pto time.Duration
 	srttMs := a.SRTT()
 	if srttMs > 0 {
@@ -3372,6 +3567,12 @@ func (a *Association) onRackAfterSACK( // nolint:gocognit,cyclop,gocyclo
 // schedulePTOAfterSendLocked starts/restarts the PTO timer when new data is transmitted.
 // Caller must hold a.lock.
 func (a *Association) schedulePTOAfterSendLocked() {
+	if a.inflightQueue.size() == 0 {
+		a.stopPTOTimer()
+
+		return
+	}
+
 	var pto time.Duration
 	if srttMs := a.SRTT(); srttMs > 0 {
 		srtt := time.Duration(srttMs * 1e6)
@@ -3433,6 +3634,11 @@ func (a *Association) onRackTimeoutLocked() { //nolint:cyclop
 	}
 
 	if marked {
+		// loss detected during active TLR so we must reduce burst
+		if a.tlrActive {
+			a.tlrApplyAdditionalLossLocked(time.Now())
+		}
+
 		a.awakeWriteLoop()
 	}
 }
@@ -3444,6 +3650,21 @@ func (a *Association) onPTOTimer() {
 }
 
 func (a *Association) onPTOTimerLocked() {
+	// if nothing is inflight, PTO should not drive TLR.
+	if a.inflightQueue.size() == 0 {
+		a.stopPTOTimer()
+
+		return
+	}
+
+	currTime := time.Now()
+
+	if !a.tlrActive {
+		a.tlrBeginLocked()
+	} else {
+		a.tlrApplyAdditionalLossLocked(currTime)
+	}
+
 	// Prefer unsent data if any
 	if a.pendingQueue.size() > 0 {
 		a.awakeWriteLoop()
@@ -3451,7 +3672,7 @@ func (a *Association) onPTOTimerLocked() {
 		return
 	}
 
-	// Otherwise retransmit the most recently sent in-flight DATA (highest TSN not acked/abandoned)
+	// otherwise retransmit most recently sent in-flight DATA.
 	var latest *chunkPayloadData
 	for i := uint32(0); ; i++ {
 		c, ok := a.inflightQueue.get(a.cumulativeTSNAckPoint + i + 1)
@@ -3508,4 +3729,172 @@ func (a *Association) rackRemove(chunk *chunkPayloadData) {
 	chunk.rackPrev = nil
 	chunk.rackNext = nil
 	chunk.rackInList = false
+}
+
+// caller must hold a.lock.
+func (a *Association) tlrFirstRTTDurationLocked() time.Duration {
+	// Use SRTT when available; fall back to a safe default.
+	if srttMs := a.SRTT(); srttMs > 0 {
+		return time.Duration(srttMs * 1e6)
+	}
+
+	return time.Second
+}
+
+// caller must hold a.lock.
+func (a *Association) tlrUpdatePhaseLocked(currTime time.Time) {
+	if !a.tlrActive || !a.tlrFirstRTT {
+		return
+	}
+	if a.tlrStartTime.IsZero() {
+		return
+	}
+
+	if currTime.Sub(a.tlrStartTime) >= a.tlrFirstRTTDurationLocked() {
+		a.tlrFirstRTT = false
+	}
+}
+
+// caller must hold a.lock.
+func (a *Association) tlrCurrentBurstUnitsLocked() int64 {
+	if !a.tlrActive {
+		return 0
+	}
+
+	a.tlrUpdatePhaseLocked(time.Now())
+
+	if a.tlrFirstRTT {
+		return a.tlrBurstFirstRTTUnits
+	}
+
+	return a.tlrBurstLaterRTTUnits
+}
+
+// caller must hold a.lock.
+// Returns remaining burst budget in "scaled bytes": bytes * 4 (quarter-MTU precision).
+func (a *Association) tlrCurrentBurstBudgetScaledLocked() int64 {
+	if !a.tlrActive {
+		return 0
+	}
+
+	units := a.tlrCurrentBurstUnitsLocked()
+
+	return units * int64(a.MTU())
+}
+
+// caller must hold a.lock.
+func (a *Association) tlrHighestOutstandingTSNLocked() (uint32, bool) {
+	var last uint32
+	found := false
+
+	for i := uint32(0); ; i++ {
+		tsn := a.cumulativeTSNAckPoint + i + 1
+		_, ok := a.inflightQueue.get(tsn)
+		if !ok {
+			break
+		}
+		last = tsn
+		found = true
+	}
+
+	return last, found
+}
+
+// caller must hold a.lock.
+func (a *Association) tlrBeginLocked() {
+	currTime := time.Now()
+
+	a.tlrActive = true
+	a.tlrFirstRTT = true
+	a.tlrHadAdditionalLoss = false
+	a.tlrStartTime = currTime
+
+	if endTSN, ok := a.tlrHighestOutstandingTSNLocked(); ok {
+		a.tlrEndTSN = endTSN
+	} else {
+		a.tlrEndTSN = a.cumulativeTSNAckPoint
+	}
+}
+
+// caller must hold a.lock.
+func (a *Association) tlrApplyAdditionalLossLocked(currTime time.Time) {
+	if !a.tlrActive {
+		return
+	}
+
+	// Decide whether we're still within the first recovery RTT window.
+	a.tlrUpdatePhaseLocked(currTime)
+
+	a.tlrHadAdditionalLoss = true
+	a.tlrGoodOps = 0
+
+	if a.tlrFirstRTT {
+		// Loss during first recovery RTT => initial burst too high.
+		a.tlrBurstFirstRTTUnits -= tlrBurstStepDownFirstRTT
+		if a.tlrBurstFirstRTTUnits < tlrBurstMinFirstRTT {
+			a.tlrBurstFirstRTTUnits = tlrBurstMinFirstRTT
+		}
+	} else {
+		// Loss during later RTTs => increasing rate too high.
+		a.tlrBurstLaterRTTUnits -= tlrBurstStepDownLaterRTT
+		if a.tlrBurstLaterRTTUnits < tlrBurstMinLaterRTT {
+			a.tlrBurstLaterRTTUnits = tlrBurstMinLaterRTT
+		}
+	}
+}
+
+// caller must hold a.lock.
+func (a *Association) tlrMaybeFinishLocked(ackProgress bool) {
+	if !a.tlrActive {
+		return
+	}
+
+	// determine if we should move from the first RTT burst to later RTT burst.
+	if a.tlrFirstRTT && ackProgress {
+		a.tlrFirstRTT = false
+	}
+
+	// finish once cumulatively ACKed through the tail we were recovering.
+	if sna32GTE(a.cumulativeTSNAckPoint, a.tlrEndTSN) {
+		if !a.tlrHadAdditionalLoss {
+			a.tlrGoodOps++
+			if a.tlrGoodOps >= tlrGoodOpsResetThreshold {
+				a.tlrBurstFirstRTTUnits = tlrBurstDefaultFirstRTT
+				a.tlrBurstLaterRTTUnits = tlrBurstDefaultLaterRTT
+				a.tlrGoodOps = 0
+			}
+		} else {
+			a.tlrGoodOps = 0
+		}
+
+		a.tlrActive = false
+		a.tlrFirstRTT = false
+		a.tlrHadAdditionalLoss = false
+		a.tlrEndTSN = 0
+	}
+}
+
+// caller must hold a.lock.
+// "budgetScaled" is remaining burst budget in (bytes*4) scale.
+// "consumed" allows the first send in a burst.
+func (a *Association) tlrAllowSendLocked(budgetScaled *int64, consumed *bool, estBytes int) bool {
+	if !a.tlrActive || budgetScaled == nil || consumed == nil {
+		return true
+	}
+	if estBytes <= 0 {
+		return true
+	}
+
+	needScaled := int64(estBytes) * tlrUnitsPerMTU // bytes*4
+	if *consumed && *budgetScaled < needScaled {
+		return false
+	}
+
+	*budgetScaled -= needScaled
+	if *budgetScaled < 0 {
+		*budgetScaled = 0
+	}
+	*consumed = true
+
+	return true
 }
