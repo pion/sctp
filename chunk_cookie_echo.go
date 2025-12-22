@@ -9,16 +9,19 @@ import (
 )
 
 /*
-CookieEcho represents an SCTP Chunk of type CookieEcho
+CookieEcho represents an SCTP Chunk of type COOKIE ECHO (RFC 9260 section 3.3)
 
-	 0                   1                   2                   3
-	 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-	+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-	|   Type = 10   |Chunk  Flags   |         Length                |
-	+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-	|                     Cookie                                    |
-	|                                                               |
-	+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+	0                   1                   2                   3
+	0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|   Type = 10   |  Chunk Flags  |           Length              |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                           Cookie                              |
+|                        (opaque bytes)                         |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+nolint:godot
 */
 type chunkCookieEcho struct {
 	chunkHeader
@@ -28,6 +31,7 @@ type chunkCookieEcho struct {
 // Cookie echo chunk errors.
 var (
 	ErrChunkTypeNotCookieEcho = errors.New("ChunkType is not of type COOKIEECHO")
+	ErrCookieEchoEmpty        = errors.New("COOKIE ECHO must contain a non-empty cookie")
 )
 
 func (c *chunkCookieEcho) unmarshal(raw []byte) error {
@@ -38,14 +42,28 @@ func (c *chunkCookieEcho) unmarshal(raw []byte) error {
 	if c.typ != ctCookieEcho {
 		return fmt.Errorf("%w: actually is %s", ErrChunkTypeNotCookieEcho, c.typ.String())
 	}
+
+	// flags are reserved: sender sets 0, receiver ignores.
+	// body is the opaque cookie bytes.
 	c.cookie = c.raw
+
+	// RFC 9260: cookie MUST be present (non-empty).
+	if len(c.cookie) == 0 {
+		return ErrCookieEchoEmpty
+	}
 
 	return nil
 }
 
 func (c *chunkCookieEcho) marshal() ([]byte, error) {
+	// Require a non-empty cookie.
+	if len(c.cookie) == 0 {
+		return nil, ErrCookieEchoEmpty
+	}
+
 	c.chunkHeader.typ = ctCookieEcho
-	c.chunkHeader.raw = c.cookie
+	c.chunkHeader.flags = 0 // sender MUST set to 0
+	c.chunkHeader.raw = append([]byte(nil), c.cookie...)
 
 	return c.chunkHeader.marshal()
 }

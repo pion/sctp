@@ -9,7 +9,7 @@ import (
 )
 
 /*
-Init represents an SCTP Chunk of type INIT
+Init represents an SCTP Chunk of type INIT (RFC 9260 §3.3.2)
 
 See chunkInitCommon for the fixed headers
 
@@ -52,12 +52,9 @@ func (i *chunkInit) unmarshal(raw []byte) error {
 		return fmt.Errorf("%w: %d actual: %d", ErrChunkValueNotLongEnough, initChunkMinLength, len(i.raw))
 	}
 
-	// The Chunk Flags field in INIT is reserved, and all bits in it should
-	// be set to 0 by the sender and ignored by the receiver.  The sequence
-	// of parameters within an INIT can be processed in any order.
-	if i.flags != 0 {
-		return ErrChunkTypeInitFlagZero
-	}
+	// RFC 9260: INIT Chunk Flags are reserved; set to 0 by sender and
+	// ignored by receiver. Do NOT fail if non-zero. (We still set them
+	// to 0 on marshal.)
 
 	if err := i.chunkInitCommon.unmarshal(i.raw); err != nil {
 		return fmt.Errorf("%w: %v", ErrChunkTypeInitUnmarshalFailed, err) //nolint:errorlint
@@ -73,60 +70,34 @@ func (i *chunkInit) marshal() ([]byte, error) {
 	}
 
 	i.chunkHeader.typ = ctInit
+	i.chunkHeader.flags = 0 // RFC 9260: sender MUST set INIT flags to 0
 	i.chunkHeader.raw = initShared
 
 	return i.chunkHeader.marshal()
 }
 
 func (i *chunkInit) check() (abort bool, err error) {
-	// The receiver of the INIT (the responding end) records the value of
-	// the Initiate Tag parameter.  This value MUST be placed into the
-	// Verification Tag field of every SCTP packet that the receiver of
-	// the INIT transmits within this association.
-	//
-	// The Initiate Tag is allowed to have any value except 0.  See
-	// Section 5.3.1 for more on the selection of the tag value.
-	//
-	// If the value of the Initiate Tag in a received INIT chunk is found
-	// to be 0, the receiver MUST treat it as an error and close the
-	// association by transmitting an ABORT.
+	// Initiate Tag MUST NOT be 0.
 	if i.initiateTag == 0 {
 		return true, ErrChunkTypeInitInitateTagZero
 	}
 
-	// Defines the maximum number of streams the sender of this INIT
-	// chunk allows the peer end to create in this association.  The
-	// value 0 MUST NOT be used.
-	//
-	// Note: There is no negotiation of the actual number of streams but
-	// instead the two endpoints will use the min(requested, offered).
-	// See Section 5.1.1 for details.
-	//
-	// Note: A receiver of an INIT with the MIS value of 0 SHOULD abort
-	// the association.
+	// MIS (inbound streams requested) MUST NOT be 0.
 	if i.numInboundStreams == 0 {
 		return true, ErrInitInboundStreamRequestZero
 	}
 
-	// Defines the number of outbound streams the sender of this INIT
-	// chunk wishes to create in this association.  The value of 0 MUST
-	// NOT be used.
-	//
-	// Note: A receiver of an INIT with the OS value set to 0 SHOULD
-	// abort the association.
-
+	// OS (outbound streams requested) MUST NOT be 0.
 	if i.numOutboundStreams == 0 {
 		return true, ErrInitOutboundStreamRequestZero
 	}
 
-	// An SCTP receiver MUST be able to receive a minimum of 1500 bytes in
-	// one SCTP packet.  This means that an SCTP endpoint MUST NOT indicate
-	// less than 1500 bytes in its initial a_rwnd sent in the INIT or INIT
-	// ACK.
+	// a_rwnd MUST be >= 1500 bytes in INIT/INIT-ACK.
 	if i.advertisedReceiverWindowCredit < 1500 {
 		return true, ErrInitAdvertisedReceiver1500
 	}
 
+	// Unknown parameter handling per Parameter Header semantics.
 	for _, p := range i.unrecognizedParams {
 		if p.unrecognizedAction == paramHeaderUnrecognizedActionStop ||
 			p.unrecognizedAction == paramHeaderUnrecognizedActionStopAndReport {
