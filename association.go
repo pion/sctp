@@ -1841,6 +1841,7 @@ func (a *Association) AcceptStream() (*Stream, error) {
 func (a *Association) createStream(streamIdentifier uint16, accept bool) *Stream {
 	stream := &Stream{
 		association:      a,
+		lock:             &sync.RWMutex{},
 		streamIdentifier: streamIdentifier,
 		reassemblyQueue:  newReassemblyQueue(streamIdentifier),
 		log:              a.log,
@@ -1848,7 +1849,7 @@ func (a *Association) createStream(streamIdentifier uint16, accept bool) *Stream
 		writeDeadline:    deadline.New(),
 	}
 
-	stream.readNotifier = sync.NewCond(&stream.lock)
+	stream.readNotifier = sync.NewCond(stream.lock)
 
 	if accept {
 		select {
