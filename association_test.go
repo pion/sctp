@@ -1447,6 +1447,133 @@ func TestHandleForwardTSN(t *testing.T) {
 	})
 }
 
+func TestHandleDataAckTriggering(t *testing.T) {
+	loggerFactory := logging.NewDefaultLoggerFactory()
+
+	newAssoc := func() *Association {
+		assoc := createAssociation(Config{
+			LoggerFactory: loggerFactory,
+		})
+		assoc.payloadQueue.init(0)
+
+		return assoc
+	}
+
+	t.Run("ordered data uses delayed ack", func(t *testing.T) {
+		assoc := newAssoc()
+		defer assoc.ackTimer.stop()
+
+		pd := &chunkPayloadData{
+			beginningFragment:    true,
+			endingFragment:       true,
+			tsn:                  assoc.peerLastTSN() + 1,
+			streamIdentifier:     1,
+			streamSequenceNumber: 1,
+			userData:             []byte("ordered"),
+		}
+
+		assoc.handleChunksStart()
+		assoc.handleData(pd)
+		assoc.handleChunksEnd()
+
+		assoc.lock.RLock()
+		ackState := assoc.ackState
+		delayed := assoc.delayedAckTriggered
+		immediate := assoc.immediateAckTriggered
+		assoc.lock.RUnlock()
+
+		assert.Equal(t, ackStateDelay, ackState, "ordered DATA should use delayed ack")
+		assert.True(t, delayed, "ordered DATA should trigger delayed ack")
+		assert.False(t, immediate, "ordered DATA should not trigger immediate ack")
+	})
+
+	t.Run("immediateSack flag requests immediate ack", func(t *testing.T) {
+		assoc := newAssoc()
+		defer assoc.ackTimer.stop()
+
+		pd := &chunkPayloadData{
+			immediateSack:        true,
+			beginningFragment:    true,
+			endingFragment:       true,
+			tsn:                  assoc.peerLastTSN() + 1,
+			streamIdentifier:     1,
+			streamSequenceNumber: 1,
+			userData:             []byte("immediate"),
+		}
+
+		assoc.handleChunksStart()
+		assoc.handleData(pd)
+		assoc.handleChunksEnd()
+
+		assoc.lock.RLock()
+		ackState := assoc.ackState
+		delayed := assoc.delayedAckTriggered
+		immediate := assoc.immediateAckTriggered
+		assoc.lock.RUnlock()
+
+		assert.Equal(t, ackStateImmediate, ackState, "Immediate SACK flag should trigger immediate ack")
+		assert.False(t, delayed, "Immediate SACK flag should not trigger delayed ack")
+		assert.True(t, immediate, "Immediate SACK flag should trigger immediate ack")
+	})
+
+	t.Run("gap forces immediate ack", func(t *testing.T) {
+		assoc := newAssoc()
+		defer assoc.ackTimer.stop()
+
+		pd := &chunkPayloadData{
+			beginningFragment:    true,
+			endingFragment:       true,
+			tsn:                  assoc.peerLastTSN() + 2,
+			streamIdentifier:     1,
+			streamSequenceNumber: 1,
+			userData:             []byte("gap"),
+		}
+
+		assoc.handleChunksStart()
+		assoc.handleData(pd)
+		assoc.handleChunksEnd()
+
+		assoc.lock.RLock()
+		ackState := assoc.ackState
+		delayed := assoc.delayedAckTriggered
+		immediate := assoc.immediateAckTriggered
+		assoc.lock.RUnlock()
+
+		assert.Equal(t, ackStateImmediate, ackState, "gap should trigger immediate ack")
+		assert.False(t, delayed, "gap should not trigger delayed ack")
+		assert.True(t, immediate, "gap should trigger immediate ack")
+	})
+
+	t.Run("gap forces immediate ack even in always-delay mode", func(t *testing.T) {
+		assoc := newAssoc()
+		defer assoc.ackTimer.stop()
+		assoc.ackMode = ackModeAlwaysDelay
+
+		pd := &chunkPayloadData{
+			beginningFragment:    true,
+			endingFragment:       true,
+			tsn:                  assoc.peerLastTSN() + 3, // leave gaps
+			streamIdentifier:     1,
+			streamSequenceNumber: 1,
+			userData:             []byte("gap-delay"),
+		}
+
+		assoc.handleChunksStart()
+		assoc.handleData(pd)
+		assoc.handleChunksEnd()
+
+		assoc.lock.RLock()
+		ackState := assoc.ackState
+		delayed := assoc.delayedAckTriggered
+		immediate := assoc.immediateAckTriggered
+		assoc.lock.RUnlock()
+
+		assert.Equal(t, ackStateImmediate, ackState, "gap should override always-delay mode")
+		assert.False(t, delayed, "gap should not trigger delayed ack")
+		assert.True(t, immediate, "gap should trigger immediate ack")
+	})
+}
+
 func TestAssocT1InitTimer(t *testing.T) { //nolint:cyclop
 	loggerFactory := logging.NewDefaultLoggerFactory()
 

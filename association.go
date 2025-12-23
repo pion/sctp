@@ -1530,7 +1530,18 @@ func (a *Association) handleData(chunkPayload *chunkPayloadData) []*packet {
 		}
 	}
 
-	return a.handlePeerLastTSNAndAcknowledgement(chunkPayload.immediateSack)
+	// Upon the reception of a new DATA chunk, an endpoint shall examine the
+	// continuity of the TSNs received.  If the endpoint detects a gap in
+	// the received DATA chunk sequence, it SHOULD send a SACK with Gap Ack
+	// Blocks immediately.  The data receiver continues sending a SACK after
+	// receipt of each SCTP packet that doesn't fill the gap.
+	//  https://datatracker.ietf.org/doc/html/rfc4960#section-6.7
+	expectedTSN := a.peerLastTSN() + 1
+	gapDetected := sna32GT(chunkPayload.tsn, expectedTSN)
+
+	sackNow := chunkPayload.immediateSack || gapDetected
+
+	return a.handlePeerLastTSNAndAcknowledgement(sackNow)
 }
 
 // A common routine for handleData and handleForwardTSN routines
@@ -1564,16 +1575,24 @@ func (a *Association) handlePeerLastTSNAndAcknowledgement(sackImmediately bool) 
 		a.log.Tracef("[%s] packetloss: %s", a.name, a.payloadQueue.getGapAckBlocksString())
 	}
 
-	if (a.ackState != ackStateImmediate && !sackImmediately && !hasPacketLoss && a.ackMode == ackModeNormal) ||
-		a.ackMode == ackModeAlwaysDelay {
+	// RFC 4960 $6.7: SHOULD ack immediately when detecting a gap.
+	if sackImmediately || hasPacketLoss || a.ackMode == ackModeNoDelay {
+		a.immediateAckTriggered = true
+
+		return reply
+	}
+
+	if a.ackMode == ackModeAlwaysDelay || (a.ackMode == ackModeNormal && a.ackState != ackStateImmediate) {
 		if a.ackState == ackStateIdle {
 			a.delayedAckTriggered = true
 		} else {
 			a.immediateAckTriggered = true
 		}
-	} else {
-		a.immediateAckTriggered = true
+
+		return reply
 	}
+
+	a.immediateAckTriggered = true
 
 	return reply
 }
