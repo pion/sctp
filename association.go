@@ -1960,14 +1960,14 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 					a.log.Tracef("[%s] SACK: measured-rtt=%f srtt=%f new-rto=%f",
 						a.name, rtt, srtt, a.rtoMgr.getRTO())
 				}
+			}
 
-				// RFC 8985 (RACK) sec 5.2: RACK.segment is the most recently sent
-				// segment that has been delivered, including retransmissions.
-				if chunkPayload.since.After(newestDeliveredSendTime) {
-					newestDeliveredSendTime = chunkPayload.since
-					newestDeliveredOrigTSN = chunkPayload.tsn
-					deliveredFound = true
-				}
+			// RFC 8985 (RACK) sec 5.2: RACK.segment is the most recently sent
+			// segment that has been delivered, including retransmissions.
+			if chunkPayload.since.After(newestDeliveredSendTime) {
+				newestDeliveredSendTime = chunkPayload.since
+				newestDeliveredOrigTSN = chunkPayload.tsn
+				deliveredFound = true
 			}
 
 			if a.inFastRecovery && chunkPayload.tsn == a.fastRecoverExitPoint {
@@ -2017,12 +2017,12 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 						a.log.Tracef("[%s] SACK: measured-rtt=%f srtt=%f new-rto=%f",
 							a.name, rtt, srtt, a.rtoMgr.getRTO())
 					}
+				}
 
-					if chunkPayload.since.After(newestDeliveredSendTime) {
-						newestDeliveredSendTime = chunkPayload.since
-						newestDeliveredOrigTSN = chunkPayload.tsn
-						deliveredFound = true
-					}
+				if chunkPayload.since.After(newestDeliveredSendTime) {
+					newestDeliveredSendTime = chunkPayload.since
+					newestDeliveredOrigTSN = chunkPayload.tsn
+					deliveredFound = true
 				}
 			}
 
