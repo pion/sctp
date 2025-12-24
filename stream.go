@@ -106,9 +106,21 @@ func (s *Stream) SetReliabilityParams(unordered bool, relType byte, relVal uint3
 func (s *Stream) setReliabilityParams(unordered bool, relType byte, relVal uint32) {
 	s.log.Debugf("[%s] reliability params: ordered=%v type=%d value=%d",
 		s.name, !unordered, relType, relVal)
+
 	s.unordered = unordered
-	s.reliabilityType = relType
-	s.reliabilityValue = relVal
+
+	// RFC 7496 sec 3.1: 0 retransmissions is allowed
+	// RFC 3758 sec 4.1: lifetime may be any value; 0 -> immediate expiry
+	if relType == ReliabilityTypeRexmit || relType == ReliabilityTypeTimed {
+		s.reliabilityType = relType
+		s.reliabilityValue = relVal
+
+		return
+	}
+
+	// for ReliabilityTypeReliable and unknown types, fall back to fully reliable
+	s.reliabilityType = ReliabilityTypeReliable
+	s.reliabilityValue = 0
 }
 
 // Read reads a packet of len(p) bytes, dropping the Payload Protocol Identifier.
@@ -327,7 +339,7 @@ func (s *Stream) packetize(raw []byte, ppi PayloadProtocolIdentifier) ([]*chunkP
 	offset := uint32(0)
 	remaining := uint32(len(raw)) //nolint:gosec // G115
 
-	// From draft-ietf-rtcweb-data-protocol-09, section 6:
+	// From RFC 8832, section 6:
 	//   All Data Channel Establishment Protocol messages MUST be sent using
 	//   ordered delivery and reliable transmission.
 	unordered := ppi != PayloadTypeWebRTCDCEP && s.unordered
@@ -364,7 +376,7 @@ func (s *Stream) packetize(raw []byte, ppi PayloadProtocolIdentifier) ([]*chunkP
 		offset += fragmentSize
 	}
 
-	// RFC 4960 Sec 6.6
+	// RFC 9260 Sec 6.6
 	// Note: When transmitting ordered and unordered data, an endpoint does
 	// not increment its Stream Sequence Number when transmitting a DATA
 	// chunk with U flag set to 1.
@@ -493,7 +505,7 @@ func (s *Stream) onInboundStreamReset() {
 	// See RFC 8831 section 6.7:
 	//	if one side decides to close the data channel, it resets the corresponding
 	//	outgoing stream.  When the peer sees that an incoming stream was
-	//	reset, it also resets its corresponding outgoing stream.  Once this
+	//	reset, it also resets its corresponding outgoing stream. Once this
 	//	is completed, the data channel is closed.
 
 	s.readErr = io.EOF
