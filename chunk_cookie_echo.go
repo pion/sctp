@@ -38,6 +38,9 @@ func (c *chunkCookieEcho) unmarshal(raw []byte) error {
 	if c.typ != ctCookieEcho {
 		return fmt.Errorf("%w: actually is %s", ErrChunkTypeNotCookieEcho, c.typ.String())
 	}
+
+	// RFC 9260: flags are reserved; sender sets 0, receiver ignores.
+	// Do not fail if flags != 0.
 	c.cookie = c.raw
 
 	return nil
@@ -45,6 +48,7 @@ func (c *chunkCookieEcho) unmarshal(raw []byte) error {
 
 func (c *chunkCookieEcho) marshal() ([]byte, error) {
 	c.chunkHeader.typ = ctCookieEcho
+	c.chunkHeader.flags = 0 // sender sets 0 (reserved)
 	c.chunkHeader.raw = c.cookie
 
 	return c.chunkHeader.marshal()
