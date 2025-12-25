@@ -4,9 +4,13 @@
 package sctp
 
 import (
+	"encoding/binary"
 	"testing"
+	"time"
 
+	"github.com/pion/logging"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestChunkHeartbeatAck_UnmarshalMarshal_Success(t *testing.T) {
@@ -227,4 +231,26 @@ func TestChunkHeartbeatAck_Marshal_Failure_ParamCount(t *testing.T) {
 	_, err = hbAck.marshal()
 	assert.Error(t, err)
 	assert.ErrorIs(t, err, ErrHeartbeatAckParams)
+}
+
+func TestParseHeartbeatRTT(t *testing.T) {
+	base := time.Now()
+	assoc := &Association{
+		clockBase: base,
+		log:       logging.NewDefaultLoggerFactory().NewLogger("test-hb"),
+	}
+
+	now := base.Add(80 * time.Millisecond)
+	info := &paramHeartbeatInfo{heartbeatInformation: make([]byte, 8)}
+	binary.BigEndian.PutUint64(info.heartbeatInformation, uint64(30*time.Millisecond))
+
+	rtt, ok := assoc.parseHeartbeatRTT(info, now)
+	require.True(t, ok)
+	assert.InDelta(t, 50*time.Millisecond, rtt, float64(time.Millisecond))
+
+	future := &paramHeartbeatInfo{heartbeatInformation: make([]byte, 8)}
+	binary.BigEndian.PutUint64(future.heartbeatInformation, uint64(2*time.Second))
+
+	_, ok = assoc.parseHeartbeatRTT(future, now)
+	assert.False(t, ok)
 }
