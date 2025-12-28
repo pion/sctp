@@ -397,10 +397,10 @@ func createClientWithContext(ctx context.Context, config Config) (*Association, 
 		if err != nil {
 			return nil, err
 		}
-		assoc = createAssociationWithOutOfBandTokens(config, local, remote)
+		assoc = createAssociationWithTSN(config, local.initialTSN)
 		assoc.lock.Lock()
-		assoc.setState(established)
-		defer assoc.lock.Unlock()
+		assoc.initWithOutOfBandTokens(local, remote)
+		assoc.lock.Unlock()
 
 		go assoc.readLoop()
 		go assoc.writeLoop()
@@ -538,38 +538,6 @@ func createAssociationWithTSN(config Config, tsn uint32) *Association {
 	return assoc
 }
 
-func createAssociationWithOutOfBandTokens(config Config, localInit *chunkInit, remoteInit *chunkInit) *Association {
-	assoc := createAssociationWithTSN(config, localInit.initialTSN)
-	assoc.payloadQueue.init(remoteInit.initialTSN - 1)
-	assoc.myMaxNumInboundStreams = min16(localInit.numInboundStreams, remoteInit.numInboundStreams)
-	assoc.myMaxNumOutboundStreams = min16(localInit.numOutboundStreams, remoteInit.numOutboundStreams)
-	assoc.setRWND(min32(localInit.advertisedReceiverWindowCredit, remoteInit.advertisedReceiverWindowCredit))
-	assoc.peerVerificationTag = remoteInit.initiateTag
-	assoc.sourcePort = defaultSCTPSrcDstPort
-	assoc.destinationPort = defaultSCTPSrcDstPort
-	for _, param := range remoteInit.params {
-		switch v := param.(type) { // nolint:gocritic
-		case *paramSupportedExtensions:
-			for _, t := range v.ChunkTypes {
-				if t == ctForwardTSN {
-					assoc.log.Debugf("[%s] use ForwardTSN (on init)", assoc.name)
-					assoc.useForwardTSN = true
-				}
-			}
-		case *paramZeroChecksumAcceptable:
-			assoc.sendZeroChecksum = v.edmid == dtlsErrorDetectionMethod
-		}
-	}
-
-	if !assoc.useForwardTSN {
-		assoc.log.Warnf("[%s] not using ForwardTSN (on init)", assoc.name)
-	}
-
-	assoc.ssthresh = assoc.RWND()
-
-	return assoc
-}
-
 func (a *Association) init(isClient bool) {
 	a.lock.Lock()
 	defer a.lock.Unlock()
@@ -604,6 +572,38 @@ func (a *Association) init(isClient bool) {
 		a.setState(cookieWait)
 		a.t1Init.start(a.rtoMgr.getRTO())
 	}
+}
+
+// Caller must hold a.lock.
+func (a *Association) initWithOutOfBandTokens(localInit *chunkInit, remoteInit *chunkInit) {
+	a.payloadQueue.init(remoteInit.initialTSN - 1)
+	a.myMaxNumInboundStreams = min16(localInit.numInboundStreams, remoteInit.numInboundStreams)
+	a.myMaxNumOutboundStreams = min16(localInit.numOutboundStreams, remoteInit.numOutboundStreams)
+	a.setRWND(min32(localInit.advertisedReceiverWindowCredit, remoteInit.advertisedReceiverWindowCredit))
+	a.peerVerificationTag = remoteInit.initiateTag
+	a.sourcePort = defaultSCTPSrcDstPort
+	a.destinationPort = defaultSCTPSrcDstPort
+	for _, param := range remoteInit.params {
+		switch v := param.(type) { // nolint:gocritic
+		case *paramSupportedExtensions:
+			for _, t := range v.ChunkTypes {
+				if t == ctForwardTSN {
+					a.log.Debugf("[%s] use ForwardTSN (on init)", a.name)
+					a.useForwardTSN = true
+				}
+			}
+		case *paramZeroChecksumAcceptable:
+			a.sendZeroChecksum = v.edmid == dtlsErrorDetectionMethod
+		}
+	}
+
+	if !a.useForwardTSN {
+		a.log.Warnf("[%s] not using ForwardTSN (on init)", a.name)
+	}
+
+	a.ssthresh = a.RWND()
+
+	a.setState(established)
 }
 
 // caller must hold a.lock.
