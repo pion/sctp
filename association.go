@@ -30,6 +30,15 @@ const defaultSCTPSrcDstPort = 5000
 // Use global random generator to properly seed by crypto grade random.
 var globalMathRandomGenerator = randutil.NewMathRandomGenerator() // nolint:gochecknoglobals
 
+// Generates a non-zero Initiate tag.
+func generateInitiateTag() uint32 {
+	for {
+		if u := globalMathRandomGenerator.Uint32(); u != 0 {
+			return u
+		}
+	}
+}
+
 // Association errors.
 var (
 	ErrChunk                         = errors.New("abort chunk, with following errors")
@@ -461,7 +470,7 @@ func createAssociationWithTSN(config Config, tsn uint32) *Association {
 		controlQueue:            newControlQueue(),
 		mtu:                     mtu,
 		maxPayloadSize:          mtu - (commonHeaderSize + dataChunkHeaderSize),
-		myVerificationTag:       globalMathRandomGenerator.Uint32(),
+		myVerificationTag:       generateInitiateTag(),
 		initialTSN:              tsn,
 		myNextTSN:               tsn,
 		myNextRSN:               tsn,
@@ -4070,7 +4079,7 @@ func GenerateOutOfBandToken(config Config) ([]byte, error) {
 	init.initialTSN = globalMathRandomGenerator.Uint32()
 	init.numOutboundStreams = math.MaxUint16
 	init.numInboundStreams = math.MaxUint16
-	init.initiateTag = globalMathRandomGenerator.Uint32()
+	init.initiateTag = generateInitiateTag()
 	init.advertisedReceiverWindowCredit = config.MaxReceiveBufferSize
 	setSupportedExtensions(&init.chunkInitCommon)
 
