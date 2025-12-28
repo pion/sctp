@@ -330,7 +330,6 @@ type Config struct {
 	Name                 string
 	NetConn              net.Conn
 	MaxReceiveBufferSize uint32
-	MaxMessageSize       uint32
 	EnableZeroChecksum   bool
 	LoggerFactory        logging.LoggerFactory
 	BlockWrite           bool
@@ -354,15 +353,25 @@ type Config struct {
 	rackReoWndFloor time.Duration
 	// Optional: receiver worst-case delayed-ACK for PTO when only one packet is in flight
 	rackWCDelAck time.Duration
+}
 
-	// Local and remote SCTP init to use for SNAP
+// SctpOptions represents negotiated (e.g. via SDP) SCTP options.
+type SctpOptions struct {
+	// a=sctp-port:<port>
+	LocalSctpPort  int16
+	RemoteSctpPort int16
+
+	// a=max-message-size, negotiated.
+	MaxMessageSize uint32
+
+	// a=sctp-init:, decoded from base64.
 	LocalSctpInit  []byte
 	RemoteSctpInit []byte
 }
 
 // Server accepts a SCTP stream over a conn.
 func Server(config Config) (*Association, error) {
-	a := createAssociation(config)
+	a := createAssociation(config, SctpOptions{})
 	a.init(false)
 
 	select {
@@ -378,29 +387,29 @@ func Server(config Config) (*Association, error) {
 }
 
 // Client opens a SCTP stream over a conn.
-func Client(config Config) (*Association, error) {
-	return createClientWithContext(context.Background(), config)
+func Client(config Config, options SctpOptions) (*Association, error) {
+	return createClientWithContext(context.Background(), config, options)
 }
 
-func createClientWithContext(ctx context.Context, config Config) (*Association, error) {
-	if len(config.RemoteSctpInit) != 0 && len(config.LocalSctpInit) != 0 {
+func createClientWithContext(ctx context.Context, config Config, options SctpOptions) (*Association, error) {
+	if len(options.RemoteSctpInit) != 0 && len(options.LocalSctpInit) != 0 {
 		// SNAP, aka sctp-init in the SDP.
 		remote := &chunkInit{}
-		err := remote.unmarshal(config.RemoteSctpInit)
+		err := remote.unmarshal(options.RemoteSctpInit)
 		if err != nil {
 			return nil, err
 		}
 		local := &chunkInit{}
-		err = local.unmarshal(config.LocalSctpInit)
+		err = local.unmarshal(options.LocalSctpInit)
 		if err != nil {
 			return nil, err
 		}
-		assoc := createAssociationWithTSN(config, local.initialTSN)
+		assoc := createAssociationWithTSN(config, options, local.initialTSN)
 		assoc.initWithOutOfBandTokens(local, remote)
 
 		return assoc, nil
 	}
-	assoc := createAssociation(config)
+	assoc := createAssociation(config, options)
 	assoc.init(true)
 
 	select {
@@ -420,19 +429,19 @@ func createClientWithContext(ctx context.Context, config Config) (*Association, 
 	}
 }
 
-func createAssociation(config Config) *Association {
+func createAssociation(config Config, options SctpOptions) *Association {
 	tsn := globalMathRandomGenerator.Uint32()
 
-	return createAssociationWithTSN(config, tsn)
+	return createAssociationWithTSN(config, options, tsn)
 }
 
-func createAssociationWithTSN(config Config, tsn uint32) *Association {
+func createAssociationWithTSN(config Config, options SctpOptions, tsn uint32) *Association {
 	maxReceiveBufferSize := config.MaxReceiveBufferSize
 	if maxReceiveBufferSize == 0 {
 		maxReceiveBufferSize = initialRecvBufSize
 	}
 
-	maxMessageSize := config.MaxMessageSize
+	maxMessageSize := options.MaxMessageSize
 	if maxMessageSize == 0 {
 		maxMessageSize = defaultMaxMessageSize
 	}

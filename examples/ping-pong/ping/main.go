@@ -32,7 +32,7 @@ func main() { //nolint:cyclop
 		NetConn:       conn,
 		LoggerFactory: logging.NewDefaultLoggerFactory(),
 	}
-	a, err := sctp.Client(config)
+	a, err := sctp.Client(config, sctp.SctpOptions{})
 	if err != nil {
 		log.Panic(err)
 	}
