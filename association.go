@@ -383,8 +383,6 @@ func Client(config Config) (*Association, error) {
 }
 
 func createClientWithContext(ctx context.Context, config Config) (*Association, error) {
-	var assoc *Association
-
 	if len(config.RemoteSctpInit) != 0 && len(config.LocalSctpInit) != 0 {
 		// SNAP, aka sctp-init in the SDP.
 		remote := &chunkInit{}
@@ -397,17 +395,12 @@ func createClientWithContext(ctx context.Context, config Config) (*Association, 
 		if err != nil {
 			return nil, err
 		}
-		assoc = createAssociationWithTSN(config, local.initialTSN)
-		assoc.lock.Lock()
+		assoc := createAssociationWithTSN(config, local.initialTSN)
 		assoc.initWithOutOfBandTokens(local, remote)
-		assoc.lock.Unlock()
-
-		go assoc.readLoop()
-		go assoc.writeLoop()
 
 		return assoc, nil
 	}
-	assoc = createAssociation(config)
+	assoc := createAssociation(config)
 	assoc.init(true)
 
 	select {
@@ -574,8 +567,13 @@ func (a *Association) init(isClient bool) {
 	}
 }
 
-// Caller must hold a.lock.
 func (a *Association) initWithOutOfBandTokens(localInit *chunkInit, remoteInit *chunkInit) {
+	a.lock.Lock()
+	defer a.lock.Unlock()
+
+	go a.readLoop()
+	go a.writeLoop()
+
 	a.payloadQueue.init(remoteInit.initialTSN - 1)
 	a.myMaxNumInboundStreams = min16(localInit.numInboundStreams, remoteInit.numInboundStreams)
 	a.myMaxNumOutboundStreams = min16(localInit.numOutboundStreams, remoteInit.numOutboundStreams)
