@@ -355,23 +355,23 @@ type Config struct {
 	rackWCDelAck time.Duration
 }
 
-// SctpOptions represents negotiated (e.g. via SDP) SCTP options.
-type SctpOptions struct {
-	// a=sctp-port:<port>
+// SctpParameters represents negotiated (e.g. via SDP) SCTP parameters.
+type SctpParameters struct {
+	// a=sctp-port
 	LocalSctpPort  int16
 	RemoteSctpPort int16
 
 	// a=max-message-size, negotiated.
 	MaxMessageSize uint32
 
-	// a=sctp-init:, decoded from base64.
+	// a=sctp-ini, decoded from base64.
 	LocalSctpInit  []byte
 	RemoteSctpInit []byte
 }
 
 // Server accepts a SCTP stream over a conn.
 func Server(config Config) (*Association, error) {
-	a := createAssociation(config, SctpOptions{})
+	a := createAssociation(config, SctpParameters{})
 	a.init(false)
 
 	select {
@@ -387,11 +387,11 @@ func Server(config Config) (*Association, error) {
 }
 
 // Client opens a SCTP stream over a conn.
-func Client(config Config, options SctpOptions) (*Association, error) {
+func Client(config Config, options SctpParameters) (*Association, error) {
 	return createClientWithContext(context.Background(), config, options)
 }
 
-func createClientWithContext(ctx context.Context, config Config, options SctpOptions) (*Association, error) {
+func createClientWithContext(ctx context.Context, config Config, options SctpParameters) (*Association, error) {
 	if len(options.RemoteSctpInit) != 0 && len(options.LocalSctpInit) != 0 {
 		// SNAP, aka sctp-init in the SDP.
 		remote := &chunkInit{}
@@ -429,13 +429,13 @@ func createClientWithContext(ctx context.Context, config Config, options SctpOpt
 	}
 }
 
-func createAssociation(config Config, options SctpOptions) *Association {
+func createAssociation(config Config, options SctpParameters) *Association {
 	tsn := globalMathRandomGenerator.Uint32()
 
 	return createAssociationWithTSN(config, options, tsn)
 }
 
-func createAssociationWithTSN(config Config, options SctpOptions, tsn uint32) *Association {
+func createAssociationWithTSN(config Config, options SctpParameters, tsn uint32) *Association {
 	maxReceiveBufferSize := config.MaxReceiveBufferSize
 	if maxReceiveBufferSize == 0 {
 		maxReceiveBufferSize = initialRecvBufSize
