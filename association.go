@@ -18,7 +18,7 @@ import (
 
 	"github.com/pion/logging"
 	"github.com/pion/randutil"
-	"github.com/pion/transport/v3/deadline"
+	"github.com/pion/transport/v4/deadline"
 )
 
 // Port 5000 shows up in examples for SDPs used by WebRTC. Since this implementation
