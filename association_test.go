@@ -4113,7 +4113,7 @@ func newRackTestAssoc(t *testing.T) *Association {
 
 	// RACK defaults for tests
 	assoc.rackReorderingSeen = false
-	assoc.rackReoWndFloor = 0
+	assoc.rack.rackReoWndFloor = 0
 
 	// Have a non-zero SRTT so SRTT-bounding code runs deterministically.
 	assoc.srtt.Store(float64(100.0)) // 100 ms
@@ -4139,8 +4139,8 @@ func TestRACK_MarkLossOnACK(t *testing.T) {
 
 	assoc.lock.Lock()
 
-	if assoc.rackMinRTTWnd == nil {
-		assoc.rackMinRTTWnd = newWindowedMin(30 * time.Second)
+	if assoc.rack.rackMinRTTWnd == nil {
+		assoc.rack.rackMinRTTWnd = newWindowedMin(30 * time.Second)
 	}
 
 	// MinRTT = 40ms → base reoWnd = 10ms
@@ -4259,7 +4259,7 @@ func TestRACK_SuppressReoWndDuringRecovery_NoReorderingSeen(t *testing.T) {
 	assert.Equal(t, time.Duration(0), assoc.rackReoWnd, "reoWnd should stay 0 until a minRTT sample exists")
 
 	now := time.Now()
-	assoc.rackMinRTTWnd.Push(now, 120*time.Millisecond)
+	assoc.rack.rackMinRTTWnd.Push(now, 120*time.Millisecond)
 
 	assoc.onRackAfterSACK(false, time.Time{}, 0, &chunkSelectiveAck{})
 	assert.Equal(
