@@ -4326,6 +4326,24 @@ func TestRACK_PTO_DoesNotProbe_WhenPendingExists(t *testing.T) {
 	assert.False(t, got.retransmit, "PTO must prefer sending pending data over probing")
 }
 
+func TestRTOClearsFastRecovery(t *testing.T) {
+	assoc := newRackTestAssoc(t)
+
+	assoc.inFastRecovery = true
+	assoc.willRetransmitFast = true
+	assoc.fastRecoverExitPoint = assoc.cumulativeTSNAckPoint + 10
+	assoc.partialBytesAcked = 1234
+	assoc.setCWND(6 * assoc.MTU())
+
+	assoc.onRetransmissionTimeout(timerT3RTX, 1)
+
+	assert.False(t, assoc.inFastRecovery, "RTO should exit fast recovery")
+	assert.False(t, assoc.willRetransmitFast, "RTO should clear pending fast retransmit")
+	assert.Equal(t, uint32(0), assoc.partialBytesAcked, "RTO should reset partial bytes acked")
+	assert.Equal(t, assoc.MTU(), assoc.CWND(), "RTO should reset cwnd to MTU")
+	assert.Equal(t, uint32(0), assoc.fastRecoverExitPoint, "RTO should clear fast recovery exit point")
+}
+
 func newTLRAssociationForTest(t *testing.T) (*Association, net.Conn) {
 	t.Helper()
 

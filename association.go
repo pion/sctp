@@ -3183,6 +3183,17 @@ func (a *Association) onRetransmissionTimeout(id int, nRtos uint) { //nolint:cyc
 		a.setCWND(a.MTU())
 		a.log.Tracef("[%s] updated cwnd=%d ssthresh=%d inflight=%d (RTO)",
 			a.name, a.CWND(), a.ssthresh, a.inflightQueue.getNumBytes())
+		// If not in Fast Recovery, enter Fast Recovery and mark the highest outstanding TSN as the Fast Recovery exit point.
+		// When a SACK acknowledges all TSNs up to and including this exit point, Fast Recovery is exited.
+		// https://www.rfc-editor.org/rfc/rfc4960#section-7.2.4
+		// https://www.rfc-editor.org/rfc/rfc9260.html#section-7.2.4
+		if a.inFastRecovery {
+			a.inFastRecovery = false
+			a.willRetransmitFast = false
+			a.fastRecoverExitPoint = 0
+			a.partialBytesAcked = 0
+			a.log.Debugf("[%s] exit fast-recovery (RTO)", a.name)
+		}
 
 		// RFC 3758 sec 3.5
 		//  A5) Any time the T3-rtx timer expires, on any destination, the sender
