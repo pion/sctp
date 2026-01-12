@@ -1969,11 +1969,11 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 				newestDeliveredOrigTSN = chunkPayload.tsn
 				deliveredFound = true
 			}
+		}
 
-			if a.inFastRecovery && chunkPayload.tsn == a.fastRecoverExitPoint {
-				a.log.Debugf("[%s] exit fast-recovery", a.name)
-				a.inFastRecovery = false
-			}
+		if a.inFastRecovery && chunkPayload.tsn == a.fastRecoverExitPoint {
+			a.log.Debugf("[%s] exit fast-recovery", a.name)
+			a.inFastRecovery = false
 		}
 	}
 

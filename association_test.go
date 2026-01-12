@@ -4326,6 +4326,28 @@ func TestRACK_PTO_DoesNotProbe_WhenPendingExists(t *testing.T) {
 	assert.False(t, got.retransmit, "PTO must prefer sending pending data over probing")
 }
 
+func TestFastRecoveryExitOnAckedExitPoint(t *testing.T) {
+	assoc := newRackTestAssoc(t)
+
+	now := time.Now()
+	assoc.inflightQueue.pushNoCheck(mkChunk(100, now.Add(-20*time.Millisecond)))
+	assoc.inflightQueue.pushNoCheck(mkChunk(101, now.Add(-10*time.Millisecond)))
+
+	assoc.inflightQueue.markAsAcked(101)
+	assoc.inFastRecovery = true
+	assoc.fastRecoverExitPoint = 101
+
+	assoc.lock.Lock()
+	_, _, _, _, _, err := assoc.processSelectiveAck(&chunkSelectiveAck{ //nolint:dogsled
+		cumulativeTSNAck: 101,
+	})
+	exited := !assoc.inFastRecovery
+	assoc.lock.Unlock()
+
+	require.NoError(t, err)
+	assert.True(t, exited, "fast recovery should exit when exit point is cumulatively acked")
+}
+
 func TestRTOClearsFastRecovery(t *testing.T) {
 	assoc := newRackTestAssoc(t)
 
