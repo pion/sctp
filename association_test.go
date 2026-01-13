@@ -4700,3 +4700,43 @@ func TestTLR_GetDataPacketsToRetransmit_RespectsBurstBudget_LaterRTT(t *testing.
 	assert.Equal(t, 2, nChunks)
 	assert.True(t, consumed)
 }
+
+func TestComputePTOTimeout(t *testing.T) {
+	tests := []struct {
+		name    string
+		srttMs  float64
+		extra   time.Duration
+		wantMin time.Duration
+	}{
+		{
+			name:    "floored-to-ack-interval",
+			srttMs:  10, // very small srtt
+			extra:   2 * time.Millisecond,
+			wantMin: ackInterval,
+		},
+		{
+			name:    "no-rtt-default",
+			srttMs:  0,
+			extra:   5 * time.Millisecond,
+			wantMin: time.Second,
+		},
+		{
+			name:    "large-srtt",
+			srttMs:  300,
+			extra:   2 * time.Millisecond,
+			wantMin: 2*time.Duration(300*1e6) + 2*time.Millisecond,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := computePTOTimeout(tt.srttMs, tt.extra)
+			assert.GreaterOrEqual(t, got, tt.wantMin)
+			if tt.wantMin == ackInterval {
+				assert.Equal(t, ackInterval, got)
+			} else if tt.srttMs >= ackInterval.Seconds()*1000 {
+				assert.Equal(t, tt.wantMin, got)
+			}
+		})
+	}
+}

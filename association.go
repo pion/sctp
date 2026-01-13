@@ -266,6 +266,9 @@ type Association struct {
 	rackDeadline  time.Time
 	ptoDeadline   time.Time
 
+	// Monotonic epoch used for heartbeat RTT measurement to avoid wall-clock skew.
+	clockBase time.Time
+
 	rackWCDelAck    time.Duration // 200ms default
 	rackReoWndFloor time.Duration
 
@@ -452,6 +455,7 @@ func createAssociation(config Config) *Association {
 		name:                    config.Name,
 		blockWrite:              config.BlockWrite,
 		writeNotify:             make(chan struct{}, 1),
+		clockBase:               time.Now(),
 	}
 
 	// adaptive burst mitigation defaults
@@ -1598,31 +1602,48 @@ func (a *Association) handleHeartbeatAck(c *chunkHeartbeatAck) {
 	}
 
 	// active RTT probe: if heartbeatInformation is exactly 8 bytes, treat it
-	// as a big-endian unix nano timestamp.
+	// as a monotonic timestamp since association creation to avoid wall-clock jumps.
 	if len(info.heartbeatInformation) == 8 {
-		ns := binary.BigEndian.Uint64(info.heartbeatInformation)
-		if ns > math.MaxInt64 {
-			// Malformed or future-unsafe value; ignore this heartbeat-ack.
-			a.log.Warnf("[%s] HB RTT: timestamp overflows int64, ignoring", a.name)
-
+		now := time.Now()
+		rttDur, ok := a.parseHeartbeatRTT(info, now)
+		if !ok {
 			return
 		}
 
-		sentNanos := int64(ns)
-		sent := time.Unix(0, sentNanos)
-		now := time.Now()
+		rttMs := rttDur.Seconds() * 1000.0
+		srtt := a.rtoMgr.setNewRTT(rttMs)
+		a.srtt.Store(srtt)
 
-		if !sent.IsZero() && !now.Before(sent) {
-			rttMs := now.Sub(sent).Seconds() * 1000.0
-			srtt := a.rtoMgr.setNewRTT(rttMs)
-			a.srtt.Store(srtt)
+		a.rackMinRTTWnd.Push(now, rttDur)
 
-			a.rackMinRTTWnd.Push(now, now.Sub(sent))
-
-			a.log.Tracef("[%s] HB RTT: measured=%.3fms srtt=%.3fms rto=%.3fms",
-				a.name, rttMs, srtt, a.rtoMgr.getRTO())
-		}
+		a.log.Tracef("[%s] HB RTT: measured=%.3fms srtt=%.3fms rto=%.3fms",
+			a.name, rttMs, srtt, a.rtoMgr.getRTO())
 	}
+}
+
+func (a *Association) parseHeartbeatRTT(info *paramHeartbeatInfo, now time.Time) (time.Duration, bool) {
+	if len(info.heartbeatInformation) != 8 {
+		return 0, false
+	}
+
+	ns := binary.BigEndian.Uint64(info.heartbeatInformation)
+	if ns > math.MaxInt64 {
+		// Malformed or future-unsafe value; ignore this heartbeat-ack.
+		a.log.Warnf("[%s] HB RTT: timestamp overflows int64, ignoring", a.name)
+
+		return 0, false
+	}
+
+	elapsedSinceBase := now.Sub(a.clockBase)
+	sentSinceBase := time.Duration(int64(ns))
+	if elapsedSinceBase < sentSinceBase {
+		// Timestamp is from the future relative to our clock base; likely a clock step.
+		a.log.Warnf("[%s] HB RTT: timestamp ahead of now, ignoring", a.name)
+
+		return 0, false
+	}
+
+	return elapsedSinceBase - sentSinceBase, true
 }
 
 // The caller should hold the lock.
@@ -3375,6 +3396,19 @@ func (a *Association) stopPTOTimer() {
 	a.pokeTimerLoop()
 }
 
+func computePTOTimeout(srttMs float64, extra time.Duration) time.Duration {
+	pto := time.Second
+	if srttMs > 0 {
+		pto = 2*time.Duration(srttMs*1e6) + extra
+	}
+
+	if pto < ackInterval {
+		pto = ackInterval
+	}
+
+	return pto
+}
+
 // drainTimer safely stops a timer and drains its channel if needed.
 func drainTimer(t *time.Timer) {
 	if !t.Stop() {
@@ -3612,22 +3646,12 @@ func (a *Association) onRackAfterSACK( // nolint:gocognit,cyclop,gocyclo
 		return
 	}
 
-	var pto time.Duration
-	srttMs := a.SRTT()
-	if srttMs > 0 {
-		srtt := time.Duration(srttMs * 1e6)
-		extra := 2 * time.Millisecond
-
-		if a.inflightQueue.size() == 1 {
-			extra = a.rackWCDelAck // 200ms for single outstanding, else 2ms
-		}
-
-		pto = 2*srtt + extra
-	} else {
-		pto = time.Second // no RTT yet
+	extra := 2 * time.Millisecond
+	if a.inflightQueue.size() == 1 {
+		extra = a.rackWCDelAck // 200ms for single outstanding, else 2ms
 	}
 
-	a.startPTOTimer(pto)
+	a.startPTOTimer(computePTOTimeout(a.SRTT(), extra))
 }
 
 // schedulePTOAfterSendLocked starts/restarts the PTO timer when new data is transmitted.
@@ -3639,21 +3663,12 @@ func (a *Association) schedulePTOAfterSendLocked() {
 		return
 	}
 
-	var pto time.Duration
-	if srttMs := a.SRTT(); srttMs > 0 {
-		srtt := time.Duration(srttMs * 1e6)
-		extra := 2 * time.Millisecond
-
-		if a.inflightQueue.size() == 1 {
-			extra = a.rackWCDelAck
-		}
-
-		pto = 2*srtt + extra
-	} else {
-		pto = time.Second
+	extra := 2 * time.Millisecond
+	if a.inflightQueue.size() == 1 {
+		extra = a.rackWCDelAck
 	}
 
-	a.startPTOTimer(pto)
+	a.startPTOTimer(computePTOTimeout(a.SRTT(), extra))
 }
 
 // onRackTimeout is fired to avoid waiting for the next ACK.
@@ -3986,9 +4001,9 @@ func (a *Association) ActiveHeartbeat() {
 
 // caller must hold a.lock.
 func (a *Association) sendActiveHeartbeatLocked() {
-	now := time.Now().UnixNano()
+	elapsed := time.Since(a.clockBase)
 	buf := make([]byte, 8)
-	binary.BigEndian.PutUint64(buf, uint64(now)) //nolint:gosec // time.now() will never be negative
+	binary.BigEndian.PutUint64(buf, uint64(elapsed)) //nolint:gosec // elapsed is monotonic duration
 
 	info := &paramHeartbeatInfo{heartbeatInformation: buf}
 

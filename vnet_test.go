@@ -7,8 +7,10 @@ import (
 	"bytes"
 	crand "crypto/rand"
 	"fmt"
+	"math/rand"
 	"net"
 	"reflect"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -952,5 +954,260 @@ func TestRACK_RTTSwitch_Reordering_NoDrop(t *testing.T) { //nolint:gocyclo,cyclo
 	if assert.True(t, ss.ok, "server assoc/stats unavailable") {
 		assert.LessOrEqual(t, ss.fr, uint64(2),
 			"server fast retransmits should be low")
+	}
+}
+
+func TestRACK_PTOLossyDelayed(t *testing.T) { //nolint:cyclop,gocyclo,maintidx
+	lim := test.TimeOut(20 * time.Second)
+	defer lim.Stop()
+
+	loggerFactory := logging.NewDefaultLoggerFactory()
+	log := loggerFactory.NewLogger("test-rack-pto-lossy")
+
+	venv, err := buildVNetEnv(t, &vNetEnvConfig{
+		minDelay:      50 * time.Millisecond,
+		loggerFactory: loggerFactory,
+		log:           log,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, venv)
+	defer venv.wan.Stop() // nolint:errcheck
+
+	const (
+		numMessages = 30
+		messageSize = 256
+		lossPct     = 10
+	)
+
+	makeMessages := func() [][]byte {
+		msgs := make([][]byte, numMessages)
+		for i := 0; i < numMessages; i++ {
+			msgs[i] = bytes.Repeat([]byte{byte(i % 251)}, messageSize)
+		}
+
+		return msgs
+	}
+
+	rng := rand.New(rand.NewSource(time.Now().UnixNano())) //nolint:gosec
+	var rngMu sync.Mutex
+
+	// Randomly drop some DATA chunks to emulate lossy links.
+	venv.wan.AddChunkFilter(func(c vnet.Chunk) bool {
+		p := &packet{}
+		if err := p.unmarshal(true, c.UserData()); err != nil {
+			return true
+		}
+
+		for i := 0; i < len(p.chunks); i++ {
+			if _, ok := p.chunks[i].(*chunkPayloadData); ok {
+				rngMu.Lock()
+				drop := rng.Intn(100) < lossPct //nolint:gosec
+				rngMu.Unlock()
+				if drop {
+					return false
+				}
+
+				break
+			}
+		}
+
+		return true
+	})
+
+	type statsResult struct {
+		fr uint64
+		ok bool
+	}
+
+	errCh := make(chan error, 8)
+	clientDone := make(chan struct{})
+	serverDone := make(chan struct{})
+	clientStatsCh := make(chan statsResult, 1)
+	serverStatsCh := make(chan statsResult, 1)
+
+	go func() {
+		defer close(serverDone)
+
+		fail := func(e error) {
+			if e != nil {
+				errCh <- e
+			}
+		}
+
+		conn, dErr := venv.net0.DialUDP("udp4",
+			&net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: defaultSCTPSrcDstPort},
+			&net.UDPAddr{IP: net.ParseIP("2.2.2.2"), Port: defaultSCTPSrcDstPort},
+		)
+		if dErr != nil {
+			fail(fmt.Errorf("server DialUDP: %w", dErr))
+			serverStatsCh <- statsResult{ok: false}
+
+			return
+		}
+		defer conn.Close() // nolint:errcheck
+
+		assoc, aErr := Server(Config{
+			NetConn:       conn,
+			LoggerFactory: loggerFactory,
+		})
+		if aErr != nil {
+			fail(fmt.Errorf("server assoc: %w", aErr))
+			serverStatsCh <- statsResult{ok: false}
+
+			return
+		}
+		defer func() {
+			var fr uint64
+			if assoc != nil {
+				fr = assoc.stats.getNumFastRetrans()
+			}
+			serverStatsCh <- statsResult{fr: fr, ok: assoc != nil}
+			_ = assoc.Close()
+		}()
+
+		stream, sErr := assoc.AcceptStream()
+		if sErr != nil {
+			fail(fmt.Errorf("server AcceptStream: %w", sErr))
+
+			return
+		}
+		defer stream.Close() // nolint:errcheck
+		stream.SetReliabilityParams(false, ReliabilityTypeReliable, 0)
+
+		buf := make([]byte, 4096)
+		for {
+			_ = stream.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+			n, rerr := stream.Read(buf)
+			if rerr != nil {
+				if netErr, ok := rerr.(net.Error); ok && netErr.Timeout() { //nolint:errorlint
+					continue
+				}
+
+				return
+			}
+			if n == 0 {
+				continue
+			}
+			if _, werr := stream.Write(buf[:n]); werr != nil {
+				fail(fmt.Errorf("server echo: %w", werr))
+
+				return
+			}
+		}
+	}()
+
+	go func() {
+		defer close(clientDone)
+
+		fail := func(e error) {
+			if e != nil {
+				errCh <- e
+			}
+		}
+
+		conn, dErr := venv.net1.DialUDP("udp4",
+			&net.UDPAddr{IP: net.ParseIP("2.2.2.2"), Port: defaultSCTPSrcDstPort},
+			&net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: defaultSCTPSrcDstPort},
+		)
+		if dErr != nil {
+			fail(fmt.Errorf("client DialUDP: %w", dErr))
+			clientStatsCh <- statsResult{ok: false}
+
+			return
+		}
+		defer conn.Close() // nolint:errcheck
+
+		assoc, aErr := Client(Config{
+			NetConn:       conn,
+			LoggerFactory: loggerFactory,
+		})
+		if aErr != nil {
+			fail(fmt.Errorf("client assoc: %w", aErr))
+			clientStatsCh <- statsResult{ok: false}
+
+			return
+		}
+
+		defer func() {
+			var fr uint64
+			if assoc != nil {
+				fr = assoc.stats.getNumFastRetrans()
+			}
+			clientStatsCh <- statsResult{fr: fr, ok: assoc != nil}
+			_ = assoc.Close()
+		}()
+
+		stream, sErr := assoc.OpenStream(888, PayloadTypeWebRTCBinary)
+		if sErr != nil {
+			fail(fmt.Errorf("client OpenStream: %w", sErr))
+
+			return
+		}
+		defer stream.Close() // nolint:errcheck
+		stream.SetReliabilityParams(false, ReliabilityTypeReliable, 0)
+
+		msgs := makeMessages()
+		for i := 0; i < numMessages; i++ {
+			if _, werr := stream.Write(msgs[i]); werr != nil {
+				fail(fmt.Errorf("client write i=%d: %w", i, werr))
+
+				return
+			}
+		}
+
+		seen := make(map[byte]bool, numMessages)
+		buf := make([]byte, messageSize+64)
+		deadline := time.Now().Add(15 * time.Second)
+
+		for len(seen) < numMessages && time.Now().Before(deadline) {
+			_ = stream.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+			n, rerr := stream.Read(buf)
+			if rerr != nil || n == 0 {
+				continue
+			}
+			if n < messageSize {
+				fail(fmt.Errorf("short echo read: got=%d want=%d", n, messageSize)) //nolint:err113
+
+				return
+			}
+			id := buf[0]
+			if seen[id] {
+				continue
+			}
+
+			expected := bytes.Repeat([]byte{id}, messageSize)
+			if !bytes.Equal(buf[:messageSize], expected) {
+				fail(fmt.Errorf("payload mismatch for id=%d", int(id))) //nolint:err113
+
+				return
+			}
+
+			seen[id] = true
+		}
+
+		if len(seen) != numMessages {
+			fail(fmt.Errorf("missing echoes: got=%d want=%d", len(seen), numMessages)) //nolint:err113
+		}
+	}()
+
+	<-clientDone
+	<-serverDone
+
+	close(errCh)
+	for e := range errCh {
+		assert.NoError(t, e)
+	}
+
+	cs := <-clientStatsCh
+	ss := <-serverStatsCh
+
+	if assert.True(t, cs.ok, "client assoc/stats unavailable") {
+		assert.LessOrEqual(t, cs.fr, uint64(20),
+			"client fast retransmits should stay reasonable under loss")
+	}
+
+	if assert.True(t, ss.ok, "server assoc/stats unavailable") {
+		assert.LessOrEqual(t, ss.fr, uint64(20),
+			"server fast retransmits should stay reasonable under loss")
 	}
 }
