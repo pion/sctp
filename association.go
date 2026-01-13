@@ -228,6 +228,7 @@ type Association struct {
 	// Congestion control parameters
 	maxReceiveBufferSize uint32
 	maxMessageSize       uint32
+	rtoMax               float64
 	cwnd                 uint32 // my congestion window size
 	rwnd                 uint32 // calculated peer's receiver windows size
 	ssthresh             uint32 // slow start threshold
@@ -248,9 +249,9 @@ type Association struct {
 	ackTimer   *ackTimer
 
 	// RACK / TLP state
+	rack                        rackSettings  // rack configurable options
 	rackReoWnd                  time.Duration // dynamic reordering window
 	rackMinRTT                  time.Duration // min observed RTT
-	rackMinRTTWnd               *windowedMin  // the window used to determine minRTT, defaults to 30s
 	rackDeliveredTime           time.Time     // send time of most recently delivered original chunk
 	rackHighestDeliveredOrigTSN uint32
 	rackReorderingSeen          bool // ever observed reordering for this association
@@ -265,9 +266,6 @@ type Association struct {
 	timerUpdateCh chan struct{}
 	rackDeadline  time.Time
 	ptoDeadline   time.Time
-
-	rackWCDelAck    time.Duration // 200ms default
-	rackReoWndFloor time.Duration
 
 	// Chunks stored for retransmission
 	storedInit       *chunkInit
@@ -318,16 +316,17 @@ type Association struct {
 // Config collects the arguments to createAssociation construction into
 // a single structure.
 type Config struct {
-	Name                 string
-	NetConn              net.Conn
-	MaxReceiveBufferSize uint32
-	MaxMessageSize       uint32
-	EnableZeroChecksum   bool
-	LoggerFactory        logging.LoggerFactory
-	BlockWrite           bool
-	MTU                  uint32
+	LoggerFactory logging.LoggerFactory
+	Name          string
+	NetConn       net.Conn
+
+	BlockWrite         bool
+	EnableZeroChecksum bool
+	MTU                uint32
 
 	// congestion control configuration
+	MaxReceiveBufferSize uint32
+	MaxMessageSize       uint32
 	// RTOMax is the maximum retransmission timeout in milliseconds
 	RTOMax float64
 	// Minimum congestion window
@@ -337,14 +336,8 @@ type Config struct {
 	// Step of congestion window increase at Congestion Avoidance
 	CwndCAStep uint32
 
-	// The RACK configs are currently private as SCTP will be reworked to use the
-	// modern options pattern in a future release.
-	// Optional: size of window used to determine minimum RTT for RACK (defaults to 30s)
-	rackMinRTTWnd time.Duration
-	// Optional: cap the minimum reordering window: 0 = use quarter-RTT
-	rackReoWndFloor time.Duration
-	// Optional: receiver worst-case delayed-ACK for PTO when only one packet is in flight
-	rackWCDelAck time.Duration
+	// RACK config options
+	rack rackSettings
 }
 
 // Server accepts a SCTP stream over a conn.
@@ -390,6 +383,21 @@ func createClientWithContext(ctx context.Context, config Config) (*Association, 
 	}
 }
 
+// newAssociationWithOptions finalizes a pre-configured association with optional overrides.
+//
+//nolint:gocognit,cyclop
+func newAssociationWithOptions(assoc *Association, opts ...AssociationOption) (*Association, error) {
+	var err error
+
+	for _, opt := range opts {
+		if err = opt(assoc); err != nil {
+			return nil, err
+		}
+	}
+
+	return assoc, nil
+}
+
 func createAssociation(config Config) *Association {
 	maxReceiveBufferSize := config.MaxReceiveBufferSize
 	if maxReceiveBufferSize == 0 {
@@ -405,6 +413,8 @@ func createAssociation(config Config) *Association {
 	if mtu == 0 {
 		mtu = initialMTU
 	}
+
+	rtoMax := config.RTOMax
 
 	tsn := globalMathRandomGenerator.Uint32()
 	assoc := &Association{
@@ -459,18 +469,20 @@ func createAssociation(config Config) *Association {
 	assoc.tlrBurstLaterRTTUnits = tlrBurstDefaultLaterRTT
 
 	// RACK defaults
-	assoc.rackWCDelAck = config.rackWCDelAck
-	if assoc.rackWCDelAck == 0 {
-		assoc.rackWCDelAck = 200 * time.Millisecond // WCDelAckT, RACK for SCTP section 2C
+	assoc.rack.rackWCDelAck = config.rack.rackWCDelAck
+	if assoc.rack.rackWCDelAck == 0 {
+		assoc.rack.rackWCDelAck = 200 * time.Millisecond // WCDelAckT, RACK for SCTP section 2C
 	}
 
-	// defaults to 30s window to determine minRTT
-	assoc.rackMinRTTWnd = newWindowedMin(config.rackMinRTTWnd)
+	assoc.rack.rackMinRTTWnd = config.rack.rackMinRTTWnd
+	if assoc.rack.rackMinRTTWnd == nil {
+		assoc.rack.rackMinRTTWnd = newWindowedMin(30 * time.Second)
+	}
 
 	assoc.timerUpdateCh = make(chan struct{}, 1)
 	go assoc.timerLoop()
 
-	assoc.rackReoWndFloor = config.rackReoWndFloor // optional floor; usually 0
+	assoc.rack.rackReoWndFloor = config.rack.rackReoWndFloor // optional floor; usually 0
 	assoc.rackKeepInflatedRecoveries = 0
 
 	if assoc.name == "" {
@@ -486,11 +498,11 @@ func createAssociation(config Config) *Association {
 		assoc.name, assoc.CWND(), assoc.ssthresh, assoc.inflightQueue.getNumBytes())
 
 	assoc.srtt.Store(float64(0))
-	assoc.t1Init = newRTXTimer(timerT1Init, assoc, maxInitRetrans, config.RTOMax)
-	assoc.t1Cookie = newRTXTimer(timerT1Cookie, assoc, maxInitRetrans, config.RTOMax)
-	assoc.t2Shutdown = newRTXTimer(timerT2Shutdown, assoc, noMaxRetrans, config.RTOMax)
-	assoc.t3RTX = newRTXTimer(timerT3RTX, assoc, noMaxRetrans, config.RTOMax)
-	assoc.tReconfig = newRTXTimer(timerReconfig, assoc, noMaxRetrans, config.RTOMax)
+	assoc.t1Init = newRTXTimer(timerT1Init, assoc, maxInitRetrans, rtoMax)
+	assoc.t1Cookie = newRTXTimer(timerT1Cookie, assoc, maxInitRetrans, rtoMax)
+	assoc.t2Shutdown = newRTXTimer(timerT2Shutdown, assoc, noMaxRetrans, rtoMax)
+	assoc.t3RTX = newRTXTimer(timerT3RTX, assoc, noMaxRetrans, rtoMax)
+	assoc.tReconfig = newRTXTimer(timerReconfig, assoc, noMaxRetrans, rtoMax)
 	assoc.ackTimer = newAckTimer(assoc)
 
 	return assoc
@@ -1617,7 +1629,7 @@ func (a *Association) handleHeartbeatAck(c *chunkHeartbeatAck) {
 			srtt := a.rtoMgr.setNewRTT(rttMs)
 			a.srtt.Store(srtt)
 
-			a.rackMinRTTWnd.Push(now, now.Sub(sent))
+			a.rack.rackMinRTTWnd.Push(now, now.Sub(sent))
 
 			a.log.Tracef("[%s] HB RTT: measured=%.3fms srtt=%.3fms rto=%.3fms",
 				a.name, rttMs, srtt, a.rtoMgr.getRTO())
@@ -1955,7 +1967,7 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 					// use a window to determine minRtt instead of a global min
 					// as the RTT can fluctuate, which can cause problems if going from a
 					// high RTT to a low RTT.
-					a.rackMinRTTWnd.Push(now, now.Sub(chunkPayload.since))
+					a.rack.rackMinRTTWnd.Push(now, now.Sub(chunkPayload.since))
 
 					a.log.Tracef("[%s] SACK: measured-rtt=%f srtt=%f new-rto=%f",
 						a.name, rtt, srtt, a.rtoMgr.getRTO())
@@ -2012,7 +2024,7 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 						srtt := a.rtoMgr.setNewRTT(rtt)
 						a.srtt.Store(srtt)
 
-						a.rackMinRTTWnd.Push(now, now.Sub(chunkPayload.since))
+						a.rack.rackMinRTTWnd.Push(now, now.Sub(chunkPayload.since))
 
 						a.log.Tracef("[%s] SACK: measured-rtt=%f srtt=%f new-rto=%f",
 							a.name, rtt, srtt, a.rtoMgr.getRTO())
@@ -3502,13 +3514,13 @@ func (a *Association) onRackAfterSACK( // nolint:gocognit,cyclop,gocyclo
 	}
 
 	// 2) Maintain ReoWND (RACK for SCTP section 2B)
-	if minRTT := a.rackMinRTTWnd.Min(currTime); minRTT > 0 {
+	if minRTT := a.rack.rackMinRTTWnd.Min(currTime); minRTT > 0 {
 		a.rackMinRTT = minRTT
 	}
 
 	var base time.Duration
 	if a.rackMinRTT > 0 {
-		base = max(a.rackMinRTT/4, a.rackReoWndFloor)
+		base = max(a.rackMinRTT/4, a.rack.rackReoWndFloor)
 	}
 
 	// Suppress during recovery if no reordering ever seen; else (re)initialize from base if zero.
@@ -3521,7 +3533,7 @@ func (a *Association) onRackAfterSACK( // nolint:gocognit,cyclop,gocyclo
 	// DSACK-style inflation using SCTP duplicate TSNs (RACK for SCTP section 3 noting SCTP
 	// natively reports duplicates + RACK for SCTP section 2B policy)
 	if len(sack.duplicateTSN) > 0 && a.rackMinRTT > 0 {
-		a.rackReoWnd += max(a.rackMinRTT/4, a.rackReoWndFloor)
+		a.rackReoWnd += max(a.rackMinRTT/4, a.rack.rackReoWndFloor)
 		// keep inflated for 16 loss recoveries before reset
 		a.rackKeepInflatedRecoveries = 16
 		a.log.Tracef("[%s] RACK: DSACK/dupTSN seen, inflate reoWnd to %v", a.name, a.rackReoWnd)
@@ -3619,7 +3631,7 @@ func (a *Association) onRackAfterSACK( // nolint:gocognit,cyclop,gocyclo
 		extra := 2 * time.Millisecond
 
 		if a.inflightQueue.size() == 1 {
-			extra = a.rackWCDelAck // 200ms for single outstanding, else 2ms
+			extra = a.rack.rackWCDelAck // 200ms for single outstanding, else 2ms
 		}
 
 		pto = 2*srtt + extra
@@ -3645,7 +3657,7 @@ func (a *Association) schedulePTOAfterSendLocked() {
 		extra := 2 * time.Millisecond
 
 		if a.inflightQueue.size() == 1 {
-			extra = a.rackWCDelAck
+			extra = a.rack.rackWCDelAck
 		}
 
 		pto = 2*srtt + extra
