@@ -30,6 +30,15 @@ const defaultSCTPSrcDstPort = 5000
 // Use global random generator to properly seed by crypto grade random.
 var globalMathRandomGenerator = randutil.NewMathRandomGenerator() // nolint:gochecknoglobals
 
+// Generates a non-zero Initiate tag.
+func generateInitiateTag() uint32 {
+	for {
+		if u := globalMathRandomGenerator.Uint32(); u != 0 {
+			return u
+		}
+	}
+}
+
 // Association errors.
 var (
 	ErrChunk                         = errors.New("abort chunk, with following errors")
@@ -321,7 +330,6 @@ type Config struct {
 	Name                 string
 	NetConn              net.Conn
 	MaxReceiveBufferSize uint32
-	MaxMessageSize       uint32
 	EnableZeroChecksum   bool
 	LoggerFactory        logging.LoggerFactory
 	BlockWrite           bool
@@ -347,9 +355,23 @@ type Config struct {
 	rackWCDelAck time.Duration
 }
 
+// SctpParameters represents negotiated (e.g. via SDP) SCTP parameters.
+type SctpParameters struct {
+	// a=sctp-port
+	LocalSctpPort  int16
+	RemoteSctpPort int16
+
+	// a=max-message-size, negotiated.
+	MaxMessageSize uint32
+
+	// a=sctp-ini, decoded from base64.
+	LocalSctpInit  []byte
+	RemoteSctpInit []byte
+}
+
 // Server accepts a SCTP stream over a conn.
 func Server(config Config) (*Association, error) {
-	a := createAssociation(config)
+	a := createAssociation(config, SctpParameters{})
 	a.init(false)
 
 	select {
@@ -365,12 +387,29 @@ func Server(config Config) (*Association, error) {
 }
 
 // Client opens a SCTP stream over a conn.
-func Client(config Config) (*Association, error) {
-	return createClientWithContext(context.Background(), config)
+func Client(config Config, options SctpParameters) (*Association, error) {
+	return createClientWithContext(context.Background(), config, options)
 }
 
-func createClientWithContext(ctx context.Context, config Config) (*Association, error) {
-	assoc := createAssociation(config)
+func createClientWithContext(ctx context.Context, config Config, options SctpParameters) (*Association, error) {
+	if len(options.RemoteSctpInit) != 0 && len(options.LocalSctpInit) != 0 {
+		// SNAP, aka sctp-init in the SDP.
+		remote := &chunkInit{}
+		err := remote.unmarshal(options.RemoteSctpInit)
+		if err != nil {
+			return nil, err
+		}
+		local := &chunkInit{}
+		err = local.unmarshal(options.LocalSctpInit)
+		if err != nil {
+			return nil, err
+		}
+		assoc := createAssociationWithTSN(config, options, local.initialTSN)
+		assoc.initWithOutOfBandTokens(local, remote)
+
+		return assoc, nil
+	}
+	assoc := createAssociation(config, options)
 	assoc.init(true)
 
 	select {
@@ -390,13 +429,19 @@ func createClientWithContext(ctx context.Context, config Config) (*Association, 
 	}
 }
 
-func createAssociation(config Config) *Association {
+func createAssociation(config Config, options SctpParameters) *Association {
+	tsn := globalMathRandomGenerator.Uint32()
+
+	return createAssociationWithTSN(config, options, tsn)
+}
+
+func createAssociationWithTSN(config Config, options SctpParameters, tsn uint32) *Association {
 	maxReceiveBufferSize := config.MaxReceiveBufferSize
 	if maxReceiveBufferSize == 0 {
 		maxReceiveBufferSize = initialRecvBufSize
 	}
 
-	maxMessageSize := config.MaxMessageSize
+	maxMessageSize := options.MaxMessageSize
 	if maxMessageSize == 0 {
 		maxMessageSize = defaultMaxMessageSize
 	}
@@ -406,7 +451,6 @@ func createAssociation(config Config) *Association {
 		mtu = initialMTU
 	}
 
-	tsn := globalMathRandomGenerator.Uint32()
 	assoc := &Association{
 		netConn:              config.NetConn,
 		maxReceiveBufferSize: maxReceiveBufferSize,
@@ -428,7 +472,7 @@ func createAssociation(config Config) *Association {
 		controlQueue:            newControlQueue(),
 		mtu:                     mtu,
 		maxPayloadSize:          mtu - (commonHeaderSize + dataChunkHeaderSize),
-		myVerificationTag:       globalMathRandomGenerator.Uint32(),
+		myVerificationTag:       generateInitiateTag(),
 		initialTSN:              tsn,
 		myNextTSN:               tsn,
 		myNextRSN:               tsn,
@@ -477,7 +521,7 @@ func createAssociation(config Config) *Association {
 		assoc.name = fmt.Sprintf("%p", assoc)
 	}
 
-	// RFC 4690 Sec 7.2.1
+	// RFC 4960 Sec 7.2.1
 	//  o  The initial cwnd before DATA transmission or after a sufficiently
 	//     long idle period MUST be set to min(4*MTU, max (2*MTU, 4380
 	//     bytes)).
@@ -530,6 +574,43 @@ func (a *Association) init(isClient bool) {
 		a.setState(cookieWait)
 		a.t1Init.start(a.rtoMgr.getRTO())
 	}
+}
+
+func (a *Association) initWithOutOfBandTokens(localInit *chunkInit, remoteInit *chunkInit) {
+	a.lock.Lock()
+	defer a.lock.Unlock()
+
+	go a.readLoop()
+	go a.writeLoop()
+
+	a.payloadQueue.init(remoteInit.initialTSN - 1)
+	a.myMaxNumInboundStreams = min16(localInit.numInboundStreams, remoteInit.numInboundStreams)
+	a.myMaxNumOutboundStreams = min16(localInit.numOutboundStreams, remoteInit.numOutboundStreams)
+	a.setRWND(min32(localInit.advertisedReceiverWindowCredit, remoteInit.advertisedReceiverWindowCredit))
+	a.peerVerificationTag = remoteInit.initiateTag
+	a.sourcePort = defaultSCTPSrcDstPort
+	a.destinationPort = defaultSCTPSrcDstPort
+	for _, param := range remoteInit.params {
+		switch v := param.(type) { // nolint:gocritic
+		case *paramSupportedExtensions:
+			for _, t := range v.ChunkTypes {
+				if t == ctForwardTSN {
+					a.log.Debugf("[%s] use ForwardTSN (on init)", a.name)
+					a.useForwardTSN = true
+				}
+			}
+		case *paramZeroChecksumAcceptable:
+			a.sendZeroChecksum = v.edmid == dtlsErrorDetectionMethod
+		}
+	}
+
+	if !a.useForwardTSN {
+		a.log.Warnf("[%s] not using ForwardTSN (on init)", a.name)
+	}
+
+	a.ssthresh = a.RWND()
+
+	a.setState(established)
 }
 
 // caller must hold a.lock.
@@ -1500,7 +1581,7 @@ func (a *Association) handleInitAck(pkt *packet, initChunkAck *chunkInitAck) err
 	a.setRWND(initChunkAck.advertisedReceiverWindowCredit)
 	a.log.Debugf("[%s] initial rwnd=%d", a.name, a.RWND())
 
-	// RFC 4690 Sec 7.2.1
+	// RFC 4960 Sec 7.2.1
 	//  o  The initial value of ssthresh MAY be arbitrarily high (for
 	//     example, implementations MAY use the size of the receiver
 	//     advertised window).
@@ -4007,4 +4088,22 @@ func (a *Association) sendActiveHeartbeatLocked() {
 		chunks:          []chunk{hb},
 	})
 	a.awakeWriteLoop()
+}
+
+// GenerateOutOfBandToken generates an out-of-band connection token (i.e. a
+// serialized SCTP INIT chunk) for use with SNAP.
+func GenerateOutOfBandToken(config Config) ([]byte, error) {
+	init := &chunkInit{}
+	init.initialTSN = globalMathRandomGenerator.Uint32()
+	init.numOutboundStreams = math.MaxUint16
+	init.numInboundStreams = math.MaxUint16
+	init.initiateTag = generateInitiateTag()
+	init.advertisedReceiverWindowCredit = config.MaxReceiveBufferSize
+	setSupportedExtensions(&init.chunkInitCommon)
+
+	if config.EnableZeroChecksum {
+		init.params = append(init.params, &paramZeroChecksumAcceptable{edmid: dtlsErrorDetectionMethod})
+	}
+
+	return init.marshal()
 }
