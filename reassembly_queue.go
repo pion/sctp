@@ -16,12 +16,6 @@ func sortChunksByTSN(a []*chunkPayloadData) {
 	})
 }
 
-func sortChunksBySSN(a []*chunkSet) {
-	sort.Slice(a, func(i, j int) bool {
-		return sna16LT(a[i].ssn, a[j].ssn)
-	})
-}
-
 // chunkSet is a set of chunks that share the same SSN.
 type chunkSet struct {
 	ssn    uint16 // used only with the ordered chunks
@@ -38,6 +32,11 @@ func newChunkSet(ssn uint16, ppi PayloadProtocolIdentifier) *chunkSet {
 }
 
 func (set *chunkSet) push(chunk *chunkPayloadData) bool {
+	// Enforce same PPI for all fragments of a user message (deliver one PPI). RFC 9260 sec 6.9.
+	if chunk.payloadType != set.ppi {
+		return false
+	}
+
 	// check if dup
 	for _, c := range set.chunks {
 		if c.tsn == chunk.tsn {
@@ -50,19 +49,15 @@ func (set *chunkSet) push(chunk *chunkPayloadData) bool {
 	sortChunksByTSN(set.chunks)
 
 	// Check if we now have a complete set
-	complete := set.isComplete()
-
-	return complete
+	return set.isComplete()
 }
 
 func (set *chunkSet) isComplete() bool {
-	// Condition for complete set
-	//   0. Has at least one chunk.
-	//   1. Begins with beginningFragment set to true
-	//   2. Ends with endingFragment set to true
-	//   3. TSN monotinically increase by 1 from beginning to end
-
-	// 0.
+	// Complete when:
+	//   0) has at least one fragment
+	//   1) first has beginningFragment=1, endingFragment=0
+	//   2) last  has beginningFragment=0, endingFragment=1
+	//   3) all TSNs are strictly sequential (monotonically increasing) RFC 9260 sec 6.9
 	nChunks := len(set.chunks)
 	if nChunks == 0 {
 		return false
@@ -82,12 +77,11 @@ func (set *chunkSet) isComplete() bool {
 	var lastTSN uint32
 	for i, chunk := range set.chunks {
 		if i > 0 {
-			// Fragments must have contiguous TSN
-			// From RFC 4960 Section 3.3.1:
-			//   When a user message is fragmented into multiple chunks, the TSNs are
-			//   used by the receiver to reassemble the message.  This means that the
-			//   TSNs for each fragment of a fragmented user message MUST be strictly
-			//   sequential.
+			// RFC 9260 sec 3.3.1:
+			// When a user message is fragmented into multiple chunks, the TSNs are
+			// used by the receiver to reassemble the message. This means that the
+			// TSNs for each fragment of a fragmented user message MUST be strictly
+			// sequential.
 			if chunk.tsn != lastTSN+1 {
 				// mid or end fragment is missing
 				return false
@@ -101,28 +95,73 @@ func (set *chunkSet) isComplete() bool {
 }
 
 type reassemblyQueue struct {
-	si              uint16
-	nextSSN         uint16 // expected SSN for next ordered chunk
-	ordered         []*chunkSet
-	unordered       []*chunkSet
+	si      uint16
+	nextSSN uint16 // expected SSN for next ordered message RFC 9260 sec 6.5, 6.6
+
+	ordered []*chunkSet
+	// Fast lookup for fragmented ordered messages by SSN (cleared once complete).
+	orderedIndex map[uint16]*chunkSet
+
+	unordered []*chunkSet
+	// Fast duplicate filter for unordered chunks by TSN.
+	unorderedIndex  map[uint32]*chunkPayloadData
 	unorderedChunks []*chunkPayloadData
-	nBytes          uint64
+
+	nBytes uint64
 }
 
 var errTryAgain = errors.New("try again")
 
 func newReassemblyQueue(si uint16) *reassemblyQueue {
-	// From RFC 4960 Sec 6.5:
-	//   The Stream Sequence Number in all the streams MUST start from 0 when
-	//   the association is established.  Also, when the Stream Sequence
-	//   Number reaches the value 65535 the next Stream Sequence Number MUST
-	//   be set to 0.
+	// From RFC 9260 sec 6.5:
+	// The Stream Sequence Number in all the outgoing streams MUST start from 0 when
+	// the association is established. The Stream Sequence Number of an outgoing
+	// stream MUST be incremented by 1 for each ordered user message sent on that
+	// outgoing stream. In particular, when the Stream Sequence Number reaches the
+	// value 65535, the next Stream Sequence Number MUST be set to 0. For unordered
+	// user messages, the Stream Sequence Number MUST NOT be changed.
 	return &reassemblyQueue{
-		si:        si,
-		nextSSN:   0, // From RFC 4960 Sec 6.5:
-		ordered:   make([]*chunkSet, 0),
-		unordered: make([]*chunkSet, 0),
+		si:             si,
+		nextSSN:        0, // From RFC 9260 Sec 6.5:
+		ordered:        make([]*chunkSet, 0),
+		orderedIndex:   make(map[uint16]*chunkSet),
+		unordered:      make([]*chunkSet, 0),
+		unorderedIndex: make(map[uint32]*chunkPayloadData),
 	}
+}
+
+// insertChunkByTSN keeps r.unorderedChunks sorted by TSN with a binary insertion.
+func (r *reassemblyQueue) insertChunkByTSN(chunk *chunkPayloadData) {
+	lo, hi := 0, len(r.unorderedChunks)
+	for lo < hi {
+		mid := (lo + hi) >> 1
+		if sna32LT(r.unorderedChunks[mid].tsn, chunk.tsn) {
+			lo = mid + 1
+		} else {
+			hi = mid
+		}
+	}
+
+	r.unorderedChunks = append(r.unorderedChunks, nil)
+	copy(r.unorderedChunks[lo+1:], r.unorderedChunks[lo:])
+	r.unorderedChunks[lo] = chunk
+}
+
+// insertSetBySSN keeps r.ordered sorted by SSN.
+func (r *reassemblyQueue) insertSetBySSN(cs *chunkSet) {
+	lo, hi := 0, len(r.ordered)
+	for lo < hi {
+		mid := (lo + hi) >> 1
+		if sna16LT(r.ordered[mid].ssn, cs.ssn) {
+			lo = mid + 1
+		} else {
+			hi = mid
+		}
+	}
+
+	r.ordered = append(r.ordered, nil)
+	copy(r.ordered[lo+1:], r.ordered[lo:])
+	r.ordered[lo] = cs
 }
 
 func (r *reassemblyQueue) push(chunk *chunkPayloadData) bool { //nolint:cyclop
@@ -133,10 +172,15 @@ func (r *reassemblyQueue) push(chunk *chunkPayloadData) bool { //nolint:cyclop
 	}
 
 	if chunk.unordered {
-		// First, insert into unorderedChunks array
-		r.unorderedChunks = append(r.unorderedChunks, chunk)
+		// O(1) duplicate filter by TSN.
+		if _, dup := r.unorderedIndex[chunk.tsn]; dup {
+			return false
+		}
+		r.unorderedIndex[chunk.tsn] = chunk
+
+		// Maintain TSN order without full re-sort each time.
+		r.insertChunkByTSN(chunk)
 		atomic.AddUint64(&r.nBytes, uint64(len(chunk.userData)))
-		sortChunksByTSN(r.unorderedChunks)
 
 		// Scan unorderedChunks that are contiguous (in TSN)
 		cset = r.findCompleteUnorderedChunkSet()
@@ -152,57 +196,53 @@ func (r *reassemblyQueue) push(chunk *chunkPayloadData) bool { //nolint:cyclop
 	}
 
 	// This is an ordered chunk
-
 	if sna16LT(chunk.streamSequenceNumber, r.nextSSN) {
 		return false
 	}
 
 	// Check if a fragmented chunkSet with the fragmented SSN already exists
 	if chunk.isFragmented() {
-		for _, set := range r.ordered {
-			// nolint:godox
-			// TODO: add caution around SSN wrapping here... this helps only a little bit
-			// by ensuring we don't add to an unfragmented cset (1 chunk). There's
-			// a case where if the SSN does wrap around, we may see the same SSN
-			// for a different chunk.
-
-			// nolint:godox
-			// TODO: this slice can get pretty big; it may be worth maintaining a map
-			// for O(1) lookups at the cost of 2x memory.
-			if set.ssn == chunk.streamSequenceNumber && set.chunks[0].isFragmented() {
-				cset = set
-
-				break
-			}
+		// O(1) lookup of an in-progress fragmented set.
+		if set, ok := r.orderedIndex[chunk.streamSequenceNumber]; ok && len(set.chunks) > 0 && set.chunks[0].isFragmented() {
+			cset = set
 		}
 	}
 
 	// If not found, create a new chunkSet
 	if cset == nil {
 		cset = newChunkSet(chunk.streamSequenceNumber, chunk.payloadType)
-		r.ordered = append(r.ordered, cset)
-		if !chunk.unordered {
-			sortChunksBySSN(r.ordered)
+		// Index only fragmented sequences, single-chunk messages don't need lookup.
+		if chunk.isFragmented() {
+			r.orderedIndex[cset.ssn] = cset
 		}
+		r.insertSetBySSN(cset)
 	}
 
 	atomic.AddUint64(&r.nBytes, uint64(len(chunk.userData)))
 
-	return cset.push(chunk)
+	complete := cset.push(chunk)
+	if complete && chunk.isFragmented() {
+		// No more fragments will be added, drop from index.
+		delete(r.orderedIndex, cset.ssn)
+	}
+
+	return complete
 }
 
 func (r *reassemblyQueue) findCompleteUnorderedChunkSet() *chunkSet {
 	startIdx := -1
 	nChunks := 0
 	var lastTSN uint32
+	var ppi PayloadProtocolIdentifier
 	var found bool
 
 	for i, chunk := range r.unorderedChunks {
-		// seek beigining
+		// look for a beginning fragment
 		if chunk.beginningFragment {
 			startIdx = i
 			nChunks = 1
 			lastTSN = chunk.tsn
+			ppi = chunk.payloadType
 
 			if chunk.endingFragment {
 				found = true
@@ -217,8 +257,8 @@ func (r *reassemblyQueue) findCompleteUnorderedChunkSet() *chunkSet {
 			continue
 		}
 
-		// Check if contiguous in TSN
-		if chunk.tsn != lastTSN+1 {
+		// same PPI and strictly contiguous TSN required across fragments. RFC 9260 sec 6.9.
+		if chunk.payloadType != ppi || chunk.tsn != lastTSN+1 {
 			startIdx = -1
 
 			continue
@@ -238,34 +278,37 @@ func (r *reassemblyQueue) findCompleteUnorderedChunkSet() *chunkSet {
 		return nil
 	}
 
-	// Extract the range of chunks
-	var chunks []*chunkPayloadData
-	chunks = append(chunks, r.unorderedChunks[startIdx:startIdx+nChunks]...)
+	// Extract the contiguous range [startIdx, startIdx+nChunks)
+	chunks := append([]*chunkPayloadData(nil), r.unorderedChunks[startIdx:startIdx+nChunks]...)
 
+	// Remove them from unorderedChunks
 	r.unorderedChunks = append(
 		r.unorderedChunks[:startIdx],
 		r.unorderedChunks[startIdx+nChunks:]...)
 
-	chunkSet := newChunkSet(0, chunks[0].payloadType)
+	// Drop from index (all these TSNs are now consumed into a complete set).
+	for _, c := range chunks {
+		delete(r.unorderedIndex, c.tsn)
+	}
+
+	chunkSet := newChunkSet(0, chunks[0].payloadType) // SSN ignored for unordered (RFC 9260 sec 6.6)
 	chunkSet.chunks = chunks
 
 	return chunkSet
 }
 
 func (r *reassemblyQueue) isReadable() bool {
-	// Check unordered first
+	// Unordered messages can be delivered as soon as a complete set exists. RFC 9260 sec 6.6.
 	if len(r.unordered) > 0 {
 		// The chunk sets in r.unordered should all be complete.
 		return true
 	}
 
-	// Check ordered sets
+	// Ordered delivery: only the complete set whose SSN == nextSSN is eligible. RFC 9260 sec 6.6.
 	if len(r.ordered) > 0 {
 		cset := r.ordered[0]
-		if cset.isComplete() {
-			if sna16LTE(cset.ssn, r.nextSSN) {
-				return true
-			}
+		if cset.isComplete() && sna16LTE(cset.ssn, r.nextSSN) {
+			return true
 		}
 	}
 
@@ -286,9 +329,12 @@ func (r *reassemblyQueue) read(buf []byte) (int, PayloadProtocolIdentifier, erro
 		isUnordered = true
 	case len(r.ordered) > 0:
 		cset = r.ordered[0]
+
 		if !cset.isComplete() {
 			return 0, 0, errTryAgain
 		}
+
+		// For ordered, gate on exact SSN == nextSSN (hold higher SSNs). RFC 9260 sec 6.6.
 		if sna16GT(cset.ssn, r.nextSSN) {
 			return 0, 0, errTryAgain
 		}
@@ -313,6 +359,8 @@ func (r *reassemblyQueue) read(buf []byte) (int, PayloadProtocolIdentifier, erro
 		r.unordered = r.unordered[1:]
 	default:
 		r.ordered = r.ordered[1:]
+
+		// Advance only when we delivered the exact expected SSN
 		if cset.ssn == r.nextSSN {
 			r.nextSSN++
 		}
@@ -324,19 +372,19 @@ func (r *reassemblyQueue) read(buf []byte) (int, PayloadProtocolIdentifier, erro
 }
 
 func (r *reassemblyQueue) forwardTSNForOrdered(lastSSN uint16) {
-	// Use lastSSN to locate a chunkSet then remove it if the set has
-	// not been complete
-	keep := []*chunkSet{}
+	// Only drop sets that are <= lastSSN and NOT complete (abandoned).
+	keep := r.ordered[:0]
 	for _, set := range r.ordered {
-		if sna16LTE(set.ssn, lastSSN) {
-			if !set.isComplete() {
-				// drop the set
-				for _, c := range set.chunks {
-					r.subtractNumBytes(len(c.userData))
-				}
-
-				continue
+		if sna16LTE(set.ssn, lastSSN) && !set.isComplete() {
+			// drop the set
+			for _, c := range set.chunks {
+				r.subtractNumBytes(len(c.userData))
 			}
+
+			// ensure index is clean too
+			delete(r.orderedIndex, set.ssn)
+
+			continue
 		}
 		keep = append(keep, set)
 	}
@@ -361,9 +409,11 @@ func (r *reassemblyQueue) forwardTSNForUnordered(newCumulativeTSN uint32) {
 		}
 		lastIdx = i
 	}
+
 	if lastIdx >= 0 {
 		for _, c := range r.unorderedChunks[0 : lastIdx+1] {
 			r.subtractNumBytes(len(c.userData))
+			delete(r.unorderedIndex, c.tsn)
 		}
 		r.unorderedChunks = r.unorderedChunks[lastIdx+1:]
 	}
