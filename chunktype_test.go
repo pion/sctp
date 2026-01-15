@@ -15,6 +15,7 @@ func TestChunkType_String(t *testing.T) {
 		expected  string
 	}{
 		{ctPayloadData, "DATA"},
+		{ctIData, "I-DATA"},
 		{ctInit, "INIT"},
 		{ctInitAck, "INIT-ACK"},
 		{ctSack, "SACK"},
@@ -30,6 +31,7 @@ func TestChunkType_String(t *testing.T) {
 		{ctShutdownComplete, "SHUTDOWN-COMPLETE"},
 		{ctReconfig, "RECONFIG"},
 		{ctForwardTSN, "FORWARD-TSN"},
+		{ctIForwardTSN, "I-FORWARD-TSN"},
 		{chunkType(255), "Unknown ChunkType: 255"},
 	}
 

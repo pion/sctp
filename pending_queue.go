@@ -56,14 +56,21 @@ type pendingQueue struct {
 	unorderedQueue      *pendingBaseQueue
 	orderedQueue        *pendingBaseQueue
 	nBytes              int
+	nChunks             int
 	selected            bool
 	unorderedIsSelected bool
+	interleaving        bool
+	streamQueues        map[uint16]*pendingBaseQueue
+	streamOrder         []uint16
+	streamSelected      bool
+	selectedStream      uint16
 }
 
 // Pending queue errors.
 var (
 	ErrUnexpectedChunkPoppedUnordered = errors.New("unexpected chunk popped (unordered)")
 	ErrUnexpectedChunkPoppedOrdered   = errors.New("unexpected chunk popped (ordered)")
+	ErrUnexpectedChunkPoppedStream    = errors.New("unexpected chunk popped (stream)")
 	ErrUnexpectedQState               = errors.New("unexpected q state (should've been selected)")
 
 	// Deprecated: use ErrUnexpectedChunkPoppedUnordered.
@@ -79,16 +86,78 @@ func newPendingQueue() *pendingQueue {
 	}
 }
 
-func (q *pendingQueue) push(c *chunkPayloadData) {
-	if c.unordered {
-		q.unorderedQueue.push(c)
-	} else {
-		q.orderedQueue.push(c)
+func (q *pendingQueue) setInterleaving(enabled bool) {
+	if q.interleaving == enabled {
+		return
 	}
-	q.nBytes += len(c.userData)
+	q.interleaving = enabled
+	q.selected = false
+	q.unorderedIsSelected = false
+	q.streamSelected = false
+	q.selectedStream = 0
+	if enabled && q.streamQueues == nil {
+		q.streamQueues = map[uint16]*pendingBaseQueue{}
+	}
+	if enabled {
+		q.streamOrder = nil
+	}
+	if !enabled {
+		q.streamQueues = nil
+		q.streamOrder = nil
+	}
+}
+
+func (q *pendingQueue) push(chunk *chunkPayloadData) {
+	if q.interleaving {
+		if q.streamQueues == nil {
+			q.streamQueues = map[uint16]*pendingBaseQueue{}
+		}
+		streamQueue := q.streamQueues[chunk.streamIdentifier]
+		wasEmpty := streamQueue == nil || streamQueue.size() == 0
+		if streamQueue == nil {
+			streamQueue = newPendingBaseQueue()
+			q.streamQueues[chunk.streamIdentifier] = streamQueue
+		}
+		streamQueue.push(chunk)
+		if wasEmpty {
+			q.streamOrder = append(q.streamOrder, chunk.streamIdentifier)
+		}
+		q.nBytes += len(chunk.userData)
+		q.nChunks++
+
+		return
+	}
+
+	if chunk.unordered {
+		q.unorderedQueue.push(chunk)
+	} else {
+		q.orderedQueue.push(chunk)
+	}
+	q.nBytes += len(chunk.userData)
+	q.nChunks++
 }
 
 func (q *pendingQueue) peek() *chunkPayloadData {
+	if q.interleaving { //nolint:nestif
+		if q.streamSelected {
+			if q.streamQueues == nil {
+				return nil
+			}
+
+			return q.streamQueues[q.selectedStream].get(0)
+		}
+		if len(q.streamOrder) == 0 {
+			return nil
+		}
+		q.streamSelected = true
+		q.selectedStream = q.streamOrder[0]
+		if q.streamQueues == nil {
+			return nil
+		}
+
+		return q.streamQueues[q.selectedStream].get(0)
+	}
+
 	if q.selected {
 		if q.unorderedIsSelected {
 			return q.unorderedQueue.get(0)
@@ -104,7 +173,37 @@ func (q *pendingQueue) peek() *chunkPayloadData {
 	return q.orderedQueue.get(0)
 }
 
-func (q *pendingQueue) pop(chunkPayload *chunkPayloadData) error { //nolint:cyclop
+func (q *pendingQueue) pop(chunkPayload *chunkPayloadData) error { //nolint:cyclop,gocognit
+	if q.interleaving { //nolint:nestif
+		if !q.streamSelected {
+			return ErrUnexpectedQState
+		}
+		if q.streamQueues == nil {
+			return ErrUnexpectedQState
+		}
+		streamQueue := q.streamQueues[q.selectedStream]
+		if streamQueue == nil {
+			return ErrUnexpectedQState
+		}
+		popped := streamQueue.pop()
+		if popped != chunkPayload {
+			return ErrUnexpectedChunkPoppedStream
+		}
+		if len(q.streamOrder) > 0 {
+			q.streamOrder = q.streamOrder[1:]
+		}
+		if streamQueue.size() > 0 {
+			q.streamOrder = append(q.streamOrder, q.selectedStream)
+		} else {
+			delete(q.streamQueues, q.selectedStream)
+		}
+		q.streamSelected = false
+		q.nBytes -= len(chunkPayload.userData)
+		q.nChunks--
+
+		return nil
+	}
+
 	if q.selected { //nolint:nestif
 		var popped *chunkPayloadData
 		if q.unorderedIsSelected {
@@ -151,6 +250,7 @@ func (q *pendingQueue) pop(chunkPayload *chunkPayloadData) error { //nolint:cycl
 	if q.nBytes < 0 {
 		q.nBytes = 0
 	}
+	q.nChunks--
 
 	return nil
 }
@@ -160,5 +260,5 @@ func (q *pendingQueue) getNumBytes() int {
 }
 
 func (q *pendingQueue) size() int {
-	return q.unorderedQueue.size() + q.orderedQueue.size()
+	return q.nChunks
 }
