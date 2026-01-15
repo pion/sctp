@@ -9,7 +9,7 @@ import (
 	"fmt"
 )
 
-// errorCauseCode is a cause code that appears in either a ERROR or ABORT chunk.
+// errorCauseCode is a cause code that appears in either an ERROR or ABORT chunk (RFC 9260 section 3.3.10).
 type errorCauseCode uint16
 
 type errorCause interface {
@@ -21,13 +21,25 @@ type errorCause interface {
 	errorCauseCode() errorCauseCode
 }
 
-// Error and abort chunk errors.
+// Errors for building/validating error causes.
 var (
-	ErrBuildErrorCaseHandle = errors.New("BuildErrorCause does not handle")
+	ErrBuildErrorCaseHandle = errors.New("buildErrorCause does not handle this cause code")
+	ErrCauseTooShort        = errors.New("error cause too short")
+	ErrCauseLengthInvalid   = errors.New("error cause length invalid")
 )
 
-// buildErrorCause delegates the building of a error cause from raw bytes to the correct structure.
+// buildErrorCause delegates building an error cause from raw bytes to the correct structure.
+// Validates the generic error-cause header (code + length) before dispatch.
 func buildErrorCause(raw []byte) (errorCause, error) {
+	if len(raw) < 4 {
+		return nil, ErrCauseTooShort
+	}
+
+	clen := int(binary.BigEndian.Uint16(raw[2:]))
+	if clen < 4 || clen > len(raw) {
+		return nil, ErrCauseLengthInvalid
+	}
+
 	var errCause errorCause
 
 	c := errorCauseCode(binary.BigEndian.Uint16(raw[0:]))
@@ -41,16 +53,18 @@ func buildErrorCause(raw []byte) (errorCause, error) {
 	case userInitiatedAbort:
 		errCause = &errorCauseUserInitiatedAbort{}
 	default:
+		// Unknown or unimplemented cause codes return a clear error.
 		return nil, fmt.Errorf("%w: %s", ErrBuildErrorCaseHandle, c.String())
 	}
 
-	if err := errCause.unmarshal(raw); err != nil {
+	if err := errCause.unmarshal(raw[:clen]); err != nil {
 		return nil, err
 	}
 
 	return errCause, nil
 }
 
+// RFC 9260 section 3.3.10 "Error Causes".
 const (
 	invalidStreamIdentifier                errorCauseCode = 1
 	missingMandatoryParameter              errorCauseCode = 2
@@ -76,9 +90,9 @@ func (e errorCauseCode) String() string { //nolint:cyclop
 	case staleCookieError:
 		return "Stale Cookie Error"
 	case outOfResource:
-		return "Out Of Resource"
+		return "Out of Resource"
 	case unresolvableAddress:
-		return "Unresolvable IP"
+		return "Unresolvable Address"
 	case unrecognizedChunkType:
 		return "Unrecognized Chunk Type"
 	case invalidMandatoryParameter:
@@ -90,7 +104,7 @@ func (e errorCauseCode) String() string { //nolint:cyclop
 	case cookieReceivedWhileShuttingDown:
 		return "Cookie Received While Shutting Down"
 	case restartOfAnAssociationWithNewAddresses:
-		return "Restart Of An Association With New Addresses"
+		return "Restart of an Association with New Addresses"
 	case userInitiatedAbort:
 		return "User Initiated Abort"
 	case protocolViolation:

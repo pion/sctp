@@ -11,20 +11,27 @@ import (
 // errorCauseHeader represents the shared header that is shared by all error causes.
 type errorCauseHeader struct {
 	code errorCauseCode
-	len  uint16
-	raw  []byte
+	len  uint16 // Cause Length: header(4) + value, no padding. RFC 9260 sec 3.3.10
+	raw  []byte // value (cause-specific info), no padding
 }
 
 const (
 	errorCauseHeaderLength = 4
+	maxErrorCauseValueLen  = 0xFFFF - errorCauseHeaderLength
 )
 
 // ErrInvalidSCTPChunk is returned when an SCTP chunk is invalid.
 var ErrInvalidSCTPChunk = errors.New("invalid SCTP chunk")
 
 func (e *errorCauseHeader) marshal() ([]byte, error) {
+	// length = header(4) + value, the padding to 32 bit is from the chunk builder.
+	if len(e.raw) > maxErrorCauseValueLen {
+		return nil, ErrCauseLengthInvalid
+	}
+
 	e.len = uint16(len(e.raw)) + uint16(errorCauseHeaderLength) //nolint:gosec // G115
 	raw := make([]byte, e.len)
+
 	binary.BigEndian.PutUint16(raw[0:], uint16(e.code))
 	binary.BigEndian.PutUint16(raw[2:], e.len)
 	copy(raw[errorCauseHeaderLength:], e.raw)
@@ -33,13 +40,18 @@ func (e *errorCauseHeader) marshal() ([]byte, error) {
 }
 
 func (e *errorCauseHeader) unmarshal(raw []byte) error {
+	if len(raw) < errorCauseHeaderLength {
+		return ErrInvalidSCTPChunk
+	}
+
 	e.code = errorCauseCode(binary.BigEndian.Uint16(raw[0:]))
 	e.len = binary.BigEndian.Uint16(raw[2:])
 	if e.len < errorCauseHeaderLength || int(e.len) > len(raw) {
 		return ErrInvalidSCTPChunk
 	}
-	valueLength := e.len - errorCauseHeaderLength
-	e.raw = raw[errorCauseHeaderLength : errorCauseHeaderLength+valueLength]
+
+	valueLength := int(e.len) - errorCauseHeaderLength
+	e.raw = raw[errorCauseHeaderLength : errorCauseHeaderLength+valueLength] // value only; no padding
 
 	return nil
 }
