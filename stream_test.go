@@ -4,7 +4,9 @@
 package sctp
 
 import (
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/pion/logging"
 	"github.com/stretchr/testify/assert"
@@ -13,7 +15,8 @@ import (
 func TestSessionBufferedAmount(t *testing.T) {
 	t.Run("bufferedAmount", func(t *testing.T) {
 		s := &Stream{
-			log: logging.NewDefaultLoggerFactory().NewLogger("sctp-test"),
+			lock: &sync.RWMutex{},
+			log:  logging.NewDefaultLoggerFactory().NewLogger("sctp-test"),
 		}
 
 		assert.Equal(t, uint64(0), s.BufferedAmount())
@@ -27,7 +30,8 @@ func TestSessionBufferedAmount(t *testing.T) {
 
 	t.Run("OnBufferedAmountLow", func(t *testing.T) {
 		stream := &Stream{
-			log: logging.NewDefaultLoggerFactory().NewLogger("sctp-test"),
+			lock: &sync.RWMutex{},
+			log:  logging.NewDefaultLoggerFactory().NewLogger("sctp-test"),
 		}
 
 		stream.bufferedAmount = 4096
@@ -69,4 +73,31 @@ func TestSessionBufferedAmount(t *testing.T) {
 		assert.Equal(t, uint64(0), stream.BufferedAmount(), "unexpected bufferedAmount")
 		assert.Equal(t, 1, nCbs, "callback count mismatch")
 	})
+}
+
+func TestStreamWaitWithCopiedStream(t *testing.T) {
+	stream := &Stream{lock: &sync.RWMutex{}}
+	stream.readNotifier = sync.NewCond(stream.lock)
+
+	streamCopy := *stream
+
+	done := make(chan struct{})
+	go func() {
+		streamCopy.lock.Lock()
+		streamCopy.readNotifier.Wait()
+		streamCopy.lock.Unlock()
+		close(done)
+	}()
+
+	time.Sleep(10 * time.Millisecond)
+
+	stream.lock.Lock()
+	stream.readNotifier.Signal()
+	stream.lock.Unlock()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for readNotifier to unblock")
+	}
 }
