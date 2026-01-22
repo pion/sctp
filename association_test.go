@@ -4765,3 +4765,201 @@ func TestTLR_GetDataPacketsToRetransmit_RespectsBurstBudget_LaterRTT(t *testing.
 	assert.Equal(t, 2, nChunks)
 	assert.True(t, consumed)
 }
+
+type dummyAddr struct{}
+
+func (dummyAddr) Network() string { return "dummy" }
+func (dummyAddr) String() string  { return "dummy" }
+
+var errFailingErrorCauseMarshal = errors.New("marshal failed")
+
+type failingErrorCause struct{}
+
+func (failingErrorCause) unmarshal(_ []byte) error { return nil }
+func (failingErrorCause) marshal() ([]byte, error) { return nil, errFailingErrorCauseMarshal }
+func (failingErrorCause) length() uint16           { return 0 }
+func (failingErrorCause) String() string           { return "failing" }
+func (failingErrorCause) errorCauseCode() errorCauseCode {
+	return userInitiatedAbort
+}
+
+type recordConn struct {
+	mu       sync.Mutex
+	writes   [][]byte
+	done     chan struct{}
+	doneOnce sync.Once
+}
+
+func (c *recordConn) Read(_ []byte) (int, error) {
+	<-c.done
+
+	return 0, io.EOF
+}
+
+func (c *recordConn) Write(p []byte) (int, error) {
+	cp := make([]byte, len(p))
+	copy(cp, p)
+
+	c.mu.Lock()
+	c.writes = append(c.writes, cp)
+	c.mu.Unlock()
+
+	return len(p), nil
+}
+
+func (c *recordConn) Close() error {
+	if c.done == nil {
+		return nil
+	}
+
+	c.doneOnce.Do(func() {
+		close(c.done)
+	})
+
+	return nil
+}
+func (c *recordConn) LocalAddr() net.Addr                { return dummyAddr{} }
+func (c *recordConn) RemoteAddr() net.Addr               { return dummyAddr{} }
+func (c *recordConn) SetDeadline(_ time.Time) error      { return nil }
+func (c *recordConn) SetReadDeadline(_ time.Time) error  { return nil }
+func (c *recordConn) SetWriteDeadline(_ time.Time) error { return nil }
+
+func (c *recordConn) firstWrite() ([]byte, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.writes) == 0 {
+		return nil, false
+	}
+
+	return c.writes[0], true
+}
+
+func TestAbortStillSendsWhenWriteLoopClosing(t *testing.T) {
+	conn := &recordConn{done: make(chan struct{})}
+	defer conn.Close() // nolint:errcheck
+
+	cfg := Config{
+		NetConn:            conn,
+		LoggerFactory:      logging.NewDefaultLoggerFactory(),
+		EnableZeroChecksum: false,
+	}
+	cfg.applyDefaults()
+	assoc := createAssociationFromConfig(&cfg)
+	assoc.initServer()
+
+	// Simulate the problematic timing: writeLoop is sitting in its select and
+	// closeWriteLoopCh gets closed (e.g. readLoop exited) while an ABORT is pending.
+	assoc.lock.Lock()
+	assoc.willSendAbort = true
+	assoc.willSendAbortCause = &errorCauseUserInitiatedAbort{upperLayerAbortReason: []byte("x")}
+	assoc.lock.Unlock()
+
+	assoc.closeWriteLoopOnce.Do(func() { close(assoc.closeWriteLoopCh) })
+
+	require.Eventually(t, func() bool {
+		raw, ok := conn.firstWrite()
+		if !ok || len(raw) <= int(commonHeaderSize) {
+			return false
+		}
+
+		return raw[commonHeaderSize] == uint8(ctAbort)
+	}, 1*time.Second, 5*time.Millisecond)
+
+	require.NoError(t, assoc.close())
+}
+
+type abortOrderingConn struct {
+	readDeadlineOnce sync.Once
+	readDeadlineCh   chan struct{}
+
+	wroteAbortOnce sync.Once
+	wroteAbortCh   chan struct{}
+}
+
+func newAbortOrderingConn() *abortOrderingConn {
+	return &abortOrderingConn{
+		readDeadlineCh: make(chan struct{}),
+		wroteAbortCh:   make(chan struct{}),
+	}
+}
+
+func (c *abortOrderingConn) Read(_ []byte) (int, error) {
+	<-c.readDeadlineCh
+
+	return 0, net.ErrClosed
+}
+
+func (c *abortOrderingConn) Write(b []byte) (int, error) {
+	isAbort := len(b) > int(commonHeaderSize) && b[commonHeaderSize] == byte(ctAbort)
+	if isAbort {
+		time.Sleep(100 * time.Millisecond)
+		c.wroteAbortOnce.Do(func() { close(c.wroteAbortCh) })
+	}
+
+	return len(b), nil
+}
+
+func (c *abortOrderingConn) Close() error { return nil }
+
+func (c *abortOrderingConn) LocalAddr() net.Addr  { return &net.IPAddr{} }
+func (c *abortOrderingConn) RemoteAddr() net.Addr { return &net.IPAddr{} }
+
+func (c *abortOrderingConn) SetDeadline(_ time.Time) error { return nil }
+
+func (c *abortOrderingConn) SetReadDeadline(_ time.Time) error {
+	c.readDeadlineOnce.Do(func() { close(c.readDeadlineCh) })
+
+	return nil
+}
+
+func (c *abortOrderingConn) SetWriteDeadline(_ time.Time) error { return nil }
+
+func TestAbort_WaitsForAbortWriteAttempt(t *testing.T) {
+	conn := newAbortOrderingConn()
+
+	cfg := Config{
+		NetConn:        conn,
+		LoggerFactory:  logging.NewDefaultLoggerFactory(),
+		MaxMessageSize: 1200,
+	}
+	cfg.applyDefaults()
+	assoc := createAssociationFromConfig(&cfg)
+	assoc.initServer()
+
+	assoc.Abort("test")
+
+	select {
+	case <-conn.wroteAbortCh:
+		// ok
+	default:
+		require.Fail(t, "Abort returned before ABORT write attempt")
+	}
+}
+
+func TestAbortSentChClosedWhenAbortMarshalFails(t *testing.T) {
+	conn := &recordConn{done: make(chan struct{})}
+	defer conn.Close() // nolint:errcheck
+
+	cfg := Config{
+		NetConn:        conn,
+		LoggerFactory:  logging.NewDefaultLoggerFactory(),
+		MaxMessageSize: 1200,
+	}
+	cfg.applyDefaults()
+	assoc := createAssociationFromConfig(&cfg)
+	assoc.initServer()
+
+	assoc.lock.Lock()
+	assoc.willSendAbort = true
+	assoc.willSendAbortCause = failingErrorCause{}
+	assoc.lock.Unlock()
+
+	assoc.awakeWriteLoop()
+
+	select {
+	case <-assoc.abortSentCh:
+		// ok
+	case <-time.After(200 * time.Millisecond):
+		require.Fail(t, "abortSentCh was not closed when ABORT marshaling failed")
+	}
+}
