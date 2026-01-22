@@ -3518,6 +3518,57 @@ func TestAssociation_ShutdownDuringWrite(t *testing.T) {
 	}
 }
 
+func TestAssociation_CloseGracefulShutdown(t *testing.T) {
+	checkGoroutineLeaks(t)
+
+	br := test.NewBridge()
+
+	var sawShutdown atomic.Bool
+	br.Filter(0, func(raw []byte) bool {
+		pkt := &packet{}
+		if err := pkt.unmarshal(false, raw); err == nil {
+			for _, c := range pkt.chunks {
+				if _, ok := c.(*chunkShutdown); ok {
+					sawShutdown.Store(true)
+
+					break
+				}
+			}
+		}
+
+		return true
+	})
+
+	a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, 0)
+	require.NoError(t, err)
+
+	tickDone := make(chan struct{})
+	defer close(tickDone)
+	go func() {
+		ticker := time.NewTicker(time.Millisecond)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-tickDone:
+				return
+			case <-ticker.C:
+				br.Tick()
+			}
+		}
+	}()
+
+	require.NoError(t, a0.Close())
+
+	select {
+	case <-a1.readLoopCloseCh:
+	case <-time.After(2 * time.Second):
+		assert.Fail(t, "timed out waiting for peer read loop to close")
+	}
+
+	assert.True(t, sawShutdown.Load(), "Close should send a Shutdown chunk")
+}
+
 func TestAssociation_HandlePacketInCookieWaitState(t *testing.T) {
 	loggerFactory := logging.NewDefaultLoggerFactory()
 

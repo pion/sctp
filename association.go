@@ -375,8 +375,11 @@ func createClientWithContext(ctx context.Context, config Config) (*Association, 
 
 	select {
 	case <-ctx.Done():
-		assoc.log.Errorf("[%s] client handshake canceled: state=%s", assoc.name, getAssociationStateString(assoc.getState()))
-		assoc.Close() // nolint:errcheck,gosec
+		closeErr := assoc.Close() //nolint:contextcheck
+		assoc.log.Errorf(
+			"[%s] client handshake canceled: state=%s closeErr=%v",
+			assoc.name, getAssociationStateString(assoc.getState()), closeErr,
+		)
 
 		return nil, ctx.Err()
 	case err := <-assoc.handshakeCompletedCh:
@@ -612,22 +615,38 @@ func (a *Association) Shutdown(ctx context.Context) error {
 func (a *Association) Close() error {
 	a.log.Debugf("[%s] closing association..", a.name)
 
-	err := a.close()
+	logStats := func() {
+		a.log.Debugf("[%s] association closed", a.name)
+		a.log.Debugf("[%s] stats nPackets (in) : %d", a.name, a.stats.getNumPacketsReceived())
+		a.log.Debugf("[%s] stats nPackets (out) : %d", a.name, a.stats.getNumPacketsSent())
+		a.log.Debugf("[%s] stats nDATAs (in) : %d", a.name, a.stats.getNumDATAs())
+		a.log.Debugf("[%s] stats nSACKs (in) : %d", a.name, a.stats.getNumSACKsReceived())
+		a.log.Debugf("[%s] stats nSACKs (out) : %d", a.name, a.stats.getNumSACKsSent())
+		a.log.Debugf("[%s] stats nT3Timeouts : %d", a.name, a.stats.getNumT3Timeouts())
+		a.log.Debugf("[%s] stats nAckTimeouts: %d", a.name, a.stats.getNumAckTimeouts())
+		a.log.Debugf("[%s] stats nFastRetrans: %d", a.name, a.stats.getNumFastRetrans())
+	}
 
-	// Wait for readLoop to end
+	// Best-effort graceful shutdown so the peer tears down cleanly.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := a.Shutdown(ctx); err != nil {
+		// Fall back to hard close if graceful shutdown fails or if we were
+		// never fully established.
+		err = a.close()
+		<-a.readLoopCloseCh
+
+		logStats()
+
+		return err
+	}
+
 	<-a.readLoopCloseCh
 
-	a.log.Debugf("[%s] association closed", a.name)
-	a.log.Debugf("[%s] stats nPackets (in) : %d", a.name, a.stats.getNumPacketsReceived())
-	a.log.Debugf("[%s] stats nPackets (out) : %d", a.name, a.stats.getNumPacketsSent())
-	a.log.Debugf("[%s] stats nDATAs (in) : %d", a.name, a.stats.getNumDATAs())
-	a.log.Debugf("[%s] stats nSACKs (in) : %d", a.name, a.stats.getNumSACKsReceived())
-	a.log.Debugf("[%s] stats nSACKs (out) : %d", a.name, a.stats.getNumSACKsSent())
-	a.log.Debugf("[%s] stats nT3Timeouts : %d", a.name, a.stats.getNumT3Timeouts())
-	a.log.Debugf("[%s] stats nAckTimeouts: %d", a.name, a.stats.getNumAckTimeouts())
-	a.log.Debugf("[%s] stats nFastRetrans: %d", a.name, a.stats.getNumFastRetrans())
+	logStats()
 
-	return err
+	return nil
 }
 
 func (a *Association) close() error {
