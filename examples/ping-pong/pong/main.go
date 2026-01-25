@@ -30,22 +30,21 @@ func main() { //nolint:cyclop
 	}()
 	fmt.Println("created a udp listener")
 
-	config := sctp.Config{
-		NetConn:       &disconnectedPacketConn{pConn: conn},
-		LoggerFactory: logging.NewDefaultLoggerFactory(),
-	}
-	a, err := sctp.Server(config)
+	assoc, err := sctp.ServerWithOptions(
+		sctp.WithNetConn(&disconnectedPacketConn{pConn: conn}),
+		sctp.WithLoggerFactory(logging.NewDefaultLoggerFactory()),
+	)
 	if err != nil {
 		log.Panic(err)
 	}
 	defer func() {
-		if closeErr := a.Close(); closeErr != nil {
+		if closeErr := assoc.Close(); closeErr != nil {
 			log.Panic(closeErr)
 		}
 	}()
 	defer fmt.Println("created a server")
 
-	stream, err := a.AcceptStream()
+	stream, err := assoc.AcceptStream()
 	if err != nil {
 		log.Panic(err)
 	}
