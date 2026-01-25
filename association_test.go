@@ -11,6 +11,7 @@ import (
 	cryptoRand "crypto/rand"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"math/rand"
@@ -109,44 +110,87 @@ func pipe(t *testing.T, piper piperFunc) (*Stream, *Stream, func(*testing.T), er
 	return sa, sb, stop, nil
 }
 
-func association(t *testing.T, piper piperFunc) (*Association, *Association, error) {
+func association( //nolint:cyclop
+	t *testing.T,
+	piper piperFunc,
+	opts ...AssociationOption,
+) (*Association, *Association, error) {
 	t.Helper()
 
 	ca, cb := piper(t)
 
-	type result struct {
-		a   *Association
-		err error
+	loggerFactory := logging.NewDefaultLoggerFactory()
+	opts = append([]AssociationOption{WithLoggerFactory(loggerFactory)}, opts...)
+
+	clientCfg := Config{NetConn: ca}
+	serverCfg := Config{NetConn: cb}
+
+	for _, opt := range opts {
+		if err := opt.applyClient(&clientCfg); err != nil {
+			_ = ca.Close()
+			_ = cb.Close()
+
+			return nil, nil, err
+		}
+		if err := opt.applyServer(&serverCfg); err != nil {
+			_ = ca.Close()
+			_ = cb.Close()
+
+			return nil, nil, err
+		}
 	}
 
-	resultCh := make(chan result)
-	loggerFactory := logging.NewDefaultLoggerFactory()
+	type result struct {
+		side string
+		a    *Association
+		err  error
+	}
 
-	// Setup client
+	ch := make(chan result, 2)
+
 	go func() {
-		client, err := Client(Config{
-			NetConn:       ca,
-			LoggerFactory: loggerFactory,
-		})
-		resultCh <- result{client, err}
+		a, err := Client(clientCfg)
+		ch <- result{side: "client", a: a, err: err}
 	}()
 
-	// Setup server
-	server, err := Server(Config{
-		NetConn:       cb,
-		LoggerFactory: loggerFactory,
-	})
-	if err != nil {
-		return nil, nil, err
+	go func() {
+		a, err := Server(serverCfg)
+		ch <- result{side: "server", a: a, err: err}
+	}()
+
+	timeout := 5 * time.Second
+	if dl, ok := t.Deadline(); ok {
+		if rem := time.Until(dl); rem > 0 && rem < timeout {
+			timeout = rem
+		}
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	var client, server *Association
+	for client == nil || server == nil {
+		select {
+		case res := <-ch:
+			if res.err != nil {
+				_ = ca.Close()
+				_ = cb.Close()
+
+				return nil, nil, res.err
+			}
+			if res.side == "client" {
+				client = res.a
+			} else {
+				server = res.a
+			}
+		case <-timer.C:
+			_ = ca.Close()
+			_ = cb.Close()
+
+			return nil, nil, fmt.Errorf("timeout establishing association") //nolint:err113
+		}
 	}
 
-	// Receive client
-	res := <-resultCh
-	if res.err != nil {
-		return nil, nil, res.err
-	}
-
-	return res.a, server, nil
+	return client, server, nil
 }
 
 type piperFunc func(t *testing.T) (net.Conn, net.Conn)
@@ -254,65 +298,79 @@ func createNewAssociationPair(
 	ackMode int,
 	recvBufSize uint32,
 ) (*Association, *Association, error) {
-	var a0, a1 *Association
-	var err0, err1 error
+	c0 := br.GetConn0()
+	c1 := br.GetConn1()
+
 	loggerFactory := logging.NewDefaultLoggerFactory()
 
-	handshake0Ch := make(chan bool)
-	handshake1Ch := make(chan bool)
+	type result struct {
+		side int // 0 => a0 (client), 1 => a1 (server)
+		a    *Association
+		err  error
+	}
+
+	ch := make(chan result, 2)
 
 	go func() {
-		a0, err0 = Client(Config{
+		a, err := Client(Config{
 			Name:                 "a0",
-			NetConn:              br.GetConn0(),
+			NetConn:              c0,
 			MaxReceiveBufferSize: recvBufSize,
 			LoggerFactory:        loggerFactory,
 		})
-		handshake0Ch <- true
+		ch <- result{side: 0, a: a, err: err}
 	}()
+
 	go func() {
-		// we could have two "client"s here but it's more
-		// standard to have one peer starting initialization and
-		// another waiting for the initialization to be requested (INIT).
-		a1, err1 = Server(Config{
+		a, err := Server(Config{
 			Name:                 "a1",
-			NetConn:              br.GetConn1(),
+			NetConn:              c1,
 			MaxReceiveBufferSize: recvBufSize,
 			LoggerFactory:        loggerFactory,
 		})
-		handshake1Ch <- true
+		ch <- result{side: 1, a: a, err: err}
 	}()
 
-	a0handshakeDone := false
-	a1handshakeDone := false
+	var (
+		a0, a1 *Association
+		err0   error
+		err1   error
+	)
 
-loop1:
-	for i := 0; i < 100; i++ {
+	for i := 0; i < 100 && (a0 == nil || a1 == nil); i++ {
 		time.Sleep(10 * time.Millisecond)
 		br.Tick()
 
-		select {
-		case a0handshakeDone = <-handshake0Ch:
-			if a1handshakeDone {
-				break loop1
+		for {
+			select {
+			case r := <-ch:
+				if r.side == 0 {
+					a0, err0 = r.a, r.err
+				} else {
+					a1, err1 = r.a, r.err
+				}
+
+				if err0 != nil || err1 != nil {
+					_ = c0.Close()
+					_ = c1.Close()
+					if err0 != nil {
+						return nil, nil, err0
+					}
+
+					return nil, nil, err1
+				}
+			default:
+				goto nextTick
 			}
-		case a1handshakeDone = <-handshake1Ch:
-			if a0handshakeDone {
-				break loop1
-			}
-		default:
 		}
+	nextTick:
 	}
 
-	if !a0handshakeDone || !a1handshakeDone {
+	if a0 == nil || a1 == nil {
+		_ = c0.Close()
+		_ = c1.Close()
+
 		return nil, nil, errHandshakeFailed
-	}
-
-	if err0 != nil {
-		return nil, nil, err0
-	}
-	if err1 != nil {
-		return nil, nil, err1
 	}
 
 	a0.ackMode = ackMode
@@ -1241,11 +1299,27 @@ loop1:
 	closeAssociationPair(br, a0, a1)
 }
 
+func createTestAssociation(t *testing.T, cfg Config) *Association {
+	t.Helper()
+
+	if cfg.NetConn == nil {
+		cfg.NetConn = &dumbConn{}
+	}
+	if cfg.LoggerFactory == nil {
+		cfg.LoggerFactory = logging.NewDefaultLoggerFactory()
+	}
+
+	a, err := createServerAssociation(cfg)
+	require.NoError(t, err)
+
+	return a
+}
+
 func TestCreateForwardTSN(t *testing.T) {
 	loggerFactory := logging.NewDefaultLoggerFactory()
 
 	t.Run("forward one abandoned", func(t *testing.T) {
-		assoc := createAssociation(Config{
+		assoc := createTestAssociation(t, Config{
 			NetConn:       &dumbConn{},
 			LoggerFactory: loggerFactory,
 		})
@@ -1272,7 +1346,7 @@ func TestCreateForwardTSN(t *testing.T) {
 	})
 
 	t.Run("forward two abandoned with the same SI", func(t *testing.T) {
-		assoc := createAssociation(Config{
+		assoc := createTestAssociation(t, Config{
 			NetConn:       &dumbConn{},
 			LoggerFactory: loggerFactory,
 		})
@@ -1338,7 +1412,7 @@ func TestHandleForwardTSN(t *testing.T) {
 	loggerFactory := logging.NewDefaultLoggerFactory()
 
 	t.Run("forward 3 unreceived chunks", func(t *testing.T) {
-		assoc := createAssociation(Config{
+		assoc := createTestAssociation(t, Config{
 			NetConn:       &dumbConn{},
 			LoggerFactory: loggerFactory,
 		})
@@ -1363,7 +1437,7 @@ func TestHandleForwardTSN(t *testing.T) {
 	})
 
 	t.Run("forward 1 for 1 missing", func(t *testing.T) {
-		assoc := createAssociation(Config{
+		assoc := createTestAssociation(t, Config{
 			NetConn:       &dumbConn{},
 			LoggerFactory: loggerFactory,
 		})
@@ -1393,7 +1467,7 @@ func TestHandleForwardTSN(t *testing.T) {
 	})
 
 	t.Run("forward 1 for 2 missing", func(t *testing.T) {
-		assoc := createAssociation(Config{
+		assoc := createTestAssociation(t, Config{
 			NetConn:       &dumbConn{},
 			LoggerFactory: loggerFactory,
 		})
@@ -1422,7 +1496,7 @@ func TestHandleForwardTSN(t *testing.T) {
 	})
 
 	t.Run("dup forward TSN chunk should generate sack", func(t *testing.T) {
-		assoc := createAssociation(Config{
+		assoc := createTestAssociation(t, Config{
 			NetConn:       &dumbConn{},
 			LoggerFactory: loggerFactory,
 		})
@@ -1451,7 +1525,7 @@ func TestHandleDataAckTriggering(t *testing.T) {
 	loggerFactory := logging.NewDefaultLoggerFactory()
 
 	newAssoc := func() *Association {
-		assoc := createAssociation(Config{
+		assoc := createTestAssociation(t, Config{
 			LoggerFactory: loggerFactory,
 		})
 		assoc.payloadQueue.init(0)
@@ -1582,11 +1656,11 @@ func TestAssocT1InitTimer(t *testing.T) { //nolint:cyclop
 		defer lim.Stop()
 
 		br := test.NewBridge()
-		a0 := createAssociation(Config{
+		a0 := createTestAssociation(t, Config{
 			NetConn:       br.GetConn0(),
 			LoggerFactory: loggerFactory,
 		})
-		a1 := createAssociation(Config{
+		a1 := createTestAssociation(t, Config{
 			NetConn:       br.GetConn1(),
 			LoggerFactory: loggerFactory,
 		})
@@ -1615,8 +1689,8 @@ func TestAssocT1InitTimer(t *testing.T) { //nolint:cyclop
 		br.DropNextNWrites(0, 1)
 
 		// Start the handlshake
-		a0.init(true)
-		a1.init(true)
+		a0.initClient()
+		a1.initClient()
 
 		a0Ready := false
 		a1Ready := false
@@ -1642,11 +1716,11 @@ func TestAssocT1InitTimer(t *testing.T) { //nolint:cyclop
 		defer lim.Stop()
 
 		br := test.NewBridge()
-		a0 := createAssociation(Config{
+		a0 := createTestAssociation(t, Config{
 			NetConn:       br.GetConn0(),
 			LoggerFactory: loggerFactory,
 		})
-		a1 := createAssociation(Config{
+		a1 := createTestAssociation(t, Config{
 			NetConn:       br.GetConn1(),
 			LoggerFactory: loggerFactory,
 		})
@@ -1681,8 +1755,8 @@ func TestAssocT1InitTimer(t *testing.T) { //nolint:cyclop
 		br.DropNextNWrites(1, 99)
 
 		// Start the handlshake
-		a0.init(true)
-		a1.init(true)
+		a0.initClient()
+		a1.initClient()
 
 		a0Ready := false
 		a1Ready := false
@@ -1711,11 +1785,11 @@ func TestAssocT1CookieTimer(t *testing.T) { //nolint:cyclop
 		defer lim.Stop()
 
 		br := test.NewBridge()
-		a0 := createAssociation(Config{
+		a0 := createTestAssociation(t, Config{
 			NetConn:       br.GetConn0(),
 			LoggerFactory: loggerFactory,
 		})
-		a1 := createAssociation(Config{
+		a1 := createTestAssociation(t, Config{
 			NetConn:       br.GetConn1(),
 			LoggerFactory: loggerFactory,
 		})
@@ -1741,8 +1815,8 @@ func TestAssocT1CookieTimer(t *testing.T) { //nolint:cyclop
 		}()
 
 		// Start the handlshake
-		a0.init(true)
-		a1.init(true)
+		a0.initClient()
+		a1.initClient()
 
 		// Let the INIT go.
 		br.Tick()
@@ -1773,11 +1847,11 @@ func TestAssocT1CookieTimer(t *testing.T) { //nolint:cyclop
 		defer lim.Stop()
 
 		br := test.NewBridge()
-		a0 := createAssociation(Config{
+		a0 := createTestAssociation(t, Config{
 			NetConn:       br.GetConn0(),
 			LoggerFactory: loggerFactory,
 		})
-		a1 := createAssociation(Config{
+		a1 := createTestAssociation(t, Config{
 			NetConn:       br.GetConn1(),
 			LoggerFactory: loggerFactory,
 		})
@@ -1818,8 +1892,8 @@ func TestAssocT1CookieTimer(t *testing.T) { //nolint:cyclop
 		})
 
 		// Start the handlshake
-		a0.init(true)
-		a1.init(false)
+		a0.initClient()
+		a1.initServer()
 
 		a0Ready := false
 		for !a0Ready {
@@ -1844,7 +1918,7 @@ func TestAssocCreateNewStream(t *testing.T) {
 	loggerFactory := logging.NewDefaultLoggerFactory()
 
 	t.Run("acceptChSize", func(t *testing.T) {
-		assoc := createAssociation(Config{
+		assoc := createTestAssociation(t, Config{
 			NetConn:       &dumbConn{},
 			LoggerFactory: loggerFactory,
 		})
@@ -2628,7 +2702,7 @@ func TestAssocHandleInit(t *testing.T) {
 	handleInitTest := func(t *testing.T, initialState uint32, expectErr bool) {
 		t.Helper()
 
-		assoc := createAssociation(Config{
+		assoc := createTestAssociation(t, Config{
 			NetConn:       &dumbConn{},
 			LoggerFactory: loggerFactory,
 		})
@@ -2689,7 +2763,7 @@ func TestAssocHandleInit(t *testing.T) {
 func TestAssocMaxMessageSize(t *testing.T) {
 	t.Run("default", func(t *testing.T) {
 		loggerFactory := logging.NewDefaultLoggerFactory()
-		a := createAssociation(Config{
+		a := createTestAssociation(t, Config{
 			LoggerFactory: loggerFactory,
 		})
 		assert.NotNil(t, a, "should succeed")
@@ -2709,7 +2783,7 @@ func TestAssocMaxMessageSize(t *testing.T) {
 
 	t.Run("explicit", func(t *testing.T) {
 		loggerFactory := logging.NewDefaultLoggerFactory()
-		a := createAssociation(Config{
+		a := createTestAssociation(t, Config{
 			MaxMessageSize: 30000,
 			LoggerFactory:  loggerFactory,
 		})
@@ -2730,7 +2804,7 @@ func TestAssocMaxMessageSize(t *testing.T) {
 
 	t.Run("set value", func(t *testing.T) {
 		loggerFactory := logging.NewDefaultLoggerFactory()
-		a := createAssociation(Config{
+		a := createTestAssociation(t, Config{
 			LoggerFactory: loggerFactory,
 		})
 		assert.NotNil(t, a, "should succeed")
@@ -3067,11 +3141,11 @@ func (c *blockingCloseConn) SetReadDeadline(t time.Time) error {
 
 func TestAssociationAbortUnblocksStuckRead(t *testing.T) {
 	conn := newBlockingCloseConn()
-	assoc := createAssociation(Config{
+	assoc := createTestAssociation(t, Config{
 		NetConn:       conn,
 		LoggerFactory: logging.NewDefaultLoggerFactory(),
 	})
-	assoc.init(false)
+	assoc.initServer()
 
 	done := make(chan struct{})
 	go func() {
@@ -3143,11 +3217,11 @@ func (c *blockingWriteConn) SetReadDeadline(t time.Time) error {
 
 func TestAssociationAbortSetsWriteDeadline(t *testing.T) {
 	conn := newBlockingWriteConn()
-	assoc := createAssociation(Config{
+	assoc := createTestAssociation(t, Config{
 		NetConn:       conn,
 		LoggerFactory: logging.NewDefaultLoggerFactory(),
 	})
-	assoc.init(false)
+	assoc.initServer()
 
 	done := make(chan struct{})
 	go func() {
@@ -3637,12 +3711,12 @@ func TestAssociation_HandlePacketInCookieWaitState(t *testing.T) {
 		testCase := testCase
 		t.Run(name, func(t *testing.T) {
 			aConn, charlieConn := pipeDump(t)
-			assoc := createAssociation(Config{
+			assoc := createTestAssociation(t, Config{
 				NetConn:              aConn,
 				MaxReceiveBufferSize: 0,
 				LoggerFactory:        loggerFactory,
 			})
-			assoc.init(true)
+			assoc.initClient()
 
 			if !testCase.skipClose {
 				defer func() {
@@ -4091,7 +4165,7 @@ func newRackTestAssoc(t *testing.T) *Association {
 	t.Helper()
 
 	lg := logging.NewDefaultLoggerFactory()
-	assoc := createAssociation(Config{
+	assoc := createTestAssociation(t, Config{
 		LoggerFactory: lg,
 	})
 
@@ -4113,7 +4187,7 @@ func newRackTestAssoc(t *testing.T) *Association {
 
 	// RACK defaults for tests
 	assoc.rackReorderingSeen = false
-	assoc.rackReoWndFloor = 0
+	assoc.rack.rackReoWndFloor = 0
 
 	// Have a non-zero SRTT so SRTT-bounding code runs deterministically.
 	assoc.srtt.Store(float64(100.0)) // 100 ms
@@ -4139,8 +4213,8 @@ func TestRACK_MarkLossOnACK(t *testing.T) {
 
 	assoc.lock.Lock()
 
-	if assoc.rackMinRTTWnd == nil {
-		assoc.rackMinRTTWnd = newWindowedMin(30 * time.Second)
+	if assoc.rack.rackMinRTTWnd == nil {
+		assoc.rack.rackMinRTTWnd = newWindowedMin(30 * time.Second)
 	}
 
 	// MinRTT = 40ms → base reoWnd = 10ms
@@ -4259,7 +4333,7 @@ func TestRACK_SuppressReoWndDuringRecovery_NoReorderingSeen(t *testing.T) {
 	assert.Equal(t, time.Duration(0), assoc.rackReoWnd, "reoWnd should stay 0 until a minRTT sample exists")
 
 	now := time.Now()
-	assoc.rackMinRTTWnd.Push(now, 120*time.Millisecond)
+	assoc.rack.rackMinRTTWnd.Push(now, 120*time.Millisecond)
 
 	assoc.onRackAfterSACK(false, time.Time{}, 0, &chunkSelectiveAck{})
 	assert.Equal(
@@ -4371,7 +4445,7 @@ func newTLRAssociationForTest(t *testing.T) (*Association, net.Conn) {
 
 	c1, c2 := net.Pipe()
 
-	a := createAssociation(Config{
+	a := createTestAssociation(t, Config{
 		Name:          "tlr-test",
 		NetConn:       c1,
 		MTU:           1200,
