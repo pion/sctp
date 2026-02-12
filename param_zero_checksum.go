@@ -10,7 +10,7 @@ import (
 
 //  This parameter is used to inform the receiver that a sender is willing to
 //  accept zero as checksum if some other error detection method is used
-//  instead.
+//  instead. See RFC 9653 section 4.
 //
 //  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -30,6 +30,8 @@ type paramZeroChecksumAcceptable struct {
 // Zero Checksum parameter error.
 var (
 	ErrZeroChecksumParamTooShort = errors.New("zero checksum parameter too short")
+	// RFC 9653 section 4: Length MUST be 8.
+	ErrZeroChecksumParamInvalidLength = errors.New("zero checksum parameter length must be 8")
 )
 
 const (
@@ -49,9 +51,17 @@ func (r *paramZeroChecksumAcceptable) unmarshal(raw []byte) (param, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(r.raw) < 4 {
+
+	// Enforce exact length: header.len MUST be 8 (RFC 9653 section 4).
+	if r.len != 8 {
+		return nil, ErrZeroChecksumParamInvalidLength
+	}
+
+	// Raw value bytes MUST be exactly 4 bytes (since len=8 -> 4-byte header + 4-byte EDMID).
+	if len(r.raw) != 4 {
 		return nil, ErrZeroChecksumParamTooShort
 	}
+
 	r.edmid = binary.BigEndian.Uint32(r.raw)
 
 	return r, nil

@@ -55,6 +55,9 @@ type chunkInitCommon struct {
 const (
 	initChunkMinLength          = 16
 	initOptionalVarHeaderLength = 4
+
+	// RFC 9260 section 3.3.2 & section 3.3.3: INIT/INIT-ACK have a 16-byte fixed value before params.
+	initFixedValueLen = 16
 )
 
 // Init chunk errors.

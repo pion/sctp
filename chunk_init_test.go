@@ -4,6 +4,7 @@
 package sctp
 
 import (
+	"encoding/binary"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -30,4 +31,83 @@ func TestChunkInit_UnrecognizedParameters(t *testing.T) {
 	assert.NoError(t, initCommonChunk.unmarshal(unrecognizedStop))
 	assert.Equal(t, 1, len(initCommonChunk.unrecognizedParams))
 	assert.Equal(t, paramHeaderUnrecognizedActionStop, initCommonChunk.unrecognizedParams[0].unrecognizedAction)
+}
+
+func minimalInitCommon() chunkInitCommon {
+	return chunkInitCommon{
+		initiateTag:                    0x11111111,
+		advertisedReceiverWindowCredit: 1500,
+		numOutboundStreams:             1,
+		numInboundStreams:              1,
+		initialTSN:                     0,
+	}
+}
+
+func countZCA(b []byte, start int) (n int) {
+	off := start
+
+	for {
+		if off+4 > len(b) {
+			return
+		}
+
+		typ := binary.BigEndian.Uint16(b[off : off+2])
+		length := int(binary.BigEndian.Uint16(b[off+2 : off+4]))
+
+		if length < 4 || off+length > len(b) {
+			return
+		}
+
+		if typ == uint16(zeroChecksumAcceptable) && length == 8 {
+			n++
+		}
+
+		off += length
+
+		if rem := length & 3; rem != 0 {
+			off += 4 - rem
+		}
+	}
+}
+
+func TestINIT_ZCA_RoundTrip_NoDup(t *testing.T) {
+	initChunk := &chunkInit{
+		chunkInitCommon: minimalInitCommon(),
+		zcaPresent:      true,
+		zcaEDMID:        dtlsErrorDetectionMethod,
+	}
+	bytes, err := initChunk.marshal()
+	assert.NoError(t, err)
+
+	initChunk2 := &chunkInit{}
+	assert.NoError(t, initChunk2.unmarshal(bytes))
+	edmid, ok := initChunk2.ZeroChecksumEDMID()
+
+	assert.True(t, ok)
+	assert.Equal(t, dtlsErrorDetectionMethod, edmid)
+
+	// Re-marshal shouldn't add a second ZCA param.
+	bytes2, err := initChunk2.marshal()
+	assert.NoError(t, err)
+	assert.Equal(t, 1, countZCA(bytes2[chunkHeaderSize:], initChunkMinLength))
+}
+
+func TestINITACK_ZCA_RoundTrip_NoDup(t *testing.T) {
+	initChunkAck := &chunkInitAck{
+		chunkInitCommon: minimalInitCommon(),
+		zcaPresent:      true,
+		zcaEDMID:        dtlsErrorDetectionMethod,
+	}
+	bytes, err := initChunkAck.marshal()
+	assert.NoError(t, err)
+
+	initChunkAck2 := &chunkInitAck{}
+	assert.NoError(t, initChunkAck2.unmarshal(bytes))
+	edmid, ok := initChunkAck2.ZeroChecksumEDMID()
+	assert.True(t, ok)
+	assert.Equal(t, dtlsErrorDetectionMethod, edmid)
+
+	bytes2, err := initChunkAck2.marshal()
+	assert.NoError(t, err)
+	assert.Equal(t, 1, countZCA(bytes2[chunkHeaderSize:], initChunkMinLength))
 }
