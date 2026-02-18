@@ -14,6 +14,10 @@ type Reno struct {
 	CWND              uint32
 	PartialBytesAcked uint32
 	Step              uint32
+	PacingSlotStart   time.Time
+	PacingSlotEnd     time.Time
+	PacingRate        uint32 // bytes/ms
+	SentInSlot        uint32
 }
 
 func CreateReno(step uint32) Reno {
@@ -23,6 +27,10 @@ func CreateReno(step uint32) Reno {
 		MinCWND,
 		0,
 		step,
+		time.Time{},
+		time.Time{},
+		0,
+		0,
 	}
 }
 
@@ -40,7 +48,9 @@ func (reno *Reno) OnACK(ackedBytes uint32, rtt time.Duration) {
 		}
 	}
 }
-func (reno *Reno) OnSend(packets uint32) {}
+func (reno *Reno) OnSend(bytes uint32) {
+	reno.SentInSlot += bytes
+}
 func (reno *Reno) OnLoss() {
 	if !reno.InFastRecovery {
 		reno.InFastRecovery = true
@@ -58,8 +68,28 @@ func (reno *Reno) GetWindow() uint32 {
 func (reno *Reno) GetTimeout() time.Duration {
 	return time.Second * 120
 }
-func (reno *Reno) CanSend() (canSend bool, next time.Time) {
-	return true, time.Time{}
+func (reno *Reno) CanSend(bytes uint32, smoothedRTT time.Duration) (canSend bool, next time.Time) {
+	now := time.Now()
+	sinceStart := max(now.Sub(reno.PacingSlotStart).Microseconds(), 1)
+	t1 := time.Time{}
+	if reno.PacingSlotStart == t1 || reno.PacingSlotEnd.Sub(now) <= time.Duration(0) {
+		reno.PacingSlotStart = now
+		reno.PacingSlotEnd = now.Add(smoothedRTT)
+		srttUs := max(smoothedRTT.Microseconds(), 1)
+		reno.PacingRate = uint32(2 * int64(reno.CWND) * 1000 / srttUs)
+		reno.SentInSlot = 0
+		sinceStart = 1000
+	}
+
+	willSend := reno.SentInSlot + bytes
+	rate1 := uint32(int64(willSend) * 1000 / sinceStart)
+	if rate1 <= reno.PacingRate {
+		return true, time.Time{}
+	} else {
+		duration := time.Duration(willSend*1000/reno.PacingRate) * time.Microsecond
+		next := reno.PacingSlotStart.Add(duration)
+		return false, next
+	}
 }
 func (reno *Reno) SetFastRecovery(v bool) {
 	reno.InFastRecovery = v

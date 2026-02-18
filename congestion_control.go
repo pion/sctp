@@ -11,6 +11,6 @@ type CongestionController interface {
 	OnTimeout()
 	GetWindow() uint32
 	GetTimeout() time.Duration
-	CanSend() (canSend bool, next time.Time) //for pacing
+	CanSend(bytes uint32, smoothedRTT time.Duration) (canSend bool, next time.Time) //for pacing
 	SetFastRecovery(bool)
 }

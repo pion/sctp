@@ -977,6 +977,7 @@ func (a *Association) gatherOutboundFastRetransmissionPackets( //nolint:gocognit
 	bytesInPacket := 0
 	stopBundling := false
 
+	srtt := time.Duration(a.SRTT()*1000.0) * time.Microsecond
 	for i := 0; ; i++ {
 		chunkPayload, ok := a.inflightQueue.get(a.cumulativeTSNAckPoint + uint32(i) + 1) //nolint:gosec // G115
 		if !ok {
@@ -1018,9 +1019,13 @@ func (a *Association) gatherOutboundFastRetransmissionPackets( //nolint:gocognit
 				continue
 			}
 
-			if !a.tlrAllowSendLocked(budgetScaled, consumed, addBytes) {
+			canSend, next := a.CC1.CanSend(uint32(addBytes), srtt)
+			if !canSend {
 				// budget exhausted, stop selecting any more fast-rtx chunks
 				stopBundling = true
+				time.AfterFunc(next.Sub(now), func() {
+					a.awakeWriteLoop()
+				})
 
 				break
 			}
@@ -2672,6 +2677,8 @@ func (a *Association) popPendingDataChunksToSend( //nolint:cyclop,gocognit
 		//      is 0), the data sender can always have one DATA chunk in flight to
 		//      the receiver if allowed by cwnd (see rule B, below).
 
+		now := time.Now()
+		srtt := time.Duration(a.SRTT()*1000.0) * time.Microsecond
 		for {
 			chunkPayload := a.pendingQueue.peek()
 			if chunkPayload == nil {
@@ -2710,7 +2717,8 @@ func (a *Association) popPendingDataChunksToSend( //nolint:cyclop,gocognit
 				}
 
 				// reserve budget for common header + first chunk.
-				if !a.tlrAllowSendLocked(budgetScaled, consumed, addBytes) {
+				canSend, _ := a.CC1.CanSend(uint32(addBytes), srtt)
+				if !canSend {
 					break
 				}
 
@@ -2724,7 +2732,8 @@ func (a *Association) popPendingDataChunksToSend( //nolint:cyclop,gocognit
 				}
 
 				// reserve budget for the additional chunk bytes.
-				if !a.tlrAllowSendLocked(budgetScaled, consumed, chunkBytes) {
+				canSend, _ := a.CC1.CanSend(uint32(addBytes), srtt)
+				if !canSend {
 					break
 				}
 			}
@@ -2746,9 +2755,16 @@ func (a *Association) popPendingDataChunksToSend( //nolint:cyclop,gocognit
 				chunkBytes += getPadding(chunkBytes)
 				addBytes := int(commonHeaderSize) + chunkBytes
 
-				if addBytes <= int(a.MTU()) && a.tlrAllowSendLocked(budgetScaled, consumed, addBytes) {
-					a.movePendingDataChunkToInflightQueue(c)
-					chunks = append(chunks, c)
+				if addBytes <= int(a.MTU()) {
+					canSend, next := a.CC1.CanSend(uint32(addBytes), srtt)
+					if canSend {
+						a.movePendingDataChunkToInflightQueue(c)
+						chunks = append(chunks, c)
+					} else {
+						time.AfterFunc(next.Sub(now), func() {
+							a.awakeWriteLoop()
+						})
+					}
 				}
 			}
 		}
@@ -2889,6 +2905,7 @@ func (a *Association) getDataPacketsToRetransmit(budgetScaled *int64, consumed *
 
 	bytesInPacket := 0
 
+	srtt := time.Duration(a.SRTT()*1000.0) * time.Microsecond
 	for i := 0; ; i++ {
 		chunkPayload, ok := a.inflightQueue.get(a.cumulativeTSNAckPoint + uint32(i) + 1) //nolint:gosec // G115
 		if !ok {
@@ -2923,7 +2940,11 @@ func (a *Association) getDataPacketsToRetransmit(budgetScaled *int64, consumed *
 			}
 
 			// burst budget gate before mutating the chunk.
-			if !a.tlrAllowSendLocked(budgetScaled, consumed, addBytes) {
+			canSend, next := a.CC1.CanSend(uint32(addBytes), srtt)
+			if !canSend {
+				time.AfterFunc(next.Sub(currRtxTimestamp), func() {
+					a.awakeWriteLoop()
+				})
 				return a.bundleDataChunksIntoPackets(chunks)
 			}
 
