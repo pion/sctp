@@ -86,6 +86,7 @@ func (reno *Reno) CanSend(bytes uint32, smoothedRTT time.Duration) (canSend bool
 	if rate1 <= reno.PacingRate {
 		return true, time.Time{}
 	} else {
+		willSend = reno.SentInSlot + max(bytes, CalcSendQuantum(reno.PacingRate, 1500, 65536))
 		duration := time.Duration(willSend*1000/reno.PacingRate) * time.Microsecond
 		next := reno.PacingSlotStart.Add(duration)
 		return false, next
