@@ -127,7 +127,7 @@ func association(t *testing.T, piper piperFunc) (*Association, *Association, err
 		client, err := Client(Config{
 			NetConn:       ca,
 			LoggerFactory: loggerFactory,
-		})
+		}, SctpParameters{})
 		resultCh <- result{client, err}
 	}()
 
@@ -267,7 +267,7 @@ func createNewAssociationPair(
 			NetConn:              br.GetConn0(),
 			MaxReceiveBufferSize: recvBufSize,
 			LoggerFactory:        loggerFactory,
-		})
+		}, SctpParameters{})
 		handshake0Ch <- true
 	}()
 	go func() {
@@ -1171,7 +1171,7 @@ func TestInitVerificationTagIsZero(t *testing.T) { //nolint:cyclop
 			NetConn:              br.GetConn0(),
 			MaxReceiveBufferSize: recvBufSize,
 			LoggerFactory:        loggerFactory,
-		})
+		}, SctpParameters{})
 
 		handshake0Ch <- true
 	}()
@@ -1181,7 +1181,7 @@ func TestInitVerificationTagIsZero(t *testing.T) { //nolint:cyclop
 			NetConn:              br.GetConn1(),
 			MaxReceiveBufferSize: recvBufSize,
 			LoggerFactory:        loggerFactory,
-		})
+		}, SctpParameters{})
 		handshake1Ch <- true
 	}()
 
@@ -1248,7 +1248,7 @@ func TestCreateForwardTSN(t *testing.T) {
 		assoc := createAssociation(Config{
 			NetConn:       &dumbConn{},
 			LoggerFactory: loggerFactory,
-		})
+		}, SctpParameters{})
 
 		assoc.cumulativeTSNAckPoint = 9
 		assoc.advancedPeerTSNAckPoint = 10
@@ -1275,7 +1275,7 @@ func TestCreateForwardTSN(t *testing.T) {
 		assoc := createAssociation(Config{
 			NetConn:       &dumbConn{},
 			LoggerFactory: loggerFactory,
-		})
+		}, SctpParameters{})
 
 		assoc.cumulativeTSNAckPoint = 9
 		assoc.advancedPeerTSNAckPoint = 12
@@ -1341,7 +1341,7 @@ func TestHandleForwardTSN(t *testing.T) {
 		assoc := createAssociation(Config{
 			NetConn:       &dumbConn{},
 			LoggerFactory: loggerFactory,
-		})
+		}, SctpParameters{})
 		assoc.useForwardTSN = true
 		prevTSN := assoc.peerLastTSN()
 
@@ -1366,7 +1366,7 @@ func TestHandleForwardTSN(t *testing.T) {
 		assoc := createAssociation(Config{
 			NetConn:       &dumbConn{},
 			LoggerFactory: loggerFactory,
-		})
+		}, SctpParameters{})
 		assoc.useForwardTSN = true
 		prevTSN := assoc.peerLastTSN()
 
@@ -1396,7 +1396,7 @@ func TestHandleForwardTSN(t *testing.T) {
 		assoc := createAssociation(Config{
 			NetConn:       &dumbConn{},
 			LoggerFactory: loggerFactory,
-		})
+		}, SctpParameters{})
 		assoc.useForwardTSN = true
 		prevTSN := assoc.peerLastTSN()
 
@@ -1425,7 +1425,7 @@ func TestHandleForwardTSN(t *testing.T) {
 		assoc := createAssociation(Config{
 			NetConn:       &dumbConn{},
 			LoggerFactory: loggerFactory,
-		})
+		}, SctpParameters{})
 		assoc.useForwardTSN = true
 		prevTSN := assoc.peerLastTSN()
 
@@ -1453,7 +1453,7 @@ func TestHandleDataAckTriggering(t *testing.T) {
 	newAssoc := func() *Association {
 		assoc := createAssociation(Config{
 			LoggerFactory: loggerFactory,
-		})
+		}, SctpParameters{})
 		assoc.payloadQueue.init(0)
 
 		return assoc
@@ -1585,11 +1585,11 @@ func TestAssocT1InitTimer(t *testing.T) { //nolint:cyclop
 		a0 := createAssociation(Config{
 			NetConn:       br.GetConn0(),
 			LoggerFactory: loggerFactory,
-		})
+		}, SctpParameters{})
 		a1 := createAssociation(Config{
 			NetConn:       br.GetConn1(),
 			LoggerFactory: loggerFactory,
-		})
+		}, SctpParameters{})
 
 		var err0, err1 error
 		a0ReadyCh := make(chan bool)
@@ -1645,11 +1645,11 @@ func TestAssocT1InitTimer(t *testing.T) { //nolint:cyclop
 		a0 := createAssociation(Config{
 			NetConn:       br.GetConn0(),
 			LoggerFactory: loggerFactory,
-		})
+		}, SctpParameters{})
 		a1 := createAssociation(Config{
 			NetConn:       br.GetConn1(),
 			LoggerFactory: loggerFactory,
-		})
+		}, SctpParameters{})
 
 		var err0, err1 error
 		a0ReadyCh := make(chan bool)
@@ -1714,11 +1714,11 @@ func TestAssocT1CookieTimer(t *testing.T) { //nolint:cyclop
 		a0 := createAssociation(Config{
 			NetConn:       br.GetConn0(),
 			LoggerFactory: loggerFactory,
-		})
+		}, SctpParameters{})
 		a1 := createAssociation(Config{
 			NetConn:       br.GetConn1(),
 			LoggerFactory: loggerFactory,
-		})
+		}, SctpParameters{})
 
 		var err0, err1 error
 		a0ReadyCh := make(chan bool)
@@ -1776,11 +1776,11 @@ func TestAssocT1CookieTimer(t *testing.T) { //nolint:cyclop
 		a0 := createAssociation(Config{
 			NetConn:       br.GetConn0(),
 			LoggerFactory: loggerFactory,
-		})
+		}, SctpParameters{})
 		a1 := createAssociation(Config{
 			NetConn:       br.GetConn1(),
 			LoggerFactory: loggerFactory,
-		})
+		}, SctpParameters{})
 
 		var err0 error
 		a0ReadyCh := make(chan bool)
@@ -1847,7 +1847,7 @@ func TestAssocCreateNewStream(t *testing.T) {
 		assoc := createAssociation(Config{
 			NetConn:       &dumbConn{},
 			LoggerFactory: loggerFactory,
-		})
+		}, SctpParameters{})
 
 		for i := 0; i < acceptChSize; i++ {
 			s := assoc.createStream(uint16(i), true) //nolint:gosec
@@ -2562,7 +2562,9 @@ func TestRoutineLeak(t *testing.T) {
 		checkGoroutineLeaks(t)
 
 		conn := newFakeEchoConn(io.EOF)
-		assoc, err := Client(Config{NetConn: conn, LoggerFactory: loggerFactory})
+		assoc, err := Client(Config{
+			NetConn: conn, LoggerFactory: loggerFactory,
+		}, SctpParameters{})
 		assert.Equal(t, nil, err, "errored to initialize Client")
 
 		<-conn.done
@@ -2582,7 +2584,7 @@ func TestRoutineLeak(t *testing.T) {
 		checkGoroutineLeaks(t)
 
 		conn := newFakeEchoConn(nil)
-		a, err := Client(Config{NetConn: conn, LoggerFactory: loggerFactory})
+		a, err := Client(Config{NetConn: conn, LoggerFactory: loggerFactory}, SctpParameters{})
 		assert.Equal(t, nil, err, "errored to initialize Client")
 
 		<-conn.done
@@ -2605,7 +2607,7 @@ func TestStats(t *testing.T) {
 	loggerFactory := logging.NewDefaultLoggerFactory()
 
 	conn := newFakeEchoConn(nil)
-	assoc, err := Client(Config{NetConn: conn, LoggerFactory: loggerFactory})
+	assoc, err := Client(Config{NetConn: conn, LoggerFactory: loggerFactory}, SctpParameters{})
 	assert.Equal(t, nil, err, "errored to initialize Client")
 
 	<-conn.done
@@ -2631,7 +2633,7 @@ func TestAssocHandleInit(t *testing.T) {
 		assoc := createAssociation(Config{
 			NetConn:       &dumbConn{},
 			LoggerFactory: loggerFactory,
-		})
+		}, SctpParameters{})
 		assoc.setState(initialState)
 		pkt := &packet{
 			sourcePort:      5001,
@@ -2691,7 +2693,7 @@ func TestAssocMaxMessageSize(t *testing.T) {
 		loggerFactory := logging.NewDefaultLoggerFactory()
 		a := createAssociation(Config{
 			LoggerFactory: loggerFactory,
-		})
+		}, SctpParameters{})
 		assert.NotNil(t, a, "should succeed")
 		assert.Equal(t, uint32(65536), a.MaxMessageSize(), "should match")
 
@@ -2710,8 +2712,9 @@ func TestAssocMaxMessageSize(t *testing.T) {
 	t.Run("explicit", func(t *testing.T) {
 		loggerFactory := logging.NewDefaultLoggerFactory()
 		a := createAssociation(Config{
+			LoggerFactory: loggerFactory,
+		}, SctpParameters{
 			MaxMessageSize: 30000,
-			LoggerFactory:  loggerFactory,
 		})
 		assert.NotNil(t, a, "should succeed")
 		assert.Equal(t, uint32(30000), a.MaxMessageSize(), "should match")
@@ -2732,7 +2735,7 @@ func TestAssocMaxMessageSize(t *testing.T) {
 		loggerFactory := logging.NewDefaultLoggerFactory()
 		a := createAssociation(Config{
 			LoggerFactory: loggerFactory,
-		})
+		}, SctpParameters{})
 		assert.NotNil(t, a, "should succeed")
 		assert.Equal(t, uint32(65536), a.MaxMessageSize(), "should match")
 		a.SetMaxMessageSize(20000)
@@ -2866,7 +2869,7 @@ func createAssocs() (*Association, *Association, error) { //nolint:cyclop
 		a, err2 := createClientWithContext(ctx, Config{
 			NetConn:       udp1,
 			LoggerFactory: loggerFactory,
-		})
+		}, SctpParameters{})
 		if err2 != nil {
 			a1Chan <- err2
 		} else {
@@ -2878,7 +2881,7 @@ func createAssocs() (*Association, *Association, error) { //nolint:cyclop
 		a, err2 := createClientWithContext(ctx, Config{
 			NetConn:       udp2,
 			LoggerFactory: loggerFactory,
-		})
+		}, SctpParameters{})
 		if err2 != nil {
 			a2Chan <- err2
 		} else {
@@ -2958,7 +2961,7 @@ func createAssociationPairWithConfig(
 		cfg := config
 		cfg.NetConn = udpConn1
 		cfg.LoggerFactory = loggerFactory
-		a, err2 := createClientWithContext(ctx, cfg)
+		a, err2 := createClientWithContext(ctx, cfg, SctpParameters{})
 		if err2 != nil {
 			a1Chan <- err2
 		} else {
@@ -2973,7 +2976,7 @@ func createAssociationPairWithConfig(
 		if cfg.MaxReceiveBufferSize == 0 {
 			cfg.MaxReceiveBufferSize = 100_000
 		}
-		a, err2 := createClientWithContext(ctx, cfg)
+		a, err2 := createClientWithContext(ctx, cfg, SctpParameters{})
 		if err2 != nil {
 			a2Chan <- err2
 		} else {
@@ -3070,7 +3073,7 @@ func TestAssociationAbortUnblocksStuckRead(t *testing.T) {
 	assoc := createAssociation(Config{
 		NetConn:       conn,
 		LoggerFactory: logging.NewDefaultLoggerFactory(),
-	})
+	}, SctpParameters{})
 	assoc.init(false)
 
 	done := make(chan struct{})
@@ -3146,7 +3149,7 @@ func TestAssociationAbortSetsWriteDeadline(t *testing.T) {
 	assoc := createAssociation(Config{
 		NetConn:       conn,
 		LoggerFactory: logging.NewDefaultLoggerFactory(),
-	})
+	}, SctpParameters{})
 	assoc.init(false)
 
 	done := make(chan struct{})
@@ -3641,7 +3644,7 @@ func TestAssociation_HandlePacketInCookieWaitState(t *testing.T) {
 				NetConn:              aConn,
 				MaxReceiveBufferSize: 0,
 				LoggerFactory:        loggerFactory,
-			})
+			}, SctpParameters{})
 			assoc.init(true)
 
 			if !testCase.skipClose {
@@ -3720,7 +3723,7 @@ func TestAssociation_createClientWithContext(t *testing.T) {
 		_, err2 := createClientWithContext(ctx, Config{
 			NetConn:       udp1,
 			LoggerFactory: loggerFactory,
-		})
+		}, SctpParameters{})
 		if err2 != nil {
 			errCh1 <- err2
 		} else {
@@ -3732,7 +3735,7 @@ func TestAssociation_createClientWithContext(t *testing.T) {
 		_, err2 := createClientWithContext(ctx, Config{
 			NetConn:       udp2,
 			LoggerFactory: loggerFactory,
-		})
+		}, SctpParameters{})
 		if err2 != nil {
 			errCh2 <- err2
 		} else {
@@ -3810,7 +3813,7 @@ func TestAssociation_ZeroChecksum(t *testing.T) {
 				NetConn:            udp1,
 				LoggerFactory:      &customLogger{testCase.expectChecksumEnabled, t},
 				EnableZeroChecksum: testCase.clientZeroChecksum,
-			})
+			}, SctpParameters{})
 			assert.NoError(t, err)
 			a1chan <- a1
 		}()
@@ -3876,7 +3879,7 @@ func TestAssociation_ReconfigRequestsLimited(t *testing.T) {
 		a1, err := Client(Config{
 			NetConn:       udp1,
 			LoggerFactory: logging.NewDefaultLoggerFactory(),
-		})
+		}, SctpParameters{})
 		assert.NoError(t, err)
 		a1chan <- a1
 	}()
@@ -4093,7 +4096,7 @@ func newRackTestAssoc(t *testing.T) *Association {
 	lg := logging.NewDefaultLoggerFactory()
 	assoc := createAssociation(Config{
 		LoggerFactory: lg,
-	})
+	}, SctpParameters{})
 
 	// Put the association into a sane "established" state with fresh queues.
 	assoc.setState(established)
@@ -4377,7 +4380,7 @@ func newTLRAssociationForTest(t *testing.T) (*Association, net.Conn) {
 		MTU:           1200,
 		LoggerFactory: logging.NewDefaultLoggerFactory(),
 		RTOMax:        1000,
-	})
+	}, SctpParameters{})
 
 	return a, c2
 }
@@ -4699,4 +4702,81 @@ func TestTLR_GetDataPacketsToRetransmit_RespectsBurstBudget_LaterRTT(t *testing.
 	}
 	assert.Equal(t, 2, nChunks)
 	assert.True(t, consumed)
+}
+
+func TestAssociationSnap(t *testing.T) {
+	lim := test.TimeOut(time.Second * 10)
+	defer lim.Stop()
+
+	loggerFactory := logging.NewDefaultLoggerFactory()
+	br := test.NewBridge()
+
+	// Use GenerateOutOfBandToken to create the init chunks
+	tokenConfig := Config{
+		MaxReceiveBufferSize: 65535,
+		EnableZeroChecksum:   false,
+	}
+	initA, err := GenerateOutOfBandToken(tokenConfig)
+	assert.NoError(t, err)
+
+	initB, err := GenerateOutOfBandToken(tokenConfig)
+	assert.NoError(t, err)
+
+	assocA, err := Client(Config{
+		Name:          "a",
+		NetConn:       br.GetConn0(),
+		LoggerFactory: loggerFactory,
+	}, SctpParameters{
+		LocalSctpInit:  initA,
+		RemoteSctpInit: initB,
+	})
+	assert.NoError(t, err)
+	assert.NotNil(t, assocA)
+
+	assocB, err := Client(Config{
+		Name:          "b",
+		NetConn:       br.GetConn1(),
+		LoggerFactory: loggerFactory,
+	}, SctpParameters{
+		LocalSctpInit:  initB,
+		RemoteSctpInit: initA,
+	})
+	assert.NoError(t, err)
+	assert.NotNil(t, assocB)
+
+	const si uint16 = 1
+	const msg = "SNAP is snappy"
+
+	streamA, err := assocA.OpenStream(si, PayloadTypeWebRTCBinary)
+	assert.NoError(t, err)
+
+	_, err = streamA.WriteSCTP([]byte(msg), PayloadTypeWebRTCBinary)
+	assert.NoError(t, err)
+
+	br.Process()
+
+	accepted := make(chan *Stream)
+	go func() {
+		s, errAccept := assocB.AcceptStream()
+		assert.NoError(t, errAccept)
+		accepted <- s
+	}()
+
+	flushBuffers(br, assocA, assocB)
+
+	var streamB *Stream
+	select {
+	case streamB = <-accepted:
+	case <-time.After(5 * time.Second):
+		assert.Fail(t, "timed out waiting for accept stream")
+	}
+
+	buf := make([]byte, 64)
+	n, ppi, err := streamB.ReadSCTP(buf)
+	assert.NoError(t, err, "ReadSCTP failed")
+	assert.Equal(t, len(msg), n, "unexpected length of received data")
+	assert.Equal(t, PayloadTypeWebRTCBinary, ppi, "unexpected ppi")
+	assert.Equal(t, msg, string(buf[:n]))
+
+	closeAssociationPair(br, assocA, assocB)
 }

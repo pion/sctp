@@ -293,7 +293,7 @@ func testRwndFull(t *testing.T, unordered bool) { //nolint:cyclop
 			NetConn:              conn,
 			MaxReceiveBufferSize: maxReceiveBufferSize,
 			LoggerFactory:        loggerFactory,
-		})
+		}, SctpParameters{})
 		if !assert.NoError(t, err, "should succeed") {
 			return
 		}
@@ -500,7 +500,7 @@ func TestStreamClose(t *testing.T) { //nolint:cyclop
 		assoc, err := Client(Config{
 			NetConn:       conn,
 			LoggerFactory: loggerFactory,
-		})
+		}, SctpParameters{})
 		if !assert.NoError(t, err, "should succeed") {
 			return
 		}
@@ -634,7 +634,7 @@ func TestCookieEchoRetransmission(t *testing.T) {
 			NetConn:              conn,
 			MaxReceiveBufferSize: maxReceiveBufferSize,
 			LoggerFactory:        loggerFactory,
-		})
+		}, SctpParameters{})
 		if !assert.NoError(t, err, "should succeed") {
 			return
 		}
@@ -662,7 +662,7 @@ func TestCookieEchoRetransmission(t *testing.T) {
 			NetConn:              conn,
 			MaxReceiveBufferSize: maxReceiveBufferSize,
 			LoggerFactory:        loggerFactory,
-		})
+		}, SctpParameters{})
 		if !assert.NoError(t, err, "should succeed") {
 			return
 		}
@@ -845,7 +845,7 @@ func TestRACK_RTTSwitch_Reordering_NoDrop(t *testing.T) { //nolint:gocyclo,cyclo
 		assoc, err := Client(Config{
 			NetConn:       conn,
 			LoggerFactory: loggerFactory,
-		})
+		}, SctpParameters{})
 		if err != nil {
 			fail(fmt.Errorf("client assoc: %w", err))
 			clientStatsCh <- statsResult{ok: false}
