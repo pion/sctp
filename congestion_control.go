@@ -5,7 +5,7 @@ import (
 )
 
 type CongestionController interface {
-	OnACK(ackedBytes uint32, rtt time.Duration)
+	OnACK(ackedBytes uint32, rttSample time.Duration, smoothedRTT time.Duration)
 	OnSend(bytes uint32)
 	OnLoss()
 	OnTimeout()

@@ -35,7 +35,7 @@ func CreateReno(step uint32) Reno {
 }
 
 // implement CongestionController
-func (reno *Reno) OnACK(ackedBytes uint32, rtt time.Duration) {
+func (reno *Reno) OnACK(ackedBytes uint32, rttSample time.Duration, smoothedRTT time.Duration) {
 	if reno.CWND < reno.SSThreshold {
 		if !reno.InFastRecovery {
 			reno.CWND += ackedBytes

@@ -1980,6 +1980,9 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 					a.log.Tracef("[%s] SACK: measured-rtt=%f srtt=%f new-rto=%f",
 						a.name, rtt, srtt, a.rtoMgr.getRTO())
 				}
+			} else if t1 && chunkPayload.nSent == 1 {
+				t1 = false
+				rttSample = now.Sub(chunkPayload.since)
 			}
 
 			// RFC 8985 (RACK) sec 5.2: RACK.segment is the most recently sent
@@ -2029,15 +2032,23 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 					// Only original transmissions for classic RTT measurement
 					if chunkPayload.nSent == 1 {
 						a.minTSN2MeasureRTT = a.myNextTSN
-						rtt := now.Sub(chunkPayload.since).Seconds() * 1000.0
-						srtt := a.rtoMgr.setNewRTT(rtt)
+						rtt := now.Sub(chunkPayload.since)
+						srtt := a.rtoMgr.setNewRTT(rtt.Seconds() * 1000.0)
 						a.srtt.Store(srtt)
+
+						if t1 {
+							t1 = false
+							rttSample = rtt
+						}
 
 						a.rackMinRTTWnd.Push(now, now.Sub(chunkPayload.since))
 
 						a.log.Tracef("[%s] SACK: measured-rtt=%f srtt=%f new-rto=%f",
 							a.name, rtt, srtt, a.rtoMgr.getRTO())
 					}
+				} else if t1 && chunkPayload.nSent == 1 {
+					t1 = false
+					rttSample = now.Sub(chunkPayload.since)
 				}
 
 				if chunkPayload.since.After(newestDeliveredSendTime) {
@@ -2057,7 +2068,7 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 }
 
 // The caller should hold the lock.
-func (a *Association) onCumulativeTSNAckPointAdvanced(totalBytesAcked int, rtt time.Duration) {
+func (a *Association) onCumulativeTSNAckPointAdvanced(totalBytesAcked int, rttSample time.Duration, smoothedRTT time.Duration) {
 	// RFC 4960, sec 6.3.2.  Retransmission Timer Rules
 	//   R2)  Whenever all outstanding data sent to an address have been
 	//        acknowledged, turn off the T3-rtx timer of that address.
@@ -2071,7 +2082,7 @@ func (a *Association) onCumulativeTSNAckPointAdvanced(totalBytesAcked int, rtt t
 		a.t3RTX.start(a.rtoMgr.getRTO())
 	}
 
-	a.CC1.OnACK(uint32(totalBytesAcked), rtt)
+	a.CC1.OnACK(uint32(totalBytesAcked), rttSample, smoothedRTT)
 	a.setCWND(a.CC1.GetWindow())
 }
 
@@ -2201,7 +2212,8 @@ func (a *Association) handleSack(selectiveAckChunk *chunkSelectiveAck) error {
 
 		a.cumulativeTSNAckPoint = selectiveAckChunk.cumulativeTSNAck
 		cumTSNAckPointAdvanced = true
-		a.onCumulativeTSNAckPointAdvanced(totalBytesAcked, rttSample)
+		srtt := time.Duration(a.SRTT()*1000.0) * time.Microsecond
+		a.onCumulativeTSNAckPointAdvanced(totalBytesAcked, rttSample, srtt)
 	}
 
 	for si, nBytesAcked := range bytesAckedPerStream {
