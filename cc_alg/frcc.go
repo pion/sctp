@@ -604,7 +604,7 @@ func (frcc *FRCC) rProbe(rtt time.Duration, now time.Time) {
 func (frcc *FRCC) OnACK(ackedBytes uint32, rttSample time.Duration, smoothedRTT time.Duration) {
 	probe := &frcc.ProbeData
 	if rttSample.Microseconds() <= 0 {
-		log.Printf("rttSample=%v <= 0us, ackedBytes %v, smoothedRTT %v", rttSample, ackedBytes, smoothedRTT)
+		//log.Printf("rttSample=%v <= 0us, ackedBytes %v, smoothedRTT %v", rttSample, ackedBytes, smoothedRTT)
 		return
 	}
 
@@ -694,12 +694,14 @@ func (frcc *FRCC) CanSend(bytes uint32, smoothedRTT time.Duration) (canSend bool
 	if frcc.PacingSlotStart == t1 || frcc.PacingSlotEnd.Sub(now) <= time.Duration(0) {
 		frcc.PacingSlotStart = now
 		frcc.PacingSlotEnd = now.Add(smoothedRTT)
-		srttUs := max(smoothedRTT.Microseconds(), 1)
-		r1 := 2 * int64(frcc.CWND) * 1000 / srttUs
-		if r1 > math.MaxUint32 {
-			log.Printf("PacingRate > MaxUint32: %v", r1)
-		}
-		frcc.PacingRate = uint32(r1)
+		if frcc.PacingRate == 0 {
+			srttUs := max(smoothedRTT.Microseconds(), 1)
+			r1 := 2 * int64(frcc.CWND) * 1000 / srttUs
+			if r1 > math.MaxUint32 {
+				log.Printf("PacingRate > MaxUint32: %v", r1)
+			}
+			frcc.PacingRate = uint32(r1)
+		} // updatePacingRate() will update frcc.PacingRate
 		frcc.SentInSlot = 0
 		sinceStart = 1000
 	}
