@@ -2732,8 +2732,11 @@ func (a *Association) popPendingDataChunksToSend( //nolint:cyclop,gocognit
 				}
 
 				// reserve budget for common header + first chunk.
-				canSend, _ := a.CC1.CanSend(uint32(totalBytes+addBytes), srtt)
+				canSend, next := a.CC1.CanSend(uint32(totalBytes+addBytes), srtt)
 				if !canSend {
+					time.AfterFunc(next.Sub(now), func() {
+						a.awakeWriteLoop()
+					})
 					break
 				}
 				totalBytes += addBytes
@@ -2748,8 +2751,11 @@ func (a *Association) popPendingDataChunksToSend( //nolint:cyclop,gocognit
 				}
 
 				// reserve budget for the additional chunk bytes.
-				canSend, _ := a.CC1.CanSend(uint32(totalBytes+addBytes), srtt)
+				canSend, next := a.CC1.CanSend(uint32(totalBytes+addBytes), srtt)
 				if !canSend {
+					time.AfterFunc(next.Sub(now), func() {
+						a.awakeWriteLoop()
+					})
 					break
 				}
 				totalBytes += addBytes
