@@ -121,12 +121,16 @@ func (p *packet) unmarshal(doChecksum bool, raw []byte) error { //nolint:cyclop
 			dataChunk = &chunkHeartbeat{}
 		case ctPayloadData:
 			dataChunk = &chunkPayloadData{}
+		case ctIData:
+			dataChunk = &chunkPayloadData{}
 		case ctSack:
 			dataChunk = &chunkSelectiveAck{}
 		case ctReconfig:
 			dataChunk = &chunkReconfig{}
 		case ctForwardTSN:
 			dataChunk = &chunkForwardTSN{}
+		case ctIForwardTSN:
+			dataChunk = &chunkIForwardTSN{}
 		case ctError:
 			dataChunk = &chunkError{}
 		case ctShutdown:
