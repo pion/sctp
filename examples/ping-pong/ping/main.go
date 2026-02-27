@@ -28,22 +28,21 @@ func main() { //nolint:cyclop
 	}()
 	fmt.Println("dialed udp ponger")
 
-	config := sctp.Config{
-		NetConn:       conn,
-		LoggerFactory: logging.NewDefaultLoggerFactory(),
-	}
-	a, err := sctp.Client(config)
+	assoc, err := sctp.ClientWithOptions(
+		sctp.WithNetConn(conn),
+		sctp.WithLoggerFactory(logging.NewDefaultLoggerFactory()),
+	)
 	if err != nil {
 		log.Panic(err)
 	}
 	defer func() {
-		if closeErr := a.Close(); closeErr != nil {
+		if closeErr := assoc.Close(); closeErr != nil {
 			log.Panic(err)
 		}
 	}()
 	fmt.Println("created a client")
 
-	stream, err := a.OpenStream(0, sctp.PayloadTypeWebRTCString)
+	stream, err := assoc.OpenStream(0, sctp.PayloadTypeWebRTCString)
 	if err != nil {
 		log.Panic(err)
 	}
