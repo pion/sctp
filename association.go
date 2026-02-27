@@ -396,6 +396,27 @@ func createClientWithContext(ctx context.Context, config Config) (*Association, 
 }
 
 func createClientWithOptionsWithContext(ctx context.Context, opts ...ClientOption) (*Association, error) {
+	cfg, err := buildClientConfig(opts...)
+	if err != nil {
+		return nil, err
+	}
+	if len(cfg.RemoteSctpInit) != 0 && len(cfg.LocalSctpInit) != 0 {
+		// SNAP, aka sctp-init in the SDP.
+		remote := &chunkInit{}
+		err = remote.unmarshal(cfg.RemoteSctpInit)
+		if err != nil {
+			return nil, err
+		}
+		local := &chunkInit{}
+		err = local.unmarshal(cfg.LocalSctpInit)
+		if err != nil {
+			return nil, err
+		}
+		assoc := createAssociationFromConfigWithTsn(cfg, local.initialTSN)
+		assoc.initWithOutOfBandTokens(local, remote)
+
+		return assoc, nil
+	}
 	assoc, err := createClientAssociation(opts...)
 	if err != nil {
 		return nil, err
@@ -441,9 +462,7 @@ func createServerAssociation(opts ...ServerOption) (*Association, error) {
 		return nil, err
 	}
 
-	tsn := globalMathRandomGenerator.Uint32()
-
-	return createAssociationFromConfig(cfg, tsn), nil
+	return createAssociationFromConfig(cfg)
 }
 
 func (a *Association) initServer() {
@@ -524,30 +543,7 @@ func createClientAssociation(opts ...ClientOption) (*Association, error) {
 		return nil, err
 	}
 
-	if len(cfg.RemoteSctpInit) != 0 && len(cfg.LocalSctpInit) != 0 {
-		// SNAP, aka sctp-init in the SDP.
-		remote := &chunkInit{}
-		err := remote.unmarshal(cfg.RemoteSctpInit)
-		if err != nil {
-			return nil, err
-		}
-		local := &chunkInit{}
-		err = local.unmarshal(cfg.LocalSctpInit)
-		if err != nil {
-			return nil, err
-		}
-		assoc := createAssociationFromConfig(cfg, local.initialTSN)
-		if err != nil {
-			return nil, err
-		}
-		assoc.initWithOutOfBandTokens(local, remote)
-
-		return assoc, nil
-	}
-
-	tsn := globalMathRandomGenerator.Uint32()
-
-	return createAssociationFromConfig(cfg, tsn), nil
+	return createAssociationFromConfig(cfg)
 }
 
 func (a *Association) initClient() {
@@ -624,6 +620,9 @@ func (c Config) applyClient(cfg *Config) error { //nolint:dupl,cyclop
 
 	cfg.rack = c.rack
 
+	cfg.LocalSctpInit = c.LocalSctpInit
+	cfg.RemoteSctpInit = c.RemoteSctpInit
+
 	return nil
 }
 
@@ -649,7 +648,13 @@ func buildClientConfig(opts ...ClientOption) (*Config, error) {
 	return cfg, nil
 }
 
-func createAssociationFromConfig(cfg *Config, tsn uint32) *Association {
+func createAssociationFromConfig(cfg *Config) (*Association, error) {
+	tsn := globalMathRandomGenerator.Uint32()
+
+	return createAssociationFromConfigWithTsn(cfg, tsn), nil
+}
+
+func createAssociationFromConfigWithTsn(cfg *Config, tsn uint32) *Association {
 	maxReceiveBufferSize := cfg.MaxReceiveBufferSize
 	if maxReceiveBufferSize == 0 {
 		maxReceiveBufferSize = initialRecvBufSize

@@ -4784,22 +4784,19 @@ func TestAssociationSNAP(t *testing.T) {
 	initB, err := GenerateOutOfBandToken(tokenConfig)
 	assert.NoError(t, err)
 
-	optsA := make([]ClientOption, 0, 10)
-	optsA = append(optsA,
+	assocA, err := ClientWithOptions(
 		WithName("a"),
 		WithNetConn(br.GetConn0()),
 		WithLoggerFactory(loggerFactory),
 		WithSNAP(initA, initB))
-	assocA, err := ClientWithOptions(optsA...)
 	assert.NoError(t, err)
 	assert.NotNil(t, assocA)
 
-	optsB := make([]ClientOption, 0, 10)
-	optsB = append(optsB, WithName("b"),
+	assocB, err := ClientWithOptions(
+		WithName("b"),
 		WithNetConn(br.GetConn1()),
 		WithLoggerFactory(loggerFactory),
 		WithSNAP(initB, initA))
-	assocB, err := ClientWithOptions(optsB...)
 	assert.NoError(t, err)
 	assert.NotNil(t, assocB)
 
