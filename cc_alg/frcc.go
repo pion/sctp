@@ -29,6 +29,7 @@ type FRCCParam struct {
 	UBSlotsPerRound        uint32
 	RProbeInterval         time.Duration
 	ProbeWaitRTTs          uint32
+	PacingQuantum          uint32
 
 	// Design features
 	UseRPropProbe         bool
@@ -59,6 +60,7 @@ func FRCCDefaultParam() FRCCParam {
 		UBSlotsPerRound:     20,
 		RProbeInterval:      30 * time.Second,
 		ProbeWaitRTTs:       2,
+		PacingQuantum:       65536,
 
 		UseRPropProbe:         true,
 		WaitRTTAfterProbe:     true,
@@ -512,9 +514,13 @@ func (frcc *FRCC) slowStart(now time.Time, rtt time.Duration, ackedBytes uint32)
 	// when we expect the rtt to stop increasing.
 
 	param := &frcc.Param
-	shouldInitSSEnd := rtt > frcc.MinRTProp+param.ContractMinQDel+param.UBRTTErr
+	delta1 := param.ContractMinQDel + param.UBRTTErr
+	shouldInitSSEnd := rtt > frcc.MinRTProp+delta1
 	// TODO: contract_const subsumes rtt_err, so should we really add that
 	// here?
+	if frcc.MinRTProp < delta1 {
+		shouldInitSSEnd = rtt > frcc.MinRTProp<<1
+	}
 
 	ssEnded := frcc.SSAckedBytes >= frcc.SSSentBytes
 
@@ -711,7 +717,7 @@ func (frcc *FRCC) CanSend(bytes uint32, smoothedRTT time.Duration) (canSend bool
 	if rate1 <= frcc.PacingRate {
 		return true, time.Time{}
 	} else {
-		willSend = frcc.SentInSlot + max(bytes, CalcSendQuantum(frcc.PacingRate, 1500, 65536))
+		willSend = frcc.SentInSlot + max(bytes, CalcSendQuantum(frcc.PacingRate, 1500, frcc.Param.PacingQuantum))
 		if frcc.PacingRate == 0 {
 			log.Printf("%#v", frcc)
 		}
