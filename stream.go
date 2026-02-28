@@ -59,7 +59,7 @@ var (
 // Stream represents an SCTP stream.
 type Stream struct {
 	association         *Association
-	lock                sync.RWMutex
+	lock                *sync.RWMutex
 	streamIdentifier    uint16
 	defaultPayloadType  PayloadProtocolIdentifier
 	reassemblyQueue     *reassemblyQueue
