@@ -395,27 +395,31 @@ func createClientWithContext(ctx context.Context, config Config) (*Association, 
 	return createClientWithOptionsWithContext(ctx, config)
 }
 
-func createClientWithOptionsWithContext(ctx context.Context, opts ...ClientOption) (*Association, error) {
-	cfg, err := buildClientConfig(opts...)
+func createSNAPAssociation(config *Config) (*Association, error) {
+	// SNAP, aka sctp-init in the SDP.
+	remote := &chunkInit{}
+	err := remote.unmarshal(config.RemoteSctpInit)
 	if err != nil {
 		return nil, err
 	}
-	if len(cfg.RemoteSctpInit) != 0 && len(cfg.LocalSctpInit) != 0 {
-		// SNAP, aka sctp-init in the SDP.
-		remote := &chunkInit{}
-		err = remote.unmarshal(cfg.RemoteSctpInit)
-		if err != nil {
-			return nil, err
-		}
-		local := &chunkInit{}
-		err = local.unmarshal(cfg.LocalSctpInit)
-		if err != nil {
-			return nil, err
-		}
-		assoc := createAssociationFromConfigWithTsn(cfg, local.initialTSN)
-		assoc.initWithOutOfBandTokens(local, remote)
+	local := &chunkInit{}
+	err = local.unmarshal(config.LocalSctpInit)
+	if err != nil {
+		return nil, err
+	}
+	assoc := createAssociationFromConfigWithTsn(config, local.initialTSN)
+	assoc.initWithOutOfBandTokens(local, remote)
 
-		return assoc, nil
+	return assoc, nil
+}
+
+func createClientWithOptionsWithContext(ctx context.Context, opts ...ClientOption) (*Association, error) {
+	config, err := buildClientConfig(opts...)
+	if err != nil {
+		return nil, err
+	}
+	if len(config.RemoteSctpInit) != 0 && len(config.LocalSctpInit) != 0 {
+		return createSNAPAssociation(config)
 	}
 	assoc, err := createClientAssociation(opts...)
 	if err != nil {
