@@ -4961,6 +4961,27 @@ func TestAbortSentChClosedWhenAbortMarshalFails(t *testing.T) {
 		require.Fail(t, "abortSentCh was not closed when ABORT marshaling failed")
 	}
 }
+
+func TestAssociationSNAPInvalidInit(t *testing.T) {
+	br := test.NewBridge()
+	tokenConfig := Config{
+		MaxReceiveBufferSize: 65535,
+		EnableZeroChecksum:   false,
+	}
+	init, err := GenerateOutOfBandToken(tokenConfig)
+	assert.NoError(t, err)
+
+	_, err = ClientWithOptions(
+		WithNetConn(br.GetConn0()),
+		WithSNAP([]byte{1, 2}, init))
+	assert.ErrorIs(t, err, ErrChunkHeaderTooSmall)
+
+	_, err = ClientWithOptions(
+		WithNetConn(br.GetConn1()),
+		WithSNAP(init, []byte{1, 2}))
+	assert.ErrorIs(t, err, ErrChunkHeaderTooSmall)
+}
+
 func TestAssociationSNAP(t *testing.T) {
 	lim := test.TimeOut(time.Second * 10)
 	defer lim.Stop()
