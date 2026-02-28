@@ -13,9 +13,12 @@ import (
 
 func TestChunkShutdownComplete_Success(t *testing.T) {
 	tt := []struct {
+		name   string
 		binary []byte
 	}{
-		{[]byte{0x0e, 0x00, 0x00, 0x04}},
+		{"no-flags", []byte{0x0e, 0x00, 0x00, 0x04}},
+		// RFC 9260: only T-bit is meaningful; others reserved. We accept either.
+		{"t-bit-set", []byte{0x0e, 0x01, 0x00, 0x04}},
 	}
 
 	for i, tc := range tt {
@@ -34,8 +37,9 @@ func TestChunkShutdownComplete_Failure(t *testing.T) { //nolint:dupl
 		name   string
 		binary []byte
 	}{
+		// Not enough bytes to even contain the 4-byte header
 		{"length too short", []byte{0x0e, 0x00, 0x00}},
-		{"length too long", []byte{0x0e, 0x00, 0x00, 0x04, 0x12}},
+		// Wrong type
 		{"invalid type", []byte{0x0f, 0x00, 0x00, 0x04}},
 	}
 
