@@ -348,8 +348,9 @@ type Config struct {
 	rack rackSettings
 
 	// Local and remote SCTP init to use for SNAP
-	LocalSctpInit  []byte
-	RemoteSctpInit []byte
+	// string for struct compat, these are byte arrays.
+	LocalSctpInit  string
+	RemoteSctpInit string
 }
 
 // Server accepts a SCTP stream over a conn.
@@ -398,12 +399,12 @@ func createClientWithContext(ctx context.Context, config Config) (*Association, 
 func createSNAPAssociation(config *Config) (*Association, error) {
 	// SNAP, aka sctp-init in the SDP.
 	remote := &chunkInit{}
-	err := remote.unmarshal(config.RemoteSctpInit)
+	err := remote.unmarshal([]byte(config.RemoteSctpInit))
 	if err != nil {
 		return nil, err
 	}
 	local := &chunkInit{}
-	err = local.unmarshal(config.LocalSctpInit)
+	err = local.unmarshal([]byte(config.LocalSctpInit))
 	if err != nil {
 		return nil, err
 	}
