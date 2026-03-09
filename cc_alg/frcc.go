@@ -462,8 +462,9 @@ func (frcc *FRCC) updateCwnd(rtt time.Duration) {
 	tcwndLoClamp := prevCwnd * param.CwndClampLo
 
 	bwEstimate := int64(math.MaxInt64)
-	if probe.MinExcessDelay > 0 {
-		bwEstimate = int64(probe.Excess) * 1000 / probe.MinExcessDelay.Microseconds()
+	minExcessDelayUs := probe.MinExcessDelay.Microseconds()
+	if minExcessDelayUs > 0 {
+		bwEstimate = int64(probe.Excess) * 1000 / minExcessDelayUs
 	}
 
 	round := &frcc.RoundData
