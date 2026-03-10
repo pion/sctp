@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 /*
@@ -152,7 +153,8 @@ func (i chunkInitCommon) String() string {
 	numInboundStreams: %d
 	initialTSN: %d`
 
-	res := fmt.Sprintf(format,
+	var res strings.Builder
+	fmt.Fprintf(&res, format,
 		i.initiateTag,
 		i.advertisedReceiverWindowCredit,
 		i.numOutboundStreams,
@@ -161,10 +163,10 @@ func (i chunkInitCommon) String() string {
 	)
 
 	for i, param := range i.params {
-		res += fmt.Sprintf("Param %d:\n %s", i, param)
+		fmt.Fprintf(&res, "Param %d:\n %s", i, param)
 	}
 
-	return res
+	return res.String()
 }
 
 // allZero returns true if every byte is 0x00.

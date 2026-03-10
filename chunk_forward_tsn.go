@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // This chunk shall be used by the data sender to inform the data
@@ -105,12 +106,13 @@ func (c *chunkForwardTSN) check() (abort bool, err error) {
 
 // String makes chunkForwardTSN printable.
 func (c *chunkForwardTSN) String() string {
-	res := fmt.Sprintf("New Cumulative TSN: %d\n", c.newCumulativeTSN)
+	var res strings.Builder
+	fmt.Fprintf(&res, "New Cumulative TSN: %d\n", c.newCumulativeTSN)
 	for _, s := range c.streams {
-		res += fmt.Sprintf(" - si=%d, ssn=%d\n", s.identifier, s.sequence)
+		fmt.Fprintf(&res, " - si=%d, ssn=%d\n", s.identifier, s.sequence)
 	}
 
-	return res
+	return res.String()
 }
 
 type chunkForwardTSNStream struct {

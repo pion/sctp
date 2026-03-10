@@ -6,6 +6,7 @@ package sctp // nolint:dupl
 import (
 	"errors"
 	"fmt"
+	"strings"
 )
 
 /*
@@ -91,11 +92,12 @@ func (a *chunkError) check() (abort bool, err error) {
 
 // String makes chunkError printable.
 func (a *chunkError) String() string {
-	res := a.chunkHeader.String()
+	var res strings.Builder
+	res.WriteString(a.chunkHeader.String())
 
 	for _, cause := range a.errorCauses {
-		res += fmt.Sprintf("\n - %s", cause)
+		fmt.Fprintf(&res, "\n - %s", cause)
 	}
 
-	return res
+	return res.String()
 }

@@ -31,7 +31,7 @@ func TestAckTimer(t *testing.T) {
 			},
 		})
 
-		for i := 0; i < 2; i++ {
+		for range 2 {
 			// should start ok
 			ok := rt.start()
 			assert.True(t, ok, "start() should succeed")
@@ -70,7 +70,7 @@ func TestAckTimer(t *testing.T) {
 			},
 		})
 
-		for i := 0; i < 2; i++ {
+		for range 2 {
 			// should start ok
 			ok := rt.start()
 			assert.True(t, ok, "start() should succeed")

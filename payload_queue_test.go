@@ -26,7 +26,7 @@ func TestPayloadQueue(t *testing.T) {
 		assert.Equal(t, 33, pq.getNumBytes(), "total bytes mismatch")
 		assert.Equal(t, 3, pq.size(), "item count mismatch")
 
-		for i := uint32(0); i < 3; i++ {
+		for i := range uint32(3) {
 			c, ok := pq.pop(i)
 			assert.True(t, ok, "pop should succeed")
 			assert.Equal(t, i, c.tsn, "TSN should match")
@@ -52,7 +52,7 @@ func TestPayloadQueue(t *testing.T) {
 
 	t.Run("markAllToRetrasmit", func(t *testing.T) {
 		pq := newPayloadQueue()
-		for i := 0; i < 3; i++ {
+		for i := range 3 {
 			pq.pushNoCheck(makePayload(uint32(i+1), 10)) //nolint:gosec // G115
 		}
 		pq.markAsAcked(2)
@@ -71,7 +71,7 @@ func TestPayloadQueue(t *testing.T) {
 
 	t.Run("reset retransmit flag on ack", func(t *testing.T) {
 		pq := newPayloadQueue()
-		for i := 0; i < 4; i++ {
+		for i := range 4 {
 			pq.pushNoCheck(makePayload(uint32(i+1), 10)) //nolint:gosec // G115
 		}
 

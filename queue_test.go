@@ -38,12 +38,12 @@ func TestQueue(t *testing.T) {
 	assert.Equal(t, 11, queu.PopFront())
 
 	// test grow capacity
-	for i := 0; i < 64; i++ {
+	for i := range 64 {
 		queu.PushBack(i)
 	}
 	assert.Equal(t, 64, queu.Len())
 	assert.Equal(t, 2, queu.At(2))
-	for i := 0; i < 64; i++ {
+	for i := range 64 {
 		assert.Equal(t, i, queu.Front())
 		assert.Equal(t, i, queu.PopFront())
 	}
@@ -75,7 +75,7 @@ func TestPendingBaseQueuePopReleasesReferences(t *testing.T) {
 	var finalized int32
 
 	// add 64 chunks, each with a finalizer to count collection.
-	for i := 0; i < 64; i++ {
+	for range 64 {
 		c := &chunkPayloadData{
 			userData: make([]byte, bufSize),
 		}
@@ -88,7 +88,7 @@ func TestPendingBaseQueuePopReleasesReferences(t *testing.T) {
 	}
 
 	// pop 63 chunks so only 1 is left
-	for i := 0; i < 63; i++ {
+	for range 63 {
 		queue.pop()
 	}
 

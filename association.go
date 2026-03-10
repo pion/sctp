@@ -12,6 +12,7 @@ import (
 	"io"
 	"math"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1540,10 +1541,7 @@ func (a *Association) SRTT() float64 {
 // buffer within a small multiple of the user provided max receive buffer size.
 func getMaxTSNOffset(maxReceiveBufferSize uint32) uint32 {
 	// 4 is a magic number here. There is no theory behind this.
-	offset := max((maxReceiveBufferSize*4)/avgChunkSize, minTSNOffset)
-	if offset > maxTSNOffset {
-		offset = maxTSNOffset
-	}
+	offset := min(max((maxReceiveBufferSize*4)/avgChunkSize, minTSNOffset), maxTSNOffset)
 
 	return offset
 }
@@ -2546,14 +2544,14 @@ func (a *Association) handleShutdownComplete(_ *chunkShutdownComplete) error {
 }
 
 func (a *Association) handleAbort(c *chunkAbort) error {
-	var errStr string
+	var errStr strings.Builder
 	for _, e := range c.errorCauses {
-		errStr += fmt.Sprintf("(%s)", e)
+		fmt.Fprintf(&errStr, "(%s)", e)
 	}
 
 	_ = a.close()
 
-	return fmt.Errorf("[%s] %w: %s", a.name, ErrChunk, errStr)
+	return fmt.Errorf("[%s] %w: %s", a.name, ErrChunk, errStr.String())
 }
 
 // createForwardTSN generates ForwardTSN chunk.
@@ -2582,9 +2580,9 @@ func (a *Association) createForwardTSN() *chunkForwardTSN {
 		streams:          []chunkForwardTSNStream{},
 	}
 
-	var streamStr string
+	var streamStr strings.Builder
 	for si, ssn := range streamMap {
-		streamStr += fmt.Sprintf("(si=%d ssn=%d)", si, ssn)
+		fmt.Fprintf(&streamStr, "(si=%d ssn=%d)", si, ssn)
 		fwdtsn.streams = append(fwdtsn.streams, chunkForwardTSNStream{
 			identifier: si,
 			sequence:   ssn,
@@ -2592,7 +2590,7 @@ func (a *Association) createForwardTSN() *chunkForwardTSN {
 	}
 	a.log.Tracef(
 		"[%s] building fwdtsn: newCumulativeTSN=%d cumTSN=%d - %s",
-		a.name, fwdtsn.newCumulativeTSN, a.cumulativeTSNAckPoint, streamStr,
+		a.name, fwdtsn.newCumulativeTSN, a.cumulativeTSNAckPoint, streamStr.String(),
 	)
 
 	return fwdtsn
@@ -3251,11 +3249,11 @@ func (a *Association) handleChunk(receivedPacket *packet, receivedChunk chunk) e
 		err = a.handleAbort(receivedChunk)
 
 	case *chunkError:
-		var errStr string
+		var errStr strings.Builder
 		for _, e := range receivedChunk.errorCauses {
-			errStr += fmt.Sprintf("(%s)", e)
+			fmt.Fprintf(&errStr, "(%s)", e)
 		}
-		a.log.Debugf("[%s] Error chunk, with following errors: %s", a.name, errStr)
+		a.log.Debugf("[%s] Error chunk, with following errors: %s", a.name, errStr.String())
 
 	case *chunkHeartbeat:
 		packets = a.handleHeartbeat(receivedChunk)

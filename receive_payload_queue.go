@@ -6,6 +6,7 @@ package sctp
 import (
 	"fmt"
 	"math/bits"
+	"strings"
 )
 
 type receivePayloadQueue struct {
@@ -168,12 +169,13 @@ func (q *receivePayloadQueue) getGapAckBlocks() (gapAckBlocks []gapAckBlock) {
 
 func (q *receivePayloadQueue) getGapAckBlocksString() string {
 	gapAckBlocks := q.getGapAckBlocks()
-	str := fmt.Sprintf("cumTSN=%d", q.cumulativeTSN)
+	var str strings.Builder
+	fmt.Fprintf(&str, "cumTSN=%d", q.cumulativeTSN)
 	for _, b := range gapAckBlocks {
-		str += fmt.Sprintf(",%d-%d", b.start, b.end)
+		fmt.Fprintf(&str, ",%d-%d", b.start, b.end)
 	}
 
-	return str
+	return str.String()
 }
 
 func (q *receivePayloadQueue) getLastTSNReceived() (uint32, bool) {

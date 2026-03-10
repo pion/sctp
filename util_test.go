@@ -38,7 +38,7 @@ func TestSerialNumberArithmetic(t *testing.T) {
 		const maxForwardDistance uint32 = 1<<(serialBits-1) - 1
 		const maxBackwardDistance uint32 = 1 << (serialBits - 1)
 
-		for i := uint32(0); i < uint32(div); i++ {
+		for i := range uint32(div) {
 			s1 := i * interval
 			s2f := s1 + maxForwardDistance
 			s2b := s1 + maxBackwardDistance
@@ -74,7 +74,7 @@ func TestSerialNumberArithmetic(t *testing.T) {
 		const maxForwardDistance uint16 = 1<<(serialBits-1) - 1
 		const maxBackwardDistance uint16 = 1 << (serialBits - 1)
 
-		for i := uint16(0); i < uint16(div); i++ {
+		for i := range uint16(div) {
 			s1 := i * interval
 			s2f := s1 + maxForwardDistance
 			s2b := s1 + maxBackwardDistance
