@@ -126,11 +126,12 @@ type FRCC struct {
 	SSSentBytes    uint64
 	SSAckedBytes   uint64
 
-	SlotMaxQDel   time.Duration
-	SlotStartTime time.Time
-	SlotMaxRate   uint32        // for logging only
-	SlotMinRTT    time.Duration // for logging only
-	SlotMaxRTT    time.Duration // for logging only
+	SlotMaxQDel    time.Duration
+	SlotStartTime  time.Time
+	SlotAckedBytes uint64
+	SlotMaxRate    uint32        // for logging only
+	SlotMinRTT     time.Duration // for logging only
+	SlotMaxRTT     time.Duration // for logging only
 
 	PacingSlotStart time.Time
 	PacingSlotEnd   time.Time
@@ -205,6 +206,7 @@ func (frcc *FRCC) resetRProbeState(currentRProbeStartTime time.Time) {
 func (frcc *FRCC) startNewSlot(now time.Time) {
 	frcc.SlotMaxQDel = 0
 	frcc.SlotStartTime = now
+	frcc.SlotAckedBytes = 0
 	frcc.SlotMaxRate = 0
 	frcc.SlotMinRTT = math.MaxUint32 * time.Microsecond
 	frcc.SlotMaxRTT = 0
@@ -268,10 +270,10 @@ func (frcc *FRCC) updatePacingRate(rtt time.Duration, probeGain bool) {
 		log.Printf("%#v", frcc)
 	}
 }
-func (frcc *FRCC) updateEstimates(rttSample time.Duration) {
+func (frcc *FRCC) updateEstimates(rttSample time.Duration, now time.Time) {
 	initRTT := frcc.getInitialRTT()
-	// TODO: Should we use the delivered bytes instead of CWND?
-	thisRate := uint32(int64(frcc.CWND) * 1000 / rttSample.Microseconds())
+	sinceStart := max(uint64(now.Sub(frcc.SlotStartTime).Microseconds()), 1)
+	thisRate := uint32(frcc.SlotAckedBytes * 1000 / sinceStart)
 
 	frcc.MinRTProp = min(frcc.MinRTProp, initRTT)
 	frcc.MinRTProp = min(frcc.MinRTProp, rttSample)
@@ -609,6 +611,7 @@ func (frcc *FRCC) rProbe(rtt time.Duration, now time.Time) {
 
 // implement CongestionController
 func (frcc *FRCC) OnACK(ackedBytes uint32, rttSample time.Duration, smoothedRTT time.Duration) {
+	frcc.SlotAckedBytes += uint64(ackedBytes)
 	probe := &frcc.ProbeData
 	if rttSample.Microseconds() <= 0 {
 		//log.Printf("rttSample=%v <= 0us, ackedBytes %v, smoothedRTT %v", rttSample, ackedBytes, smoothedRTT)
@@ -618,7 +621,7 @@ func (frcc *FRCC) OnACK(ackedBytes uint32, rttSample time.Duration, smoothedRTT 
 	now := time.Now()
 	slotMinRTT := frcc.SlotMinRTT
 
-	frcc.updateEstimates(rttSample)
+	frcc.updateEstimates(rttSample, now)
 
 	if probe.Ongoing {
 		probe.BytesAcked += uint64(ackedBytes)
