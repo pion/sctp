@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: MIT
 
 //go:build !pong
-// +build !pong
 
 package main
 
