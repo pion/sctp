@@ -180,6 +180,7 @@ func getAssociationStateString(assoc uint32) string {
 type Association struct {
 	bytesReceived uint64
 	bytesSent     uint64
+	unackedBytes  uint32
 
 	lock sync.RWMutex
 
@@ -1934,6 +1935,11 @@ func (a *Association) handleData(chunkPayload *chunkPayloadData) []*packet {
 	gapDetected := sna32GT(chunkPayload.tsn, expectedTSN)
 
 	sackNow := chunkPayload.immediateSack || gapDetected
+	a.unackedBytes += uint32(len(chunkPayload.userData))
+	if a.unackedBytes >= 2*a.MTU() {
+		a.unackedBytes = 0
+		sackNow = true
+	}
 
 	return a.handlePeerLastTSNAndAcknowledgement(sackNow)
 }
