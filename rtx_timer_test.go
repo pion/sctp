@@ -32,7 +32,7 @@ func TestRTOManager(t *testing.T) {
 			1000, // capped at RTO.Min
 		}
 
-		for i := 0; i < 5; i++ {
+		for i := range 5 {
 			m.setNewRTT(600)
 			rto = m.getRTO()
 			assert.Equal(t, exp[i], int32(math.Floor(rto)), "should be equal")
@@ -50,7 +50,7 @@ func TestRTOManager(t *testing.T) {
 			48984,
 		}
 
-		for i := 0; i < 5; i++ {
+		for i := range 5 {
 			m.setNewRTT(30000)
 			rto = m.getRTO()
 			assert.Equal(t, exp[i], int32(math.Floor(rto)), "should be equal")
@@ -86,7 +86,7 @@ func TestRTOManager(t *testing.T) {
 
 	t.Run("reset", func(t *testing.T) {
 		m := newRTOManager(0)
-		for i := 0; i < 10; i++ {
+		for range 10 {
 			m.setNewRTT(200)
 		}
 
@@ -234,7 +234,7 @@ func TestRtxTimer(t *testing.T) { //nolint:maintidx
 			onRtxFailure: func(_ int) {},
 		}, pathMaxRetrans, 0)
 
-		for i := 0; i < 1000; i++ {
+		for range 1000 {
 			ok := rt.start(30)
 			assert.True(t, ok, "should be accepted")
 			assert.True(t, rt.isRunning(), "should be running")
@@ -345,7 +345,7 @@ func TestRtxTimer(t *testing.T) { //nolint:maintidx
 			onRtxFailure: func(_ int) {},
 		}, pathMaxRetrans, 0)
 
-		for i := 0; i < 10; i++ {
+		for range 10 {
 			rt.stop()
 		}
 

@@ -12,6 +12,7 @@ import (
 	"io"
 	"math"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -200,6 +201,8 @@ type Association struct {
 
 	willSendAbort      bool
 	willSendAbortCause errorCause
+	abortSentOnce      sync.Once
+	abortSentCh        chan struct{}
 
 	// Reconfig
 	myNextRSN        uint32
@@ -671,6 +674,7 @@ func createAssociationFromConfig(cfg *Config) *Association {
 		name:                    cfg.Name,
 		blockWrite:              cfg.BlockWrite,
 		writeNotify:             make(chan struct{}, 1),
+		abortSentCh:             make(chan struct{}),
 	}
 
 	// adaptive burst mitigation defaults
@@ -840,16 +844,31 @@ func (a *Association) Abort(reason string) {
 
 	a.lock.Unlock()
 
+	flushTimeout := 200 * time.Millisecond
+
 	// short bound for abort flush.
-	_ = a.netConn.SetWriteDeadline(time.Now().Add(200 * time.Millisecond))
+	_ = a.netConn.SetWriteDeadline(time.Now().Add(flushTimeout))
 	a.awakeWriteLoop()
 
-	// unblock readLoop even if the underlying TCP connection is half-open.
+	// Give writeLoop a chance to write the ABORT before we force readLoop to exit
+	// (readLoop exit closes closeWriteLoopCh and can race the ABORT send).
+	select {
+	case <-a.abortSentCh:
+	case <-time.After(flushTimeout):
+	}
+
+	// unblock readLoop even if the underlying connection is half-open.
 	// We want Abort to return promptly during shutdown.
 	_ = a.netConn.SetReadDeadline(time.Now())
 
 	// Wait for readLoop to end
 	<-a.readLoopCloseCh
+
+	// Ensure ABORT write was at least attempted before returning (bounded).
+	select {
+	case <-a.abortSentCh:
+	case <-time.After(flushTimeout):
+	}
 }
 
 func (a *Association) closeAllTimers() {
@@ -915,7 +934,7 @@ func (a *Association) readLoop() {
 	a.log.Debugf("[%s] readLoop exited %s", a.name, closeErr)
 }
 
-func (a *Association) writeLoop() {
+func (a *Association) writeLoop() { // nolint:cyclop
 	a.log.Debugf("[%s] writeLoop entered", a.name)
 	defer a.log.Debugf("[%s] writeLoop exited", a.name)
 
@@ -924,7 +943,11 @@ loop:
 		rawPackets, ok := a.gatherOutbound()
 
 		for _, raw := range rawPackets {
+			isAbortPacket := len(raw) > int(commonHeaderSize) && raw[commonHeaderSize] == byte(ctAbort)
 			_, err := a.netConn.Write(raw)
+			if isAbortPacket {
+				a.abortSentOnce.Do(func() { close(a.abortSentCh) })
+			}
 			if err != nil {
 				if !errors.Is(err, io.EOF) {
 					a.log.Warnf("[%s] failed to write packets on netConn: %v", a.name, err)
@@ -948,6 +971,15 @@ loop:
 		select {
 		case <-a.awakeWriteLoopCh:
 		case <-a.closeWriteLoopCh:
+			a.lock.Lock()
+			abortPending := a.willSendAbort
+			a.lock.Unlock()
+			if abortPending {
+				// If an ABORT is pending, prefer sending it even if readLoop has
+				// already ended and closed closeWriteLoopCh.
+				continue
+			}
+
 			break loop
 		}
 	}
@@ -1355,6 +1387,10 @@ func (a *Association) gatherOutbound() ([][]byte, bool) {
 		pkt, err := a.gatherAbortPacket()
 		if err != nil {
 			a.log.Warnf("[%s] failed to serialize an abort packet", a.name)
+			// If we can't marshal the ABORT, no write will occur, but Abort() may
+			// still be waiting on abortSentCh. Signal completion of the ABORT attempt
+			// (even though it failed) to avoid unnecessary delays.
+			a.abortSentOnce.Do(func() { close(a.abortSentCh) })
 
 			return nil, false
 		}
@@ -1542,10 +1578,7 @@ func (a *Association) SRTT() float64 {
 // buffer within a small multiple of the user provided max receive buffer size.
 func getMaxTSNOffset(maxReceiveBufferSize uint32) uint32 {
 	// 4 is a magic number here. There is no theory behind this.
-	offset := max((maxReceiveBufferSize*4)/avgChunkSize, minTSNOffset)
-	if offset > maxTSNOffset {
-		offset = maxTSNOffset
-	}
+	offset := min(max((maxReceiveBufferSize*4)/avgChunkSize, minTSNOffset), maxTSNOffset)
 
 	return offset
 }
@@ -2548,14 +2581,14 @@ func (a *Association) handleShutdownComplete(_ *chunkShutdownComplete) error {
 }
 
 func (a *Association) handleAbort(c *chunkAbort) error {
-	var errStr string
+	var errStr strings.Builder
 	for _, e := range c.errorCauses {
-		errStr += fmt.Sprintf("(%s)", e)
+		fmt.Fprintf(&errStr, "(%s)", e)
 	}
 
 	_ = a.close()
 
-	return fmt.Errorf("[%s] %w: %s", a.name, ErrChunk, errStr)
+	return fmt.Errorf("[%s] %w: %s", a.name, ErrChunk, errStr.String())
 }
 
 // createForwardTSN generates ForwardTSN chunk.
@@ -2584,9 +2617,9 @@ func (a *Association) createForwardTSN() *chunkForwardTSN {
 		streams:          []chunkForwardTSNStream{},
 	}
 
-	var streamStr string
+	var streamStr strings.Builder
 	for si, ssn := range streamMap {
-		streamStr += fmt.Sprintf("(si=%d ssn=%d)", si, ssn)
+		fmt.Fprintf(&streamStr, "(si=%d ssn=%d)", si, ssn)
 		fwdtsn.streams = append(fwdtsn.streams, chunkForwardTSNStream{
 			identifier: si,
 			sequence:   ssn,
@@ -2594,7 +2627,7 @@ func (a *Association) createForwardTSN() *chunkForwardTSN {
 	}
 	a.log.Tracef(
 		"[%s] building fwdtsn: newCumulativeTSN=%d cumTSN=%d - %s",
-		a.name, fwdtsn.newCumulativeTSN, a.cumulativeTSNAckPoint, streamStr,
+		a.name, fwdtsn.newCumulativeTSN, a.cumulativeTSNAckPoint, streamStr.String(),
 	)
 
 	return fwdtsn
@@ -3247,11 +3280,11 @@ func (a *Association) handleChunk(receivedPacket *packet, receivedChunk chunk) e
 		err = a.handleAbort(receivedChunk)
 
 	case *chunkError:
-		var errStr string
+		var errStr strings.Builder
 		for _, e := range receivedChunk.errorCauses {
-			errStr += fmt.Sprintf("(%s)", e)
+			fmt.Fprintf(&errStr, "(%s)", e)
 		}
-		a.log.Debugf("[%s] Error chunk, with following errors: %s", a.name, errStr)
+		a.log.Debugf("[%s] Error chunk, with following errors: %s", a.name, errStr.String())
 
 	case *chunkHeartbeat:
 		packets = a.handleHeartbeat(receivedChunk)

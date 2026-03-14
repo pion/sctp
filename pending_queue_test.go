@@ -44,13 +44,13 @@ func TestPendingBaseQueue(t *testing.T) {
 		pq.push(makeDataChunk(1, false, noFragment))
 		pq.push(makeDataChunk(2, false, noFragment))
 
-		for i := uint32(0); i < 3; i++ {
+		for i := range uint32(3) {
 			c := pq.get(int(i))
 			assert.NotNil(t, c, "should not be nil")
 			assert.Equal(t, i, c.tsn, "TSN should match")
 		}
 
-		for i := uint32(0); i < 3; i++ {
+		for i := range uint32(3) {
 			c := pq.pop()
 			assert.NotNil(t, c, "should not be nil")
 			assert.Equal(t, i, c.tsn, "TSN should match")
@@ -90,7 +90,7 @@ func TestPendingQueue(t *testing.T) {
 		pq.push(makeDataChunk(2, false, noFragment))
 		assert.Equal(t, 30, pq.getNumBytes(), "total bytes mismatch")
 
-		for i := uint32(0); i < 3; i++ {
+		for i := range uint32(3) {
 			c := pq.peek()
 			err := pq.pop(c)
 			assert.Nil(t, err, "should not error")

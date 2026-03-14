@@ -260,7 +260,7 @@ func testRwndFull(t *testing.T, unordered bool) { //nolint:cyclop
 		close(serverRecvBufFull)
 
 		<-serverStartRead
-		for i := 0; i < 2; i++ {
+		for i := range 2 {
 			n, err = stream.Read(buf)
 			if !assert.NoError(t, err, "should succeed") {
 				return
@@ -330,7 +330,7 @@ func testRwndFull(t *testing.T, unordered bool) { //nolint:cyclop
 
 		// Send two large messages so that the second one will
 		// cause receiver side buffer full
-		for i := 0; i < 2; i++ {
+		for range 2 {
 			_, err = stream.Write(msg)
 			if !assert.NoError(t, err, "should succeed") {
 				return
@@ -428,7 +428,7 @@ func TestStreamClose(t *testing.T) { //nolint:cyclop
 		var numServerReceived int
 		var numClientReceived int
 
-		for i := 0; i < numMessages; i++ {
+		for range numMessages {
 			bytes := make([]byte, messageSize)
 			messages = append(messages, bytes)
 		}
@@ -535,7 +535,7 @@ func TestStreamClose(t *testing.T) { //nolint:cyclop
 		}()
 
 		// Send messages to the server
-		for i := 0; i < numMessages; i++ {
+		for i := range numMessages {
 			_, err = stream.Write(messages[i])
 			assert.NoError(t, err, "should succeed")
 		}
@@ -738,7 +738,7 @@ func TestRACK_RTTSwitch_Reordering_NoDrop(t *testing.T) { //nolint:gocyclo,cyclo
 
 	makeMessages := func() [][]byte {
 		msgs := make([][]byte, numMessages)
-		for i := 0; i < numMessages; i++ {
+		for i := range numMessages {
 			b := bytes.Repeat([]byte{byte(i % 251)}, messageSize)
 			msgs[i] = b
 		}
@@ -876,7 +876,7 @@ func TestRACK_RTTSwitch_Reordering_NoDrop(t *testing.T) { //nolint:gocyclo,cyclo
 		// phase 1: high-RTT emulation we send 25 messages and drop a DATA chunk for one time.
 		delayOn.Store(true)
 		venv.dropNextDataChunk(1)
-		for i := 0; i < 25; i++ {
+		for i := range 25 {
 			if _, werr := stream.Write(msgs[i]); werr != nil {
 				fail(fmt.Errorf("client write phase1 i=%d: %w", i, werr))
 
