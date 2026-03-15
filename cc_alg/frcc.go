@@ -18,6 +18,7 @@ type FRCCParam struct {
 
 	// Design parameters
 	LBCwnd                 uint32
+	UBCwnd                 uint32
 	ContractMinQDel        time.Duration
 	ProbeDuration          time.Duration
 	ProbeMultiplier        float32
@@ -50,6 +51,7 @@ func FRCCDefaultParam() FRCCParam {
 		UBFlowCount: 3,
 
 		LBCwnd:              MinCWND,
+		UBCwnd:              32 * 1024 * 1024,
 		ContractMinQDel:     10 * time.Millisecond,
 		ProbeDuration:       10 * time.Millisecond,
 		ProbeMultiplier:     4.0, //gamma in the paper
@@ -119,6 +121,7 @@ type FRCC struct {
 	MinRTProp      time.Duration
 	CWND           uint32
 	PrevCwnd       uint32
+	UBCwnd         uint32 // if the probe size is too small, CWND may slowly but infinitely increase
 	InFastRecovery bool
 
 	SSDone         bool
@@ -226,6 +229,7 @@ func CreateFRCC(config FRCCParam) FRCC {
 		MinRTProp:      math.MaxUint32 * time.Microsecond,
 		CWND:           config.LBCwnd,
 		PrevCwnd:       config.LBCwnd,
+		UBCwnd:         config.UBCwnd,
 		InFastRecovery: false,
 
 		SSDone:         false,
@@ -497,6 +501,7 @@ func (frcc *FRCC) updateCwnd(rtt time.Duration) {
 
 	nextCwnd := param.InvCwndAveragingFactor*prevCwnd + param.CwndAveragingFactor*targetCwnd
 	frcc.CWND = max(uint32(math.Ceil(float64(nextCwnd))), param.LBCwnd)
+	frcc.CWND = min(frcc.CWND, frcc.UBCwnd)
 	frcc.updatePacingRate(rtt, false)
 }
 func (frcc *FRCC) slowStart(now time.Time, rtt time.Duration, ackedBytes uint32) {
