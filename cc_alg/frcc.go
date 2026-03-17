@@ -368,7 +368,7 @@ func (frcc *FRCC) startProbe(rtt time.Duration, now time.Time, slotMinRTT time.D
 	pr.MinRTTBefore = slotMinRTT
 	pr.MinRTT = math.MaxUint32 * time.Microsecond
 	pr.MinExcessDelay = math.MaxUint32 * time.Microsecond
-	pr.PrevCwnd = frcc.CWND
+	pr.PrevCwnd = max(frcc.CWND, frcc.PrevCwnd)
 	pr.Excess = frcc.getProbeExcess()
 	pr.EndInitiated = false
 	pr.Drain = 0
@@ -575,7 +575,7 @@ func (frcc *FRCC) rProbe(rtt time.Duration, now time.Time) {
 		rp.PrevStartTime = frcc.getRProbeTime(now)
 		rp.StartTime = now
 		rp.InitEndTime = time.Time{}
-		rp.PrevCwnd = frcc.CWND
+		rp.PrevCwnd = max(frcc.CWND, frcc.PrevCwnd)
 
 		probe := &frcc.ProbeData
 		if probe.Ongoing {
