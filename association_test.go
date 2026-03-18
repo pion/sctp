@@ -4842,7 +4842,8 @@ func TestAbortStillSendsWhenWriteLoopClosing(t *testing.T) {
 		EnableZeroChecksum: false,
 	}
 	cfg.applyDefaults()
-	assoc := createAssociationFromConfig(&cfg)
+	assoc, err := createAssociationFromConfig(&cfg)
+	assert.NoError(t, err)
 	assoc.initServer()
 
 	// Simulate the problematic timing: writeLoop is sitting in its select and
@@ -4921,7 +4922,8 @@ func TestAbort_WaitsForAbortWriteAttempt(t *testing.T) {
 		MaxMessageSize: 1200,
 	}
 	cfg.applyDefaults()
-	assoc := createAssociationFromConfig(&cfg)
+	assoc, err := createAssociationFromConfig(&cfg)
+	assert.NoError(t, err)
 	assoc.initServer()
 
 	assoc.Abort("test")
@@ -4944,7 +4946,8 @@ func TestAbortSentChClosedWhenAbortMarshalFails(t *testing.T) {
 		MaxMessageSize: 1200,
 	}
 	cfg.applyDefaults()
-	assoc := createAssociationFromConfig(&cfg)
+	assoc, err := createAssociationFromConfig(&cfg)
+	assert.NoError(t, err)
 	assoc.initServer()
 
 	assoc.lock.Lock()
