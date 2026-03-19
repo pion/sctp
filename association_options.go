@@ -167,8 +167,8 @@ func WithCwndCAStep(cwndCAStep uint32) AssociationOption {
 // WithSNAP enables SNAP, https://datatracker.ietf.org/doc/draft-hancke-tsvwg-snap/.
 func WithSNAP(localSctpInit []byte, remoteSctpInit []byte) AssociationOption {
 	return sharedOption(func(c *Config) error {
-		c.LocalSctpInit = string(localSctpInit)
-		c.RemoteSctpInit = string(remoteSctpInit)
+		c.localSctpInit = localSctpInit
+		c.remoteSctpInit = remoteSctpInit
 
 		return nil
 	})

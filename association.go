@@ -352,8 +352,8 @@ type Config struct {
 
 	// Local and remote SCTP init to use for SNAP
 	// string for struct compat, these are byte arrays.
-	LocalSctpInit  string
-	RemoteSctpInit string
+	localSctpInit  []byte
+	remoteSctpInit []byte
 }
 
 // Server accepts a SCTP stream over a conn.
@@ -402,12 +402,12 @@ func createClientWithContext(ctx context.Context, config Config) (*Association, 
 func createSNAPAssociation(config *Config) (*Association, error) {
 	// SNAP, aka sctp-init in the SDP.
 	remote := &chunkInit{}
-	err := remote.unmarshal([]byte(config.RemoteSctpInit))
+	err := remote.unmarshal(config.remoteSctpInit)
 	if err != nil {
 		return nil, err
 	}
 	local := &chunkInit{}
-	err = local.unmarshal([]byte(config.LocalSctpInit))
+	err = local.unmarshal(config.localSctpInit)
 	if err != nil {
 		return nil, err
 	}
@@ -422,7 +422,7 @@ func createClientWithOptionsWithContext(ctx context.Context, opts ...ClientOptio
 	if err != nil {
 		return nil, err
 	}
-	if len(config.RemoteSctpInit) != 0 && len(config.LocalSctpInit) != 0 {
+	if len(config.remoteSctpInit) != 0 && len(config.localSctpInit) != 0 {
 		return createSNAPAssociation(config)
 	}
 	assoc, err := createClientAssociation(opts...)
@@ -628,8 +628,8 @@ func (c Config) applyClient(cfg *Config) error { //nolint:dupl,cyclop
 
 	cfg.rack = c.rack
 
-	cfg.LocalSctpInit = c.LocalSctpInit
-	cfg.RemoteSctpInit = c.RemoteSctpInit
+	cfg.localSctpInit = c.localSctpInit
+	cfg.remoteSctpInit = c.remoteSctpInit
 
 	return nil
 }
@@ -774,7 +774,7 @@ func (a *Association) initWithOutOfBandTokens(localInit *chunkInit, remoteInit *
 	a.payloadQueue.init(remoteInit.initialTSN - 1)
 	a.myMaxNumInboundStreams = min16(localInit.numInboundStreams, remoteInit.numInboundStreams)
 	a.myMaxNumOutboundStreams = min16(localInit.numOutboundStreams, remoteInit.numOutboundStreams)
-	a.setRWND(min32(localInit.advertisedReceiverWindowCredit, remoteInit.advertisedReceiverWindowCredit))
+	a.setRWND(remoteInit.advertisedReceiverWindowCredit)
 	a.peerVerificationTag = remoteInit.initiateTag
 	a.sourcePort = defaultSCTPSrcDstPort
 	a.destinationPort = defaultSCTPSrcDstPort
@@ -4309,7 +4309,11 @@ func (a *Association) sendActiveHeartbeatLocked() {
 
 // GenerateOutOfBandToken generates an out-of-band connection token (i.e. a
 // serialized SCTP INIT chunk) for use with SNAP.
-func GenerateOutOfBandToken(config Config) ([]byte, error) {
+func GenerateOutOfBandToken(opts ...ClientOption) ([]byte, error) {
+	config, err := buildClientConfig(opts...)
+	if err != nil {
+		return nil, err
+	}
 	init := &chunkInit{}
 	init.initialTSN = globalMathRandomGenerator.Uint32()
 	init.numOutboundStreams = math.MaxUint16
