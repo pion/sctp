@@ -324,6 +324,12 @@ type Association struct {
 	tlrStartTime time.Time // time of first recovery RTT
 }
 
+type snapConfig struct {
+	// Local and remote SCTP init to use for SNAP
+	localInit  []byte
+	remoteInit []byte
+}
+
 // Config collects the arguments to createAssociation construction into
 // a single structure.
 type Config struct {
@@ -350,10 +356,8 @@ type Config struct {
 	// RACK config options
 	rack rackSettings
 
-	// Local and remote SCTP init to use for SNAP
-	// string for struct compat, these are byte arrays.
-	localSctpInit  []byte
-	remoteSctpInit []byte
+	// SNAP/sctp-init
+	snapConfig *snapConfig
 }
 
 // Server accepts a SCTP stream over a conn.
@@ -402,12 +406,12 @@ func createClientWithContext(ctx context.Context, config Config) (*Association, 
 func createSNAPAssociation(config *Config) (*Association, error) {
 	// SNAP, aka sctp-init in the SDP.
 	remote := &chunkInit{}
-	err := remote.unmarshal(config.remoteSctpInit)
+	err := remote.unmarshal(config.snapConfig.remoteInit)
 	if err != nil {
 		return nil, err
 	}
 	local := &chunkInit{}
-	err = local.unmarshal(config.localSctpInit)
+	err = local.unmarshal(config.snapConfig.localInit)
 	if err != nil {
 		return nil, err
 	}
@@ -422,13 +426,14 @@ func createClientWithOptionsWithContext(ctx context.Context, opts ...ClientOptio
 	if err != nil {
 		return nil, err
 	}
-	if len(config.remoteSctpInit) != 0 && len(config.localSctpInit) != 0 {
+	if config.snapConfig != nil && len(config.snapConfig.remoteInit) != 0 && len(config.snapConfig.localInit) != 0 {
 		return createSNAPAssociation(config)
 	}
 	assoc, err := createClientAssociation(opts...)
 	if err != nil {
 		return nil, err
 	}
+
 	assoc.initClient()
 
 	select {
@@ -628,8 +633,7 @@ func (c Config) applyClient(cfg *Config) error { //nolint:dupl,cyclop
 
 	cfg.rack = c.rack
 
-	cfg.localSctpInit = c.localSctpInit
-	cfg.remoteSctpInit = c.remoteSctpInit
+	cfg.snapConfig = c.snapConfig
 
 	return nil
 }
@@ -4310,10 +4314,20 @@ func (a *Association) sendActiveHeartbeatLocked() {
 // GenerateOutOfBandToken generates an out-of-band connection token (i.e. a
 // serialized SCTP INIT chunk) for use with SNAP.
 func GenerateOutOfBandToken(opts ...ClientOption) ([]byte, error) {
-	config, err := buildClientConfig(opts...)
-	if err != nil {
-		return nil, err
+	config := &Config{}
+	config.applyDefaults()
+
+	for _, opt := range opts {
+		if opt == nil {
+			continue
+		}
+		if err := opt.applyClient(config); err != nil {
+			return nil, err
+		}
 	}
+
+	config.applyDefaults()
+
 	init := &chunkInit{}
 	init.initialTSN = globalMathRandomGenerator.Uint32()
 	init.numOutboundStreams = math.MaxUint16
