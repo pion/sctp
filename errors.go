@@ -33,4 +33,7 @@ var (
 	// errInvalidRackWcDelAck indicates the receiver worst-case delayed-ACK for PTO when only 1 packet in flight
 	// was set to < 0.
 	errInvalidRackWcDelAck = errors.New("RackWcDelAck was set to <= 0")
+
+	// errInvalidSnapToken indicates a SNAP token that is not parseable.
+	errInvalidSnapToken = errors.New("SNAP token is invalid")
 )

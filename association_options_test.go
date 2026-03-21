@@ -72,7 +72,9 @@ func TestAssociationOptions_Validation(t *testing.T) {
 	t.Run("snap nil arguments", func(t *testing.T) {
 		var cfg Config
 		err := WithSNAP(nil, nil).applyServer(&cfg)
-		assert.NoError(t, err)
+		assert.ErrorIs(t, err, errInvalidSnapToken)
+		err = WithSNAP([]byte{}, []byte{}).applyServer(&cfg)
+		assert.ErrorIs(t, err, errInvalidSnapToken)
 	})
 }
 

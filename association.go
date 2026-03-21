@@ -4339,6 +4339,10 @@ func GenerateOutOfBandToken(opts ...ClientOption) ([]byte, error) {
 	if config.EnableZeroChecksum {
 		init.params = append(init.params, &paramZeroChecksumAcceptable{edmid: dtlsErrorDetectionMethod})
 	}
+	_, err := init.check()
+	if err != nil {
+		return nil, err
+	}
 
 	return init.marshal()
 }
