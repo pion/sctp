@@ -1254,6 +1254,7 @@ func (a *Association) gatherOutboundFastRetransmissionPackets( //nolint:gocognit
 		}
 		rawPackets = append(rawPackets, raw)
 	}
+	a.CC1.OnSend(uint32(totalBytes), true)
 
 	return rawPackets
 }
@@ -2976,7 +2977,7 @@ func (a *Association) popPendingDataChunksToSend( //nolint:cyclop,gocognit
 		}
 	}
 
-	a.CC1.OnSend(uint32(totalBytes))
+	a.CC1.OnSend(uint32(totalBytes), false)
 
 	if a.blockWrite && len(chunks) > 0 && a.pendingQueue.size() == 0 {
 		a.log.Tracef("[%s] all pending data have been sent, notify writable", a.name)
@@ -3182,6 +3183,7 @@ func (a *Association) getDataPacketsToRetransmit(budgetScaled *int64, consumed *
 
 		chunks = append(chunks, chunkPayload)
 	}
+	a.CC1.OnSend(uint32(totalBytes), true)
 
 	return a.bundleDataChunksIntoPackets(chunks)
 }

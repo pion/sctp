@@ -48,7 +48,7 @@ func (reno *Reno) OnACK(ackedBytes uint32, rttSample time.Duration, smoothedRTT 
 		}
 	}
 }
-func (reno *Reno) OnSend(bytes uint32) {
+func (reno *Reno) OnSend(bytes uint32, isRetransmission bool) {
 	reno.SentInSlot += bytes
 }
 func (reno *Reno) OnLoss() {

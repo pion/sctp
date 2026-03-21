@@ -6,7 +6,7 @@ import (
 
 type CongestionController interface {
 	OnACK(ackedBytes uint32, rttSample time.Duration, smoothedRTT time.Duration)
-	OnSend(bytes uint32)
+	OnSend(bytes uint32, isRetransmission bool)
 	OnLoss()
 	OnTimeout()
 	GetWindow() uint32

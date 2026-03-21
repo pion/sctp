@@ -54,7 +54,7 @@ func FRCCDefaultParam() FRCCParam {
 		UBCwnd:              32 * 1024 * 1024,
 		ContractMinQDel:     10 * time.Millisecond,
 		ProbeDuration:       10 * time.Millisecond,
-		ProbeMultiplier:     4.0, //gamma in the paper
+		ProbeMultiplier:     2.0, //gamma in the paper
 		CwndAveragingFactor: 1.0, // alpha = 1/2 for non-stable design, otherwise 1.
 		CwndClampHi:         1.3,
 		CwndClampLo:         10.0 / 13.0,
@@ -93,6 +93,7 @@ type FRCCProbeData struct {
 	BytesAcked         uint64
 	InflightMatchBytes uint64
 	BytesSent          uint64
+	SentBeforeMeasure  uint64
 	FirstTime          time.Time
 	AllSent            bool
 }
@@ -129,12 +130,11 @@ type FRCC struct {
 	SSSentBytes    uint64
 	SSAckedBytes   uint64
 
-	SlotMaxQDel    time.Duration
-	SlotStartTime  time.Time
-	SlotAckedBytes uint64
-	SlotMaxRate    uint32        // for logging only
-	SlotMinRTT     time.Duration // for logging only
-	SlotMaxRTT     time.Duration // for logging only
+	SlotMaxQDel   time.Duration
+	SlotStartTime time.Time
+	SlotMaxRate   uint32        // for logging only
+	SlotMinRTT    time.Duration // for logging only
+	SlotMaxRTT    time.Duration // for logging only
 
 	PacingSlotStart time.Time
 	PacingSlotEnd   time.Time
@@ -194,6 +194,7 @@ func (frcc *FRCC) resetProbeState() {
 	pr.BytesAcked = 0
 	pr.InflightMatchBytes = 0
 	pr.BytesSent = 0
+	pr.SentBeforeMeasure = 0
 	pr.FirstTime = time.Time{}
 	pr.AllSent = false
 }
@@ -209,7 +210,6 @@ func (frcc *FRCC) resetRProbeState(currentRProbeStartTime time.Time) {
 func (frcc *FRCC) startNewSlot(now time.Time) {
 	frcc.SlotMaxQDel = 0
 	frcc.SlotStartTime = now
-	frcc.SlotAckedBytes = 0
 	frcc.SlotMaxRate = 0
 	frcc.SlotMinRTT = math.MaxUint32 * time.Microsecond
 	frcc.SlotMaxRTT = 0
@@ -251,7 +251,14 @@ func CreateFRCC(config FRCCParam) FRCC {
 }
 func (frcc *FRCC) partOfProbe() bool {
 	p := &frcc.ProbeData
-	return p.BytesAcked <= p.BytesSent
+	if p.SentBeforeMeasure > 0 {
+		if p.AllSent {
+			return p.BytesAcked <= p.BytesSent
+		} else {
+			return p.BytesAcked >= p.SentBeforeMeasure
+		}
+	}
+	return false
 }
 func (frcc *FRCC) getInitialRTT() time.Duration {
 	// Get initial RTT - as measured by INIT -> INIT ACK.  If information
@@ -274,10 +281,10 @@ func (frcc *FRCC) updatePacingRate(rtt time.Duration, probeGain bool) {
 		log.Printf("%#v", frcc)
 	}
 }
-func (frcc *FRCC) updateEstimates(rttSample time.Duration, now time.Time) {
+func (frcc *FRCC) updateEstimates(rttSample time.Duration) {
 	initRTT := frcc.getInitialRTT()
-	sinceStart := max(uint64(now.Sub(frcc.SlotStartTime).Microseconds()), 1)
-	thisRate := uint32(frcc.SlotAckedBytes * 1000 / sinceStart)
+	// TODO: Should we use the delivered bytes instead of CWND?
+	thisRate := uint32(int64(frcc.CWND) * 1000 / rttSample.Microseconds())
 
 	frcc.MinRTProp = min(frcc.MinRTProp, initRTT)
 	frcc.MinRTProp = min(frcc.MinRTProp, rttSample)
@@ -301,7 +308,7 @@ func (frcc *FRCC) updateEstimates(rttSample time.Duration, now time.Time) {
 }
 func (frcc *FRCC) probeEnded() bool {
 	p := &frcc.ProbeData
-	return p.BytesAcked >= p.BytesSent
+	return p.AllSent && p.BytesAcked >= p.BytesSent
 }
 func (frcc *FRCC) cruiseEnded(now time.Time) bool {
 	param := &frcc.Param
@@ -377,12 +384,14 @@ func (frcc *FRCC) startProbe(rtt time.Duration, now time.Time, slotMinRTT time.D
 	pr.StartTime = now
 	pr.BytesAcked = 0
 	pr.InflightMatchBytes = 0
-	pr.BytesSent = 0
+	pr.BytesSent = uint64(pr.PrevCwnd)
+	pr.SentBeforeMeasure = 0
 	pr.FirstTime = time.Time{}
 	pr.AllSent = false
 
 	frcc.CWND += pr.Excess
 	frcc.updatePacingRate(rtt, true)
+	//log.Printf("start probe, cwnd %d, now %v", frcc.CWND, now)
 }
 func (frcc *FRCC) updateCwndDrain(rtt time.Duration, ackedBytes uint32) {
 	param := frcc.Param
@@ -439,24 +448,28 @@ func (frcc *FRCC) updateProbeState(rtt time.Duration, now time.Time) {
 		// last packet of new cwnd sent at time old_rtt/2.
 		// Conservatively, we wait a full (packet timed) new RTT.
 		// Alternatively, we can just check inflight = cwnd.
-		if probe.BytesSent > 0 {
+		if probe.BytesAcked >= uint64(probe.PrevCwnd) {
 			frcc.updatePacingRate(rtt, false)
 			probe.InflightMatchBytes = probe.BytesSent
 			if !param.WaitRTTAfterProbe {
+				probe.SentBeforeMeasure = probe.BytesSent
 				probe.FirstTime = now
 			}
+			//log.Printf("set InflightMatchBytes, now %v", now)
 		}
-	} else if probe.BytesSent == 0 {
-		if probe.BytesAcked > probe.InflightMatchBytes {
+	} else if probe.SentBeforeMeasure == 0 {
+		if probe.BytesAcked >= probe.InflightMatchBytes {
 			if !param.ProbeWaitInMaxRTTs || now.Sub(waitUntil) >= 0 {
-				probe.BytesSent = probe.BytesAcked
+				probe.SentBeforeMeasure = probe.BytesSent
 				probe.FirstTime = now
+				//log.Printf("set SentBeforeMeasure, now %v", now)
 			}
 		}
 	} else if !probe.AllSent {
 		sendEndTime := probe.FirstTime.Add(probeDuration)
 		if sendEndTime.Sub(now) <= 0 {
 			probe.AllSent = true
+			//log.Printf("set AllSent, now %v", now)
 		}
 	}
 }
@@ -467,11 +480,8 @@ func (frcc *FRCC) updateCwnd(rtt time.Duration) {
 	tcwndHiClamp := prevCwnd * param.CwndClampHi
 	tcwndLoClamp := prevCwnd * param.CwndClampLo
 
-	bwEstimate := int64(math.MaxInt64)
-	minExcessDelayUs := probe.MinExcessDelay.Microseconds()
-	if minExcessDelayUs > 0 {
-		bwEstimate = int64(probe.Excess) * 1000 / minExcessDelayUs
-	}
+	minExcessDelayUs := max(probe.MinExcessDelay.Microseconds(), 1)
+	bwEstimate := int64(probe.Excess) * 1000 / minExcessDelayUs
 
 	round := &frcc.RoundData
 	flowCountBelief := float32(param.UBFlowCount)
@@ -483,6 +493,7 @@ func (frcc *FRCC) updateCwnd(rtt time.Duration) {
 
 	targetCwnd := float32(0.0)
 	targetFlowCount := frcc.getTargetFlowCount()
+	//log.Printf("minExcessDelayUs %v, bwEstimate %v, round.MaxRate %v, flowCountBelief %v, targetFlowCount %v", minExcessDelayUs, bwEstimate, round.MaxRate, flowCountBelief, targetFlowCount)
 	if targetFlowCount < 1 || round.MaxRate == 0 {
 		targetCwnd = prevCwnd * param.CwndClampHi
 	} else {
@@ -546,6 +557,7 @@ func (frcc *FRCC) slowStart(now time.Time, rtt time.Duration, ackedBytes uint32)
 			frcc.SSDone = true
 			frcc.resetRoundState()
 			frcc.startNewSlot(now)
+			//log.Printf("slow start done, now %v", now)
 		} // ss end initiated but not yet ended. do nothing.
 	}
 }
@@ -616,7 +628,6 @@ func (frcc *FRCC) rProbe(rtt time.Duration, now time.Time) {
 
 // implement CongestionController
 func (frcc *FRCC) OnACK(ackedBytes uint32, rttSample time.Duration, smoothedRTT time.Duration) {
-	frcc.SlotAckedBytes += uint64(ackedBytes)
 	probe := &frcc.ProbeData
 	if rttSample.Microseconds() <= 0 {
 		//log.Printf("rttSample=%v <= 0us, ackedBytes %v, smoothedRTT %v", rttSample, ackedBytes, smoothedRTT)
@@ -626,7 +637,7 @@ func (frcc *FRCC) OnACK(ackedBytes uint32, rttSample time.Duration, smoothedRTT 
 	now := time.Now()
 	slotMinRTT := frcc.SlotMinRTT
 
-	frcc.updateEstimates(rttSample, now)
+	frcc.updateEstimates(rttSample)
 
 	if probe.Ongoing {
 		probe.BytesAcked += uint64(ackedBytes)
@@ -672,22 +683,24 @@ func (frcc *FRCC) OnACK(ackedBytes uint32, rttSample time.Duration, smoothedRTT 
 		round.SlotsTillNow += 1
 	}
 }
-func (frcc *FRCC) OnSend(bytes uint32) {
+func (frcc *FRCC) OnSend(bytes uint32, isRetransmission bool) {
 	frcc.SentInSlot += bytes
 	pr := &frcc.ProbeData
-	if pr.Ongoing {
-		pr.BytesSent += uint64(bytes)
-	}
-	if !frcc.SSEndInitiated {
-		frcc.SSSentBytes += uint64(bytes)
+	if !isRetransmission {
+		if pr.Ongoing && !pr.AllSent {
+			pr.BytesSent += uint64(bytes)
+		}
+		if !frcc.SSEndInitiated {
+			frcc.SSSentBytes += uint64(bytes)
+		}
 	}
 }
 func (frcc *FRCC) OnLoss() {
-	if !frcc.InFastRecovery {
+	/*if !frcc.InFastRecovery {
 		frcc.InFastRecovery = true
 		frcc.PrevCwnd = frcc.CWND
 		frcc.CWND = max(frcc.CWND/2, frcc.Param.LBCwnd)
-	}
+	}*/
 }
 func (frcc *FRCC) OnTimeout() {
 	frcc.OnLoss()
@@ -736,8 +749,8 @@ func (frcc *FRCC) CanSend(bytes uint32, smoothedRTT time.Duration) (canSend bool
 	}
 }
 func (frcc *FRCC) SetFastRecovery(v bool) {
-	if !v {
+	/*if !v {
 		frcc.InFastRecovery = false
 		frcc.CWND = max(frcc.CWND, frcc.PrevCwnd)
-	}
+	}*/
 }
