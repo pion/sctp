@@ -4842,7 +4842,8 @@ func TestAbortStillSendsWhenWriteLoopClosing(t *testing.T) {
 		EnableZeroChecksum: false,
 	}
 	cfg.applyDefaults()
-	assoc := createAssociationFromConfig(&cfg)
+	assoc, err := createAssociationFromConfig(&cfg)
+	assert.NoError(t, err)
 	assoc.initServer()
 
 	// Simulate the problematic timing: writeLoop is sitting in its select and
@@ -4921,7 +4922,8 @@ func TestAbort_WaitsForAbortWriteAttempt(t *testing.T) {
 		MaxMessageSize: 1200,
 	}
 	cfg.applyDefaults()
-	assoc := createAssociationFromConfig(&cfg)
+	assoc, err := createAssociationFromConfig(&cfg)
+	assert.NoError(t, err)
 	assoc.initServer()
 
 	assoc.Abort("test")
@@ -4944,7 +4946,8 @@ func TestAbortSentChClosedWhenAbortMarshalFails(t *testing.T) {
 		MaxMessageSize: 1200,
 	}
 	cfg.applyDefaults()
-	assoc := createAssociationFromConfig(&cfg)
+	assoc, err := createAssociationFromConfig(&cfg)
+	assert.NoError(t, err)
 	assoc.initServer()
 
 	assoc.lock.Lock()
@@ -4960,4 +4963,95 @@ func TestAbortSentChClosedWhenAbortMarshalFails(t *testing.T) {
 	case <-time.After(200 * time.Millisecond):
 		require.Fail(t, "abortSentCh was not closed when ABORT marshaling failed")
 	}
+}
+
+func TestAssociationSNAPInvalidInit(t *testing.T) {
+	br := test.NewBridge()
+	tokenConfig := Config{
+		MaxReceiveBufferSize: 65535,
+		EnableZeroChecksum:   false,
+	}
+	init, err := GenerateOutOfBandToken(tokenConfig)
+	assert.NoError(t, err)
+
+	_, err = ClientWithOptions(
+		WithNetConn(br.GetConn0()),
+		WithSNAP([]byte{1, 2}, init))
+	assert.ErrorIs(t, err, ErrChunkHeaderTooSmall)
+
+	_, err = ClientWithOptions(
+		WithNetConn(br.GetConn1()),
+		WithSNAP(init, []byte{1, 2}))
+	assert.ErrorIs(t, err, ErrChunkHeaderTooSmall)
+}
+
+func TestAssociationSNAP(t *testing.T) {
+	lim := test.TimeOut(time.Second * 10)
+	defer lim.Stop()
+
+	loggerFactory := logging.NewDefaultLoggerFactory()
+	br := test.NewBridge()
+
+	// Use GenerateOutOfBandToken to create the init chunks
+	tokenConfig := Config{
+		MaxReceiveBufferSize: 65535,
+		EnableZeroChecksum:   false,
+	}
+	initA, err := GenerateOutOfBandToken(tokenConfig)
+	assert.NoError(t, err)
+
+	initB, err := GenerateOutOfBandToken(tokenConfig)
+	assert.NoError(t, err)
+
+	assocA, err := ClientWithOptions(
+		WithName("a"),
+		WithNetConn(br.GetConn0()),
+		WithLoggerFactory(loggerFactory),
+		WithSNAP(initA, initB))
+	assert.NoError(t, err)
+	assert.NotNil(t, assocA)
+
+	assocB, err := ClientWithOptions(
+		WithName("b"),
+		WithNetConn(br.GetConn1()),
+		WithLoggerFactory(loggerFactory),
+		WithSNAP(initB, initA))
+	assert.NoError(t, err)
+	assert.NotNil(t, assocB)
+
+	const si uint16 = 1
+	const msg = "SNAP is snappy"
+
+	streamA, err := assocA.OpenStream(si, PayloadTypeWebRTCBinary)
+	assert.NoError(t, err)
+
+	_, err = streamA.WriteSCTP([]byte(msg), PayloadTypeWebRTCBinary)
+	assert.NoError(t, err)
+
+	br.Process()
+
+	accepted := make(chan *Stream)
+	go func() {
+		s, errAccept := assocB.AcceptStream()
+		assert.NoError(t, errAccept)
+		accepted <- s
+	}()
+
+	flushBuffers(br, assocA, assocB)
+
+	var streamB *Stream
+	select {
+	case streamB = <-accepted:
+	case <-time.After(5 * time.Second):
+		assert.Fail(t, "timed out waiting for accept stream")
+	}
+
+	buf := make([]byte, 64)
+	n, ppi, err := streamB.ReadSCTP(buf)
+	assert.NoError(t, err, "ReadSCTP failed")
+	assert.Equal(t, len(msg), n, "unexpected length of received data")
+	assert.Equal(t, PayloadTypeWebRTCBinary, ppi, "unexpected ppi")
+	assert.Equal(t, msg, string(buf[:n]))
+
+	closeAssociationPair(br, assocA, assocB)
 }

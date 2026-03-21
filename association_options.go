@@ -163,3 +163,18 @@ func WithCwndCAStep(cwndCAStep uint32) AssociationOption {
 		return nil
 	})
 }
+
+// WithSNAP enables SNAP, https://datatracker.ietf.org/doc/draft-hancke-tsvwg-snap/.
+func WithSNAP(localSctpInit []byte, remoteSctpInit []byte) AssociationOption {
+	return sharedOption(func(c *Config) error {
+		if len(localSctpInit) == 0 || len(remoteSctpInit) == 0 {
+			return errInvalidSnapToken
+		}
+		c.snapConfig = &snapConfig{
+			localInit:  localSctpInit,
+			remoteInit: remoteSctpInit,
+		}
+
+		return nil
+	})
+}
