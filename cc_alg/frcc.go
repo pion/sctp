@@ -125,6 +125,8 @@ type FRCC struct {
 	UBCwnd         uint32 // if the probe size is too small, CWND may slowly but infinitely increase
 	InFastRecovery bool
 
+	LastRTTSample time.Duration // sometimes we don't get a valid RTT sample
+
 	SSDone         bool
 	SSEndInitiated bool
 	SSSentBytes    uint64
@@ -231,6 +233,8 @@ func CreateFRCC(config FRCCParam) FRCC {
 		PrevCwnd:       config.LBCwnd,
 		UBCwnd:         config.UBCwnd,
 		InFastRecovery: false,
+
+		LastRTTSample: math.MaxUint32 * time.Microsecond,
 
 		SSDone:         false,
 		SSEndInitiated: false,
@@ -631,7 +635,9 @@ func (frcc *FRCC) OnACK(ackedBytes uint32, rttSample time.Duration, smoothedRTT 
 	probe := &frcc.ProbeData
 	if rttSample.Microseconds() <= 0 {
 		//log.Printf("rttSample=%v <= 0us, ackedBytes %v, smoothedRTT %v", rttSample, ackedBytes, smoothedRTT)
-		return
+		rttSample = frcc.LastRTTSample
+	} else {
+		frcc.LastRTTSample = rttSample
 	}
 
 	now := time.Now()
