@@ -218,6 +218,8 @@ type Association struct {
 	reconfigs        map[uint32]*chunkReconfig
 	reconfigRequests map[uint32]*paramOutgoingResetRequest
 
+	onStreamResetCompleteHandler func(streamID uint16)
+
 	// Non-RFC internal data
 	sourcePort              uint16
 	destinationPort         uint16
@@ -2914,6 +2916,7 @@ func (a *Association) resetStreamsIfAny(resetRequest *paramOutgoingResetRequest)
 	if sna32LTE(resetRequest.senderLastTSN, a.peerLastTSN()) {
 		a.log.Debugf("[%s] resetStream(): senderLastTSN=%d <= peerLastTSN=%d",
 			a.name, resetRequest.senderLastTSN, a.peerLastTSN())
+		streamResetCompleteHandler := a.onStreamResetCompleteHandler
 		for _, id := range resetRequest.streamIdentifiers {
 			s, ok := a.streams[id]
 			if !ok {
@@ -2924,6 +2927,12 @@ func (a *Association) resetStreamsIfAny(resetRequest *paramOutgoingResetRequest)
 			a.lock.Lock()
 			a.log.Debugf("[%s] deleting stream %d", a.name, id)
 			delete(a.streams, s.streamIdentifier)
+			if streamResetCompleteHandler != nil {
+				streamID := s.streamIdentifier
+				a.lock.Unlock()
+				streamResetCompleteHandler(streamID)
+				a.lock.Lock()
+			}
 		}
 		delete(a.reconfigRequests, resetRequest.reconfigRequestSequenceNumber)
 	} else {
@@ -3608,6 +3617,34 @@ func (a *Association) MaxMessageSize() uint32 {
 // SetMaxMessageSize sets the maximum message size you can send.
 func (a *Association) SetMaxMessageSize(maxMsgSize uint32) {
 	atomic.StoreUint32(&a.maxMessageSize, maxMsgSize)
+}
+
+// NumInboundStreams returns the maximum number of inbound streams for this association.
+// The number of inbound streams is determined by looking at the peer's INIT or INIT ACK chunk,
+// so it is not available until the handshake completes.
+func (a *Association) NumInboundStreams() uint16 {
+	a.lock.RLock()
+	defer a.lock.RUnlock()
+
+	return a.myMaxNumInboundStreams
+}
+
+// NumOutboundStreams returns the maximum number of outbound streams for this association.
+// The number of outbound streams is determined by looking at the peer's INIT or INIT ACK chunk,
+// so it is not available until the handshake completes.
+func (a *Association) NumOutboundStreams() uint16 {
+	a.lock.RLock()
+	defer a.lock.RUnlock()
+
+	return a.myMaxNumOutboundStreams
+}
+
+// OnStreamResetComplete sets a handler invoked when a stream reset lifecycle
+// has completed and the stream has been removed from the association.
+func (a *Association) OnStreamResetComplete(f func(streamID uint16)) {
+	a.lock.Lock()
+	defer a.lock.Unlock()
+	a.onStreamResetCompleteHandler = f
 }
 
 // completeHandshake sends the given error to  handshakeCompletedCh unless the read/write

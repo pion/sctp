@@ -2804,6 +2804,219 @@ func TestAssocMaxMessageSize(t *testing.T) {
 	})
 }
 
+func TestAssocNumStreams(t *testing.T) {
+	loggerFactory := logging.NewDefaultLoggerFactory()
+
+	t.Run("before handshake", func(t *testing.T) {
+		assoc := createTestAssociation(t, Config{
+			LoggerFactory: loggerFactory,
+		})
+		assert.NotNil(t, assoc, "should succeed")
+		// Before handshake, should return the initial max values
+		assert.Equal(t, uint16(65535), assoc.NumInboundStreams(), "should be max uint16 before handshake")
+		assert.Equal(t, uint16(65535), assoc.NumOutboundStreams(), "should be max uint16 before handshake")
+	})
+
+	t.Run("after handshake with negotiated values", func(t *testing.T) {
+		checkGoroutineLeaks(t)
+
+		lim := test.TimeOut(time.Second * 10)
+		defer lim.Stop()
+
+		br := test.NewBridge()
+
+		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, 0)
+		assert.NoError(t, err, "failed to create associations")
+
+		// After establishing, the stream numbers should be negotiated
+		assert.Greater(t, a0.NumInboundStreams(), uint16(0), "should have inbound streams after handshake")
+		assert.Greater(t, a0.NumOutboundStreams(), uint16(0), "should have outbound streams after handshake")
+		assert.Greater(t, a1.NumInboundStreams(), uint16(0), "should have inbound streams after handshake")
+		assert.Greater(t, a1.NumOutboundStreams(), uint16(0), "should have outbound streams after handshake")
+
+		closeAssociationPair(br, a0, a1)
+	})
+
+	t.Run("thread-safe concurrent access", func(t *testing.T) {
+		assoc := createTestAssociation(t, Config{
+			LoggerFactory: loggerFactory,
+		})
+		assert.NotNil(t, assoc, "should succeed")
+
+		// Run concurrent reads to verify thread-safety
+		numGoroutines := 10
+		done := make(chan bool, numGoroutines)
+
+		for range numGoroutines {
+			go func() {
+				_ = assoc.NumInboundStreams()
+				_ = assoc.NumOutboundStreams()
+				done <- true
+			}()
+		}
+
+		for range numGoroutines {
+			<-done
+		}
+	})
+}
+
+func TestAssocOnStreamResetComplete(t *testing.T) {
+	loggerFactory := logging.NewDefaultLoggerFactory()
+
+	t.Run("handler can be set and is thread-safe", func(t *testing.T) {
+		assoc := createTestAssociation(t, Config{
+			LoggerFactory: loggerFactory,
+		})
+		assert.NotNil(t, assoc, "should succeed")
+
+		// Test that handler can be set without panic
+		handlerCalled := make(chan uint16, 1)
+		assoc.OnStreamResetComplete(func(streamID uint16) {
+			handlerCalled <- streamID
+		})
+
+		// Test concurrent calls to OnStreamResetComplete are safe
+		done := make(chan bool, 5)
+		for range 5 {
+			go func() {
+				assoc.OnStreamResetComplete(func(streamID uint16) {
+					// handler
+				})
+				done <- true
+			}()
+		}
+
+		for range 5 {
+			<-done
+		}
+	})
+
+	t.Run("handler can be updated", func(t *testing.T) {
+		assoc := createTestAssociation(t, Config{
+			LoggerFactory: loggerFactory,
+		})
+		assert.NotNil(t, assoc, "should succeed")
+
+		// Set initial handler
+		assoc.OnStreamResetComplete(func(streamID uint16) {
+			// first handler
+		})
+
+		// Update to second handler - should not panic
+		assoc.OnStreamResetComplete(func(streamID uint16) {
+			// second handler
+		})
+
+		// Update to nil handler
+		assoc.OnStreamResetComplete(nil)
+
+		// No panic means success
+	})
+
+	t.Run("handler is triggered on stream reset", func(t *testing.T) {
+		checkGoroutineLeaks(t)
+
+		lim := test.TimeOut(time.Second * 10)
+		defer lim.Stop()
+
+		const si uint16 = 5
+		br := test.NewBridge()
+
+		// Create two associations
+		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, 0)
+		assert.NoError(t, err, "failed to create associations")
+
+		// Establish a stream
+		s0, _, err := establishSessionPair(br, a0, a1, si)
+		assert.NoError(t, err, "failed to establish session pair")
+
+		// Set handler on a1 (the receiving side that will process the reset)
+		resetNotification := make(chan uint16, 1)
+		a1.OnStreamResetComplete(func(streamID uint16) {
+			resetNotification <- streamID
+		})
+
+		// Close stream on a0 (this sends a RECONFIG to a1)
+		err = s0.Close()
+		assert.NoError(t, err, "failed to close stream s0")
+
+		// Process bridge messages until handler is called
+		timeout := time.Now().Add(5 * time.Second)
+		for time.Now().Before(timeout) {
+			br.Process()
+
+			// Check if handler was called
+			select {
+			case streamID := <-resetNotification:
+				assert.Equal(t, si, streamID, "handler should be called with correct stream ID")
+				closeAssociationPair(br, a0, a1)
+
+				return
+			default:
+				time.Sleep(5 * time.Millisecond)
+			}
+		}
+
+		require.Fail(t, "timeout waiting for OnStreamResetComplete handler to be triggered")
+	})
+
+	t.Run("handler is triggered for each reset stream", func(t *testing.T) {
+		checkGoroutineLeaks(t)
+
+		lim := test.TimeOut(time.Second * 10)
+		defer lim.Stop()
+
+		br := test.NewBridge()
+
+		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, 0)
+		assert.NoError(t, err, "failed to create associations")
+
+		// Establish multiple streams
+		const numStreams = 3
+		streams := make([][2]*Stream, numStreams)
+		for i := range numStreams {
+			si := uint16(i)
+			s0, s1, err := establishSessionPair(br, a0, a1, si)
+			assert.NoError(t, err, "failed to establish session pair")
+			streams[i] = [2]*Stream{s0, s1}
+		}
+
+		// Set handler on a1 to track all resets
+		resetNotifications := make(chan uint16, numStreams)
+		a1.OnStreamResetComplete(func(streamID uint16) {
+			resetNotifications <- streamID
+		})
+
+		// Close multiple streams on a0
+		for i := range numStreams {
+			err = streams[i][0].Close()
+			assert.NoError(t, err, "failed to close stream")
+		}
+
+		// Collect all reset notifications
+		seenStreamIDs := make(map[uint16]bool)
+		timeout := time.Now().Add(5 * time.Second)
+		for time.Now().Before(timeout) && len(seenStreamIDs) < numStreams {
+			br.Process()
+
+			select {
+			case streamID := <-resetNotifications:
+				seenStreamIDs[streamID] = true
+			default:
+				time.Sleep(5 * time.Millisecond)
+			}
+		}
+
+		// Verify all streams were reset
+		for i := range numStreams {
+			assert.True(t, seenStreamIDs[uint16(i)], "should receive reset notification for stream %d", i)
+		}
+
+		closeAssociationPair(br, a0, a1)
+	})
+}
+
 type dumbConnInboundHandler func([]byte)
 
 type dumbConn2 struct {
