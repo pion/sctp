@@ -1147,6 +1147,8 @@ func (a *Association) handleInbound(raw []byte) error {
 		return nil
 	}
 
+	a.lock.Lock()
+	defer a.lock.Unlock()
 	a.handleChunksStart()
 
 	for _, c := range pkt.chunks {
@@ -3315,35 +3317,29 @@ func pack(p *packet) []*packet {
 	return []*packet{p}
 }
 
+// caller must hold a.lock
 func (a *Association) handleChunksStart() {
-	a.lock.Lock()
-	defer a.lock.Unlock()
-
 	a.stats.incPacketsReceived()
 
 	a.delayedAckTriggered = false
 	a.immediateAckTriggered = false
 }
 
+// caller must hold a.lock
 func (a *Association) handleChunksEnd() {
-	a.lock.Lock()
-	defer a.lock.Unlock()
-
 	if a.immediateAckTriggered {
 		a.ackState = ackStateImmediate
 		a.ackTimer.stop()
 		a.awakeWriteLoop()
-	} else if a.delayedAckTriggered {
+	} else if a.delayedAckTriggered && a.ackState != ackStateImmediate { // don't cancel the scheduled ACK
 		// Will send delayed ack in the next ack timeout
 		a.ackState = ackStateDelay
 		a.ackTimer.start()
 	}
 }
 
+// caller must hold a.lock
 func (a *Association) handleChunk(receivedPacket *packet, receivedChunk chunk) error { //nolint:cyclop
-	a.lock.Lock()
-	defer a.lock.Unlock()
-
 	var packets []*packet
 	var err error
 
