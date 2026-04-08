@@ -498,7 +498,8 @@ func (frcc *FRCC) updateCwnd(rtt time.Duration) {
 	targetCwnd := float32(0.0)
 	targetFlowCount := frcc.getTargetFlowCount()
 	//log.Printf("minExcessDelayUs %v, bwEstimate %v, round.MaxRate %v, flowCountBelief %v, targetFlowCount %v", minExcessDelayUs, bwEstimate, round.MaxRate, flowCountBelief, targetFlowCount)
-	if targetFlowCount < 1 || round.MaxRate == 0 {
+	// 1/256 = 0.00390625
+	if targetFlowCount < 0.00390625 || round.MaxRate == 0 {
 		targetCwnd = prevCwnd * param.CwndClampHi
 	} else {
 		if param.UseStableCwndUpdate {
