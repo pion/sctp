@@ -1633,6 +1633,166 @@ func TestHandleForwardTSN(t *testing.T) {
 	})
 }
 
+func TestHandleIForwardTSN(t *testing.T) {
+	loggerFactory := logging.NewDefaultLoggerFactory()
+
+	t.Run("forward ordered and unordered mids for named streams", func(t *testing.T) {
+		assoc := createTestAssociation(t, Config{
+			NetConn:       &dumbConn{},
+			LoggerFactory: loggerFactory,
+		})
+		assoc.useIForwardTSN = true
+		prevTSN := assoc.peerLastTSN()
+
+		orderedStream := assoc.createStream(0, false)
+		unorderedStream := assoc.createStream(1, false)
+		untouchedStream := assoc.createStream(2, false)
+		require.NotNil(t, orderedStream)
+		require.NotNil(t, unorderedStream)
+		require.NotNil(t, untouchedStream)
+
+		require.True(t, orderedStream.reassemblyQueue.push(&chunkPayloadData{
+			iData:             true,
+			messageIdentifier: 0,
+			beginningFragment: true,
+			endingFragment:    true,
+			tsn:               10,
+			streamIdentifier:  0,
+			payloadType:       PayloadTypeWebRTCBinary,
+			userData:          []byte("OK"),
+		}))
+		require.False(t, orderedStream.reassemblyQueue.push(&chunkPayloadData{
+			iData:             true,
+			messageIdentifier: 1,
+			beginningFragment: true,
+			tsn:               11,
+			streamIdentifier:  0,
+			payloadType:       PayloadTypeWebRTCBinary,
+			userData:          []byte("DROP"),
+		}))
+
+		require.True(t, unorderedStream.reassemblyQueue.push(&chunkPayloadData{
+			iData:             true,
+			unordered:         true,
+			messageIdentifier: 1,
+			beginningFragment: true,
+			endingFragment:    true,
+			tsn:               20,
+			streamIdentifier:  1,
+			payloadType:       PayloadTypeWebRTCBinary,
+			userData:          []byte("old"),
+		}))
+		require.False(t, unorderedStream.reassemblyQueue.push(&chunkPayloadData{
+			iData:             true,
+			unordered:         true,
+			messageIdentifier: 2,
+			beginningFragment: true,
+			tsn:               21,
+			streamIdentifier:  1,
+			payloadType:       PayloadTypeWebRTCBinary,
+			userData:          []byte("drop"),
+		}))
+		require.True(t, unorderedStream.reassemblyQueue.push(&chunkPayloadData{
+			iData:             true,
+			unordered:         true,
+			messageIdentifier: 4,
+			beginningFragment: true,
+			endingFragment:    true,
+			tsn:               22,
+			streamIdentifier:  1,
+			payloadType:       PayloadTypeWebRTCBinary,
+			userData:          []byte("keep"),
+		}))
+		require.False(t, unorderedStream.reassemblyQueue.push(&chunkPayloadData{
+			iData:             true,
+			unordered:         true,
+			messageIdentifier: 5,
+			beginningFragment: true,
+			tsn:               23,
+			streamIdentifier:  1,
+			payloadType:       PayloadTypeWebRTCBinary,
+			userData:          []byte("later"),
+		}))
+
+		require.False(t, untouchedStream.reassemblyQueue.push(&chunkPayloadData{
+			iData:             true,
+			messageIdentifier: 1,
+			beginningFragment: true,
+			tsn:               30,
+			streamIdentifier:  2,
+			payloadType:       PayloadTypeWebRTCBinary,
+			userData:          []byte("stay"),
+		}))
+
+		pack := assoc.handleIForwardTSN(&chunkIForwardTSN{
+			newCumulativeTSN: prevTSN + 1,
+			streams: []chunkIForwardTSNStream{
+				{identifier: 0, messageIdentifier: 1},
+				{identifier: 1, unordered: true, messageIdentifier: 2},
+			},
+		})
+
+		assoc.lock.Lock()
+		delayedAckTriggered := assoc.delayedAckTriggered
+		immediateAckTriggered := assoc.immediateAckTriggered
+		assoc.lock.Unlock()
+
+		assert.Equal(t, prevTSN+1, assoc.peerLastTSN(), "peerLastTSN should advance by 1")
+		assert.True(t, delayedAckTriggered, "delayed sack should be triggered")
+		assert.False(t, immediateAckTriggered, "immediate sack should NOT be triggered")
+		assert.Nil(t, pack, "should return nil")
+
+		assert.Equal(t, uint32(2), orderedStream.reassemblyQueue.nextMID, "next MID should advance")
+		assert.Len(t, orderedStream.reassemblyQueue.orderedMID, 1, "only the complete ordered MID should remain")
+		assert.Equal(t, uint32(0), orderedStream.reassemblyQueue.orderedMID[0].mid, "unexpected ordered MID kept")
+		_, ok := orderedStream.reassemblyQueue.orderedMIDMap[0]
+		assert.True(t, ok, "complete ordered MID should still be mapped")
+		_, ok = orderedStream.reassemblyQueue.orderedMIDMap[1]
+		assert.False(t, ok, "forwarded incomplete ordered MID should be removed from the map")
+		assert.Equal(t, 2, orderedStream.reassemblyQueue.getNumBytes(), "only the kept ordered MID bytes should remain")
+		assert.True(t, orderedStream.reassemblyQueue.isReadable(), "kept ordered MID should remain readable")
+
+		assert.Len(t, unorderedStream.reassemblyQueue.unorderedMID, 1, "should only keep one unordered MID")
+		assert.Equal(t, uint32(4), unorderedStream.reassemblyQueue.unorderedMID[0].mid, "unexpected unordered MID kept")
+		_, ok = unorderedStream.reassemblyQueue.unorderedMIDMap[2]
+		assert.False(t, ok, "forwarded incomplete unordered MID should be removed from the map")
+		assert.Len(t, unorderedStream.reassemblyQueue.unorderedMIDMap, 1, "should only keep one unordered MID")
+		_, ok = unorderedStream.reassemblyQueue.unorderedMIDMap[5]
+		assert.True(t, ok, "newer incomplete unordered MID should remain mapped")
+		assert.Equal(t, 9, unorderedStream.reassemblyQueue.getNumBytes(), "only newer unordered MID bytes should remain")
+		assert.True(t, unorderedStream.reassemblyQueue.isReadable(), "kept unordered MID should remain readable")
+
+		_, ok = untouchedStream.reassemblyQueue.orderedMIDMap[1]
+		assert.True(t, ok, "unmentioned stream should not be touched")
+		assert.Equal(t, uint32(0), untouchedStream.reassemblyQueue.nextMID, "unmentioned stream nextMID should not advance")
+		assert.Equal(t, 4, untouchedStream.reassemblyQueue.getNumBytes(), "unmentioned stream bytes should be unchanged")
+	})
+
+	t.Run("dup i-forward tsn chunk should generate sack", func(t *testing.T) {
+		assoc := createTestAssociation(t, Config{
+			NetConn:       &dumbConn{},
+			LoggerFactory: loggerFactory,
+		})
+		assoc.useIForwardTSN = true
+		prevTSN := assoc.peerLastTSN()
+
+		pack := assoc.handleIForwardTSN(&chunkIForwardTSN{
+			newCumulativeTSN: prevTSN,
+			streams: []chunkIForwardTSNStream{
+				{identifier: 0, messageIdentifier: 1},
+			},
+		})
+
+		assoc.lock.Lock()
+		ackState := assoc.ackState
+		assoc.lock.Unlock()
+
+		assert.Equal(t, prevTSN, assoc.peerLastTSN(), "peerLastTSN should not advance")
+		assert.Equal(t, ackStateImmediate, ackState, "sack should be requested")
+		assert.Nil(t, pack, "should return nil")
+	})
+}
+
 func TestHandleDataAckTriggering(t *testing.T) {
 	loggerFactory := logging.NewDefaultLoggerFactory()
 
