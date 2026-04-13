@@ -1398,6 +1398,128 @@ func TestCreateForwardTSN(t *testing.T) {
 	})
 }
 
+func TestCreateIForwardTSN(t *testing.T) {
+	loggerFactory := logging.NewDefaultLoggerFactory()
+
+	t.Run("forward one ordered abandoned", func(t *testing.T) {
+		assoc := createTestAssociation(t, Config{
+			NetConn:       &dumbConn{},
+			LoggerFactory: loggerFactory,
+		})
+
+		assoc.cumulativeTSNAckPoint = 9
+		assoc.advancedPeerTSNAckPoint = 10
+		assoc.inflightQueue.pushNoCheck(&chunkPayloadData{
+			iData:             true,
+			beginningFragment: true,
+			endingFragment:    true,
+			tsn:               10,
+			streamIdentifier:  1,
+			messageIdentifier: 2,
+			userData:          []byte("ABC"),
+			nSent:             1,
+			_abandoned:        true,
+		})
+
+		fwdtsn := assoc.createIForwardTSN()
+
+		assert.Equal(t, uint32(10), fwdtsn.newCumulativeTSN, "should set new cumulative TSN")
+		assert.Equal(t, []chunkIForwardTSNStream{{
+			identifier:        1,
+			unordered:         false,
+			messageIdentifier: 2,
+		}}, fwdtsn.streams, "should report the abandoned ordered MID")
+	})
+
+	t.Run("forward ordered and unordered with the same SI", func(t *testing.T) {
+		assoc := createTestAssociation(t, Config{
+			NetConn:       &dumbConn{},
+			LoggerFactory: loggerFactory,
+		})
+
+		assoc.cumulativeTSNAckPoint = 9
+		assoc.advancedPeerTSNAckPoint = 14
+		assoc.inflightQueue.pushNoCheck(&chunkPayloadData{
+			iData:             true,
+			beginningFragment: true,
+			endingFragment:    true,
+			tsn:               10,
+			streamIdentifier:  1,
+			messageIdentifier: 2,
+			userData:          []byte("A"),
+			nSent:             1,
+			_abandoned:        true,
+		})
+		assoc.inflightQueue.pushNoCheck(&chunkPayloadData{
+			iData:             true,
+			beginningFragment: true,
+			endingFragment:    true,
+			tsn:               11,
+			streamIdentifier:  1,
+			messageIdentifier: 4,
+			userData:          []byte("B"),
+			nSent:             1,
+			_abandoned:        true,
+		})
+		assoc.inflightQueue.pushNoCheck(&chunkPayloadData{
+			iData:             true,
+			unordered:         true,
+			beginningFragment: true,
+			endingFragment:    true,
+			tsn:               12,
+			streamIdentifier:  1,
+			messageIdentifier: 3,
+			userData:          []byte("C"),
+			nSent:             1,
+			_abandoned:        true,
+		})
+		assoc.inflightQueue.pushNoCheck(&chunkPayloadData{
+			iData:             true,
+			unordered:         true,
+			beginningFragment: true,
+			endingFragment:    true,
+			tsn:               13,
+			streamIdentifier:  1,
+			messageIdentifier: 5,
+			userData:          []byte("D"),
+			nSent:             1,
+			_abandoned:        true,
+		})
+		assoc.inflightQueue.pushNoCheck(&chunkPayloadData{
+			iData:             true,
+			beginningFragment: true,
+			endingFragment:    true,
+			tsn:               14,
+			streamIdentifier:  2,
+			messageIdentifier: 1,
+			userData:          []byte("E"),
+			nSent:             1,
+			_abandoned:        true,
+		})
+
+		fwdtsn := assoc.createIForwardTSN()
+
+		assert.Equal(t, uint32(14), fwdtsn.newCumulativeTSN, "should set new cumulative TSN")
+		assert.ElementsMatch(t, []chunkIForwardTSNStream{
+			{
+				identifier:        1,
+				unordered:         false,
+				messageIdentifier: 4,
+			},
+			{
+				identifier:        1,
+				unordered:         true,
+				messageIdentifier: 5,
+			},
+			{
+				identifier:        2,
+				unordered:         false,
+				messageIdentifier: 1,
+			},
+		}, fwdtsn.streams, "should report the highest MID per stream and ordering")
+	})
+}
+
 func TestHandleForwardTSN(t *testing.T) {
 	loggerFactory := logging.NewDefaultLoggerFactory()
 
