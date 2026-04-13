@@ -52,43 +52,37 @@ func (q *pendingBaseQueue) size() int {
 
 // pendingQueue
 
-type pendingQueue struct {
+type pendingQueuePolicy interface {
+	push(*chunkPayloadData)
+	peek() *chunkPayloadData
+	pop(*chunkPayloadData) error
+}
+
+type messagePendingQueuePolicy struct {
 	unorderedQueue      *pendingBaseQueue
 	orderedQueue        *pendingBaseQueue
-	nBytes              int
 	selected            bool
 	unorderedIsSelected bool
 }
 
-// Pending queue errors.
-var (
-	ErrUnexpectedChunkPoppedUnordered = errors.New("unexpected chunk popped (unordered)")
-	ErrUnexpectedChunkPoppedOrdered   = errors.New("unexpected chunk popped (ordered)")
-	ErrUnexpectedQState               = errors.New("unexpected q state (should've been selected)")
-
-	// Deprecated: use ErrUnexpectedChunkPoppedUnordered.
-	ErrUnexpectedChuckPoppedUnordered = ErrUnexpectedChunkPoppedUnordered
-	// Deprecated: use ErrUnexpectedChunkPoppedOrdered.
-	ErrUnexpectedChuckPoppedOrdered = ErrUnexpectedChunkPoppedOrdered
-)
-
-func newPendingQueue() *pendingQueue {
-	return &pendingQueue{
+func newMessagePendingQueuePolicy() *messagePendingQueuePolicy {
+	return &messagePendingQueuePolicy{
 		unorderedQueue: newPendingBaseQueue(),
 		orderedQueue:   newPendingBaseQueue(),
 	}
 }
 
-func (q *pendingQueue) push(c *chunkPayloadData) {
-	if c.unordered {
-		q.unorderedQueue.push(c)
-	} else {
-		q.orderedQueue.push(c)
+func (q *messagePendingQueuePolicy) push(chunk *chunkPayloadData) {
+	if chunk.unordered {
+		q.unorderedQueue.push(chunk)
+
+		return
 	}
-	q.nBytes += len(c.userData)
+
+	q.orderedQueue.push(chunk)
 }
 
-func (q *pendingQueue) peek() *chunkPayloadData {
+func (q *messagePendingQueuePolicy) peek() *chunkPayloadData {
 	if q.selected {
 		if q.unorderedIsSelected {
 			return q.unorderedQueue.get(0)
@@ -104,46 +98,194 @@ func (q *pendingQueue) peek() *chunkPayloadData {
 	return q.orderedQueue.get(0)
 }
 
-func (q *pendingQueue) pop(chunkPayload *chunkPayloadData) error { //nolint:cyclop
-	if q.selected { //nolint:nestif
-		var popped *chunkPayloadData
-		if q.unorderedIsSelected {
-			popped = q.unorderedQueue.pop()
-			if popped != chunkPayload {
-				return ErrUnexpectedChunkPoppedUnordered
-			}
-		} else {
-			popped = q.orderedQueue.pop()
-			if popped != chunkPayload {
-				return ErrUnexpectedChunkPoppedOrdered
-			}
-		}
-		if popped.endingFragment {
-			q.selected = false
-		}
+func (q *messagePendingQueuePolicy) pop(chunkPayload *chunkPayloadData) error {
+	if q.selected {
+		return q.popSelected(chunkPayload)
+	}
+	if !chunkPayload.beginningFragment {
+		return ErrUnexpectedQState
+	}
+
+	return q.popNewSelection(chunkPayload)
+}
+
+func (q *messagePendingQueuePolicy) popSelected(chunkPayload *chunkPayloadData) error {
+	var (
+		popped *chunkPayloadData
+		err    error
+	)
+
+	if q.unorderedIsSelected {
+		popped = q.unorderedQueue.pop()
+		err = ErrUnexpectedChunkPoppedUnordered
 	} else {
-		if !chunkPayload.beginningFragment {
-			return ErrUnexpectedQState
-		}
-		if chunkPayload.unordered {
-			popped := q.unorderedQueue.pop()
-			if popped != chunkPayload {
-				return ErrUnexpectedChunkPoppedUnordered
-			}
-			if !popped.endingFragment {
-				q.selected = true
-				q.unorderedIsSelected = true
-			}
-		} else {
-			popped := q.orderedQueue.pop()
-			if popped != chunkPayload {
-				return ErrUnexpectedChunkPoppedOrdered
-			}
-			if !popped.endingFragment {
-				q.selected = true
-				q.unorderedIsSelected = false
-			}
-		}
+		popped = q.orderedQueue.pop()
+		err = ErrUnexpectedChunkPoppedOrdered
+	}
+	if popped != chunkPayload {
+		return err
+	}
+	if popped.endingFragment {
+		q.selected = false
+	}
+
+	return nil
+}
+
+func (q *messagePendingQueuePolicy) popNewSelection(chunkPayload *chunkPayloadData) error {
+	var (
+		popped     *chunkPayloadData
+		err        error
+		isSelected bool
+	)
+
+	if chunkPayload.unordered {
+		popped = q.unorderedQueue.pop()
+		err = ErrUnexpectedChunkPoppedUnordered
+		isSelected = true
+	} else {
+		popped = q.orderedQueue.pop()
+		err = ErrUnexpectedChunkPoppedOrdered
+	}
+	if popped != chunkPayload {
+		return err
+	}
+	if !popped.endingFragment {
+		q.selected = true
+		q.unorderedIsSelected = isSelected
+	}
+
+	return nil
+}
+
+type interleavingPendingQueuePolicy struct {
+	streamQueues   map[uint16]*pendingBaseQueue
+	streamOrder    []uint16
+	streamSelected bool
+	selectedStream uint16
+}
+
+func newInterleavingPendingQueuePolicy() *interleavingPendingQueuePolicy {
+	return &interleavingPendingQueuePolicy{
+		streamQueues: map[uint16]*pendingBaseQueue{},
+	}
+}
+
+func (q *interleavingPendingQueuePolicy) push(chunk *chunkPayloadData) {
+	streamQueue := q.streamQueues[chunk.streamIdentifier]
+	wasEmpty := streamQueue == nil || streamQueue.size() == 0
+	if streamQueue == nil {
+		streamQueue = newPendingBaseQueue()
+		q.streamQueues[chunk.streamIdentifier] = streamQueue
+	}
+	streamQueue.push(chunk)
+	if wasEmpty {
+		q.streamOrder = append(q.streamOrder, chunk.streamIdentifier)
+	}
+}
+
+func (q *interleavingPendingQueuePolicy) peek() *chunkPayloadData {
+	if q.streamSelected {
+		return q.streamQueues[q.selectedStream].get(0)
+	}
+	if len(q.streamOrder) == 0 {
+		return nil
+	}
+	q.streamSelected = true
+	q.selectedStream = q.streamOrder[0]
+
+	return q.streamQueues[q.selectedStream].get(0)
+}
+
+func (q *interleavingPendingQueuePolicy) pop(chunkPayload *chunkPayloadData) error {
+	if !q.streamSelected {
+		return ErrUnexpectedQState
+	}
+
+	streamQueue := q.streamQueues[q.selectedStream]
+	if streamQueue == nil {
+		return ErrUnexpectedQState
+	}
+
+	popped := streamQueue.pop()
+	if popped != chunkPayload {
+		return ErrUnexpectedChunkPoppedStream
+	}
+
+	if len(q.streamOrder) > 0 {
+		q.streamOrder = q.streamOrder[1:]
+	}
+	if streamQueue.size() > 0 {
+		q.streamOrder = append(q.streamOrder, q.selectedStream)
+	} else {
+		delete(q.streamQueues, q.selectedStream)
+	}
+	q.streamSelected = false
+	q.selectedStream = 0
+
+	return nil
+}
+
+type pendingQueue struct {
+	nBytes       int
+	nChunks      int
+	interleaving bool
+	policy       pendingQueuePolicy
+}
+
+// Pending queue errors.
+var (
+	ErrUnexpectedChunkPoppedUnordered = errors.New("unexpected chunk popped (unordered)")
+	ErrUnexpectedChunkPoppedOrdered   = errors.New("unexpected chunk popped (ordered)")
+	ErrUnexpectedChunkPoppedStream    = errors.New("unexpected chunk popped (stream)")
+	ErrUnexpectedQState               = errors.New("unexpected q state (should've been selected)")
+	ErrPendingQueueModeChangeNonEmpty = errors.New(
+		"cannot change pending queue interleaving mode while queue is not empty",
+	)
+
+	// Deprecated: use ErrUnexpectedChunkPoppedUnordered.
+	ErrUnexpectedChuckPoppedUnordered = ErrUnexpectedChunkPoppedUnordered
+	// Deprecated: use ErrUnexpectedChunkPoppedOrdered.
+	ErrUnexpectedChuckPoppedOrdered = ErrUnexpectedChunkPoppedOrdered
+)
+
+func newPendingQueue() *pendingQueue {
+	return &pendingQueue{
+		policy: newMessagePendingQueuePolicy(),
+	}
+}
+
+func (q *pendingQueue) setInterleaving(enabled bool) error {
+	if q.interleaving == enabled {
+		return nil
+	}
+	if q.nChunks != 0 {
+		return ErrPendingQueueModeChangeNonEmpty
+	}
+
+	q.interleaving = enabled
+	if enabled {
+		q.policy = newInterleavingPendingQueuePolicy()
+	} else {
+		q.policy = newMessagePendingQueuePolicy()
+	}
+
+	return nil
+}
+
+func (q *pendingQueue) push(chunk *chunkPayloadData) {
+	q.policy.push(chunk)
+	q.nBytes += len(chunk.userData)
+	q.nChunks++
+}
+
+func (q *pendingQueue) peek() *chunkPayloadData {
+	return q.policy.peek()
+}
+
+func (q *pendingQueue) pop(chunkPayload *chunkPayloadData) error {
+	if err := q.policy.pop(chunkPayload); err != nil {
+		return err
 	}
 
 	// guard against negative values (should never happen, but just in case).
@@ -151,6 +293,7 @@ func (q *pendingQueue) pop(chunkPayload *chunkPayloadData) error { //nolint:cycl
 	if q.nBytes < 0 {
 		q.nBytes = 0
 	}
+	q.nChunks--
 
 	return nil
 }
@@ -160,5 +303,5 @@ func (q *pendingQueue) getNumBytes() int {
 }
 
 func (q *pendingQueue) size() int {
-	return q.unorderedQueue.size() + q.orderedQueue.size()
+	return q.nChunks
 }

@@ -64,6 +64,8 @@ type Stream struct {
 	defaultPayloadType  PayloadProtocolIdentifier
 	reassemblyQueue     *reassemblyQueue
 	sequenceNumber      uint16
+	nextOrderedMID      uint32
+	nextUnorderedMID    uint32
 	readNotifier        *sync.Cond
 	readErr             error
 	readTimeoutCancel   chan struct{}
@@ -260,6 +262,38 @@ func (s *Stream) handleForwardTSNForUnordered(newCumulativeTSN uint32) {
 	}
 }
 
+func (s *Stream) handleForwardTSNForOrderedMID(mid uint32) {
+	var readable bool
+
+	func() {
+		s.lock.Lock()
+		defer s.lock.Unlock()
+
+		s.reassemblyQueue.forwardTSNForOrderedMID(mid)
+		readable = s.reassemblyQueue.isReadable()
+	}()
+
+	if readable {
+		s.readNotifier.Signal()
+	}
+}
+
+func (s *Stream) handleForwardTSNForUnorderedMID(mid uint32) {
+	var readable bool
+
+	func() {
+		s.lock.Lock()
+		defer s.lock.Unlock()
+
+		s.reassemblyQueue.forwardTSNForUnorderedMID(mid)
+		readable = s.reassemblyQueue.isReadable()
+	}()
+
+	if readable {
+		s.readNotifier.Signal()
+	}
+}
+
 // Write writes len(payload) bytes from payload with the default Payload Protocol Identifier.
 func (s *Stream) Write(payload []byte) (n int, err error) {
 	ppi := PayloadProtocolIdentifier(atomic.LoadUint32((*uint32)(&s.defaultPayloadType)))
@@ -284,13 +318,20 @@ func (s *Stream) WriteSCTP(payload []byte, ppi PayloadProtocolIdentifier) (int, 
 	if s.association.isBlockWrite() {
 		s.writeLock.Lock()
 	}
+	useInterleaving := s.association.useInterleaving
 	chunks, unordered := s.packetize(payload, ppi)
 	n := len(payload)
 	err := s.association.sendPayloadData(s.writeDeadline, chunks)
-	if err != nil {
+	if err != nil { //nolint:nestif
 		s.lock.Lock()
 		s.bufferedAmount -= uint64(n)
-		if !unordered {
+		if useInterleaving {
+			if unordered {
+				s.nextUnorderedMID--
+			} else {
+				s.nextOrderedMID--
+			}
+		} else if !unordered {
 			s.sequenceNumber--
 		}
 		s.lock.Unlock()
@@ -332,8 +373,21 @@ func (s *Stream) packetize(raw []byte, ppi PayloadProtocolIdentifier) ([]*chunkP
 	//   ordered delivery and reliable transmission.
 	unordered := ppi != PayloadTypeWebRTCDCEP && s.unordered
 
+	useInterleaving := s.association.useInterleaving
+	var mid uint32
+	if useInterleaving {
+		if unordered {
+			mid = s.nextUnorderedMID
+			s.nextUnorderedMID++
+		} else {
+			mid = s.nextOrderedMID
+			s.nextOrderedMID++
+		}
+	}
+
 	var chunks []*chunkPayloadData
 	var head *chunkPayloadData
+	fsn := uint32(0)
 	for remaining != 0 {
 		fragmentSize := min32(s.association.maxPayloadSize, remaining)
 
@@ -343,15 +397,22 @@ func (s *Stream) packetize(raw []byte, ppi PayloadProtocolIdentifier) ([]*chunkP
 		copy(userData, raw[offset:offset+fragmentSize])
 
 		chunk := &chunkPayloadData{
-			streamIdentifier:     s.streamIdentifier,
-			userData:             userData,
-			unordered:            unordered,
-			beginningFragment:    offset == 0,
-			endingFragment:       remaining-fragmentSize == 0,
-			immediateSack:        false,
-			payloadType:          ppi,
-			streamSequenceNumber: s.sequenceNumber,
-			head:                 head,
+			streamIdentifier:       s.streamIdentifier,
+			userData:               userData,
+			unordered:              unordered,
+			beginningFragment:      offset == 0,
+			endingFragment:         remaining-fragmentSize == 0,
+			immediateSack:          false,
+			payloadType:            ppi,
+			streamSequenceNumber:   s.sequenceNumber,
+			messageIdentifier:      mid,
+			fragmentSequenceNumber: fsn,
+			iData:                  useInterleaving,
+			head:                   head,
+		}
+
+		if useInterleaving {
+			chunk.streamSequenceNumber = uint16(mid) //nolint:gosec
 		}
 
 		if head == nil {
@@ -360,6 +421,7 @@ func (s *Stream) packetize(raw []byte, ppi PayloadProtocolIdentifier) ([]*chunkP
 
 		chunks = append(chunks, chunk)
 
+		fsn++
 		remaining -= fragmentSize
 		offset += fragmentSize
 	}
@@ -368,7 +430,7 @@ func (s *Stream) packetize(raw []byte, ppi PayloadProtocolIdentifier) ([]*chunkP
 	// Note: When transmitting ordered and unordered data, an endpoint does
 	// not increment its Stream Sequence Number when transmitting a DATA
 	// chunk with U flag set to 1.
-	if !unordered {
+	if !useInterleaving && !unordered {
 		s.sequenceNumber++
 	}
 
