@@ -558,6 +558,136 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 		assert.Equal(t, orgPpi, ppi, "should have valid ppi")
 		assert.Equal(t, "AB", string(buf[:n]), "data should match")
 	})
+
+	t.Run("forwardTSN for ordered i-data drops incomplete mids and advances nextMID", func(t *testing.T) {
+		rq := newReassemblyQueue(0)
+		orgPpi := PayloadTypeWebRTCBinary
+
+		complete := rq.push(&chunkPayloadData{
+			iData:             true,
+			messageIdentifier: 0,
+			beginningFragment: true,
+			endingFragment:    true,
+			tsn:               10,
+			streamIdentifier:  0,
+			payloadType:       orgPpi,
+			userData:          []byte("OK"),
+		})
+		assert.True(t, complete)
+
+		complete = rq.push(&chunkPayloadData{
+			iData:             true,
+			messageIdentifier: 1,
+			beginningFragment: true,
+			tsn:               11,
+			streamIdentifier:  0,
+			payloadType:       orgPpi,
+			userData:          []byte("DROP"),
+		})
+		assert.False(t, complete, "MID 1 should remain incomplete")
+		assert.Equal(t, 6, rq.getNumBytes(), "num bytes mismatch")
+
+		rq.forwardTSNForOrderedMID(1)
+
+		assert.Equal(t, uint32(2), rq.nextMID, "next MID should advance")
+		if assert.Len(t, rq.orderedMID, 1, "only the complete MID should remain") {
+			assert.Equal(t, uint32(0), rq.orderedMID[0].mid, "unexpected MID kept")
+		}
+		_, ok := rq.orderedMIDMap[0]
+		assert.True(t, ok, "complete MID should still be mapped")
+		_, ok = rq.orderedMIDMap[1]
+		assert.False(t, ok, "forwarded incomplete MID should be removed from the map")
+		assert.Equal(t, 2, rq.getNumBytes(), "only the kept MID bytes should remain")
+		assert.True(t, rq.isReadable(), "kept complete MID should be readable")
+
+		buf := make([]byte, 4)
+		n, ppi, err := rq.read(buf)
+		assert.NoError(t, err)
+		assert.Equal(t, 2, n, "should receive 2 bytes")
+		assert.Equal(t, orgPpi, ppi, "should have valid ppi")
+		assert.Equal(t, "OK", string(buf[:n]), "data should match")
+		assert.Equal(t, 0, rq.getNumBytes(), "all bytes should be drained after read")
+		assert.Equal(t, uint32(2), rq.nextMID, "next MID should remain forwarded")
+	})
+
+	t.Run("forwardTSN for unordered i-data drops old mids from queue and map", func(t *testing.T) {
+		rq := newReassemblyQueue(0)
+		orgPpi := PayloadTypeWebRTCBinary
+
+		complete := rq.push(&chunkPayloadData{
+			iData:             true,
+			unordered:         true,
+			messageIdentifier: 1,
+			beginningFragment: true,
+			endingFragment:    true,
+			tsn:               10,
+			streamIdentifier:  0,
+			payloadType:       orgPpi,
+			userData:          []byte("old"),
+		})
+		assert.True(t, complete, "MID 1 should be complete")
+
+		complete = rq.push(&chunkPayloadData{
+			iData:             true,
+			unordered:         true,
+			messageIdentifier: 2,
+			beginningFragment: true,
+			tsn:               11,
+			streamIdentifier:  0,
+			payloadType:       orgPpi,
+			userData:          []byte("drop"),
+		})
+		assert.False(t, complete, "MID 2 should remain incomplete")
+
+		complete = rq.push(&chunkPayloadData{
+			iData:             true,
+			unordered:         true,
+			messageIdentifier: 4,
+			beginningFragment: true,
+			endingFragment:    true,
+			tsn:               12,
+			streamIdentifier:  0,
+			payloadType:       orgPpi,
+			userData:          []byte("keep"),
+		})
+		assert.True(t, complete, "MID 4 should be complete")
+
+		complete = rq.push(&chunkPayloadData{
+			iData:             true,
+			unordered:         true,
+			messageIdentifier: 5,
+			beginningFragment: true,
+			tsn:               13,
+			streamIdentifier:  0,
+			payloadType:       orgPpi,
+			userData:          []byte("later"),
+		})
+		assert.False(t, complete, "MID 5 should remain incomplete")
+		assert.Equal(t, 16, rq.getNumBytes(), "num bytes mismatch")
+
+		rq.forwardTSNForUnorderedMID(2)
+
+		if assert.Len(t, rq.unorderedMID, 1, "only newer complete MIDs should remain queued") {
+			assert.Equal(t, uint32(4), rq.unorderedMID[0].mid, "unexpected MID kept")
+		}
+		_, ok := rq.unorderedMIDMap[2]
+		assert.False(t, ok, "forwarded incomplete MID should be removed from the map")
+		if assert.Len(t, rq.unorderedMIDMap, 1, "only newer incomplete MIDs should remain mapped") {
+			_, ok = rq.unorderedMIDMap[5]
+			assert.True(t, ok, "MID 5 should remain mapped")
+		}
+		assert.Equal(t, 9, rq.getNumBytes(), "bytes for forwarded MIDs should be removed")
+		assert.True(t, rq.isReadable(), "newer complete unordered MID should still be readable")
+
+		buf := make([]byte, 8)
+		n, ppi, err := rq.read(buf)
+		assert.NoError(t, err)
+		assert.Equal(t, 4, n, "should receive 4 bytes")
+		assert.Equal(t, orgPpi, ppi, "should have valid ppi")
+		assert.Equal(t, "keep", string(buf[:n]), "data should match")
+		assert.Equal(t, 5, rq.getNumBytes(), "only the remaining incomplete MID bytes should remain")
+		assert.False(t, rq.isReadable(), "only an incomplete MID should remain")
+	})
 }
 
 func TestChunkSet(t *testing.T) {
