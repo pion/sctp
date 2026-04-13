@@ -2707,7 +2707,7 @@ func TestAssocHandleInit(t *testing.T) {
 		init.numInboundStreams = 1002
 		init.initiateTag = 5678
 		init.advertisedReceiverWindowCredit = 512 * 1024
-		setSupportedExtensions(&init.chunkInitCommon)
+		setSupportedExtensions(&init.chunkInitCommon, false)
 
 		_, err := assoc.handleInit(pkt, init)
 		if expectErr {
