@@ -5247,6 +5247,32 @@ func TestAbortSentChClosedWhenAbortMarshalFails(t *testing.T) {
 	}
 }
 
+func TestAssociationAbortProtocolViolation(t *testing.T) {
+	const reason = "received DATA with interleaving negotiated"
+
+	assoc := &Association{
+		awakeWriteLoopCh: make(chan struct{}, 1),
+		name:             "test-association",
+		log:              logging.NewDefaultLoggerFactory().NewLogger("sctp-test"),
+	}
+
+	assoc.lock.Lock()
+	assoc.abortProtocolViolation(reason)
+	assoc.lock.Unlock()
+
+	require.True(t, assoc.willSendAbort)
+
+	cause, ok := assoc.willSendAbortCause.(*errorCauseProtocolViolation)
+	require.True(t, ok)
+	assert.Equal(t, []byte(reason), cause.additionalInformation)
+
+	select {
+	case <-assoc.awakeWriteLoopCh:
+	default:
+		require.Fail(t, "abortProtocolViolation did not wake the write loop")
+	}
+}
+
 func TestAssociationSNAPInvalidInit(t *testing.T) {
 	br := test.NewBridge()
 	tokenConfig := Config{
