@@ -1715,16 +1715,18 @@ func setSupportedExtensions(init *chunkInitCommon, enableInterleaving bool) {
 	})
 }
 
-func (a *Association) updateInterleavingState() {
+func (a *Association) updateInterleavingState() error {
 	useInterleaving := a.localInterleaving && a.peerInterleaving
 	if useInterleaving != a.useInterleaving {
+		if err := a.pendingQueue.setInterleaving(useInterleaving); err != nil {
+			return err
+		}
+
 		a.useInterleaving = useInterleaving
 		if useInterleaving {
 			a.maxPayloadSize = a.mtu - (commonHeaderSize + iDataChunkHeaderSize)
-			a.pendingQueue.setInterleaving(true)
 		} else {
 			a.maxPayloadSize = a.mtu - (commonHeaderSize + dataChunkHeaderSize)
-			a.pendingQueue.setInterleaving(false)
 		}
 	}
 
@@ -1735,6 +1737,8 @@ func (a *Association) updateInterleavingState() {
 		a.useIForwardTSN = false
 		a.useForwardTSN = a.peerForwardTSN
 	}
+
+	return nil
 }
 
 func (a *Association) partialReliabilityEnabled() bool {
@@ -1813,7 +1817,9 @@ func (a *Association) handleInit(pkt *packet, initChunk *chunkInit) ([]*packet, 
 		}
 	}
 
-	a.updateInterleavingState()
+	if err := a.updateInterleavingState(); err != nil {
+		return nil, err
+	}
 	if a.useInterleaving { //nolint:nestif,gocritic
 		a.log.Debugf("[%s] use interleaving (on init)", a.name)
 		if !a.useIForwardTSN {
@@ -1929,7 +1935,9 @@ func (a *Association) handleInitAck(pkt *packet, initChunkAck *chunkInitAck) err
 
 	a.log.Debugf("[%s] sendZeroChecksum=%t (on initAck)", a.name, a.sendZeroChecksum)
 
-	a.updateInterleavingState()
+	if err := a.updateInterleavingState(); err != nil {
+		return err
+	}
 	if a.useInterleaving { //nolint:gocritic
 		a.log.Tracef("[%s] use interleaving (on initAck)", a.name)
 		if !a.useIForwardTSN {

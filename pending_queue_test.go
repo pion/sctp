@@ -37,6 +37,13 @@ func makeDataChunk(tsn uint32, unordered bool, frag int) *chunkPayloadData {
 	}
 }
 
+func makeStreamDataChunk(tsn uint32, streamID uint16, frag int) *chunkPayloadData {
+	chunk := makeDataChunk(tsn, false, frag)
+	chunk.streamIdentifier = streamID
+
+	return chunk
+}
+
 func TestPendingBaseQueue(t *testing.T) {
 	t.Run("push and pop", func(t *testing.T) {
 		pq := newPendingBaseQueue()
@@ -190,6 +197,101 @@ func TestPendingQueue(t *testing.T) {
 			assert.NoError(t, err, "should not error")
 			assert.Equal(t, exp, chunkPayload.tsn, "TSN should match")
 		}
+	})
+
+	t.Run("set interleaving rejects non-empty queue", func(t *testing.T) {
+		pq := newPendingQueue()
+		pq.push(makeDataChunk(1, false, noFragment))
+
+		err := pq.setInterleaving(true)
+		assert.ErrorIs(t, err, ErrPendingQueueModeChangeNonEmpty)
+		assert.False(t, pq.interleaving)
+
+		chunkPayload := pq.peek()
+		assert.NotNil(t, chunkPayload)
+		assert.Equal(t, uint32(1), chunkPayload.tsn)
+	})
+
+	t.Run("set interleaving swaps policy when empty", func(t *testing.T) {
+		pq := newPendingQueue()
+
+		err := pq.setInterleaving(true)
+		assert.NoError(t, err)
+		assert.True(t, pq.interleaving)
+
+		_, ok := pq.policy.(*interleavingPendingQueuePolicy)
+		assert.True(t, ok)
+
+		err = pq.setInterleaving(true)
+		assert.NoError(t, err)
+
+		err = pq.setInterleaving(false)
+		assert.NoError(t, err)
+		assert.False(t, pq.interleaving)
+
+		_, ok = pq.policy.(*messagePendingQueuePolicy)
+		assert.True(t, ok)
+	})
+}
+
+func TestInterleavingPendingQueuePolicy(t *testing.T) {
+	t.Run("round robin across streams", func(t *testing.T) {
+		pq := newInterleavingPendingQueuePolicy()
+		pq.push(makeStreamDataChunk(1, 1, noFragment))
+		pq.push(makeStreamDataChunk(2, 2, noFragment))
+		pq.push(makeStreamDataChunk(3, 1, noFragment))
+
+		expects := []uint32{1, 2, 3}
+		for _, exp := range expects {
+			chunkPayload := pq.peek()
+			assert.NotNil(t, chunkPayload)
+			assert.Equal(t, exp, chunkPayload.tsn)
+
+			err := pq.pop(chunkPayload)
+			assert.NoError(t, err)
+		}
+
+		assert.Nil(t, pq.peek())
+	})
+
+	t.Run("peek keeps the selected stream until pop", func(t *testing.T) {
+		pq := newInterleavingPendingQueuePolicy()
+		pq.push(makeStreamDataChunk(10, 1, noFragment))
+		pq.push(makeStreamDataChunk(20, 2, noFragment))
+
+		first := pq.peek()
+		second := pq.peek()
+
+		assert.Same(t, first, second)
+		assert.Equal(t, uint16(1), pq.selectedStream)
+
+		err := pq.pop(first)
+		assert.NoError(t, err)
+
+		next := pq.peek()
+		assert.NotNil(t, next)
+		assert.Equal(t, uint32(20), next.tsn)
+	})
+
+	t.Run("pop errors", func(t *testing.T) {
+		t.Run("requires selection", func(t *testing.T) {
+			pq := newInterleavingPendingQueuePolicy()
+			err := pq.pop(makeStreamDataChunk(30, 1, noFragment))
+			assert.ErrorIs(t, err, ErrUnexpectedQState)
+		})
+
+		t.Run("validates popped chunk", func(t *testing.T) {
+			pq := newInterleavingPendingQueuePolicy()
+			first := makeStreamDataChunk(40, 1, noFragment)
+			second := makeStreamDataChunk(41, 1, noFragment)
+			pq.push(first)
+			pq.push(second)
+
+			assert.Same(t, first, pq.peek())
+
+			err := pq.pop(second)
+			assert.ErrorIs(t, err, ErrUnexpectedChunkPoppedStream)
+		})
 	})
 }
 
