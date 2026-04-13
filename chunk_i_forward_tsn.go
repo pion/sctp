@@ -80,15 +80,18 @@ func (c *chunkIForwardTSN) unmarshal(raw []byte) error {
 }
 
 func (c *chunkIForwardTSN) marshal() ([]byte, error) {
-	out := make([]byte, newCumulativeTSNLength)
+	out := make([]byte, newCumulativeTSNLength+len(c.streams)*iForwardTSNEntryLength)
 	binary.BigEndian.PutUint32(out[0:], c.newCumulativeTSN)
 
+	offset := newCumulativeTSNLength
 	for _, s := range c.streams {
 		b, err := s.marshal()
 		if err != nil {
 			return nil, fmt.Errorf("%w: %v", ErrMarshalStreamFailed, err) //nolint:errorlint
 		}
-		out = append(out, b...) //nolint:makezero // TODO: fix
+
+		copy(out[offset:], b)
+		offset += len(b)
 	}
 
 	c.typ = ctIForwardTSN
@@ -104,9 +107,9 @@ func (c *chunkIForwardTSN) check() (abort bool, err error) {
 // String makes chunkIForwardTSN printable.
 func (c *chunkIForwardTSN) String() string {
 	var res strings.Builder
-	res.WriteString(fmt.Sprintf("New Cumulative TSN: %d\n", c.newCumulativeTSN))
+	fmt.Fprintf(&res, "New Cumulative TSN: %d\n", c.newCumulativeTSN)
 	for _, s := range c.streams {
-		res.WriteString(fmt.Sprintf(" - si=%d mid=%d unordered=%v\n", s.identifier, s.messageIdentifier, s.unordered))
+		fmt.Fprintf(&res, " - si=%d mid=%d unordered=%v\n", s.identifier, s.messageIdentifier, s.unordered)
 	}
 
 	return res.String()

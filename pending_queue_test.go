@@ -37,8 +37,8 @@ func makeDataChunk(tsn uint32, unordered bool, frag int) *chunkPayloadData {
 	}
 }
 
-func makeStreamDataChunk(tsn uint32, streamID uint16, frag int) *chunkPayloadData {
-	chunk := makeDataChunk(tsn, false, frag)
+func makeStreamDataChunk(tsn uint32, streamID uint16) *chunkPayloadData {
+	chunk := makeDataChunk(tsn, false, 0)
 	chunk.streamIdentifier = streamID
 
 	return chunk
@@ -237,9 +237,9 @@ func TestPendingQueue(t *testing.T) {
 func TestInterleavingPendingQueuePolicy(t *testing.T) {
 	t.Run("round robin across streams", func(t *testing.T) {
 		pq := newInterleavingPendingQueuePolicy()
-		pq.push(makeStreamDataChunk(1, 1, noFragment))
-		pq.push(makeStreamDataChunk(2, 2, noFragment))
-		pq.push(makeStreamDataChunk(3, 1, noFragment))
+		pq.push(makeStreamDataChunk(1, 1))
+		pq.push(makeStreamDataChunk(2, 2))
+		pq.push(makeStreamDataChunk(3, 1))
 
 		expects := []uint32{1, 2, 3}
 		for _, exp := range expects {
@@ -256,8 +256,8 @@ func TestInterleavingPendingQueuePolicy(t *testing.T) {
 
 	t.Run("peek keeps the selected stream until pop", func(t *testing.T) {
 		pq := newInterleavingPendingQueuePolicy()
-		pq.push(makeStreamDataChunk(10, 1, noFragment))
-		pq.push(makeStreamDataChunk(20, 2, noFragment))
+		pq.push(makeStreamDataChunk(10, 1))
+		pq.push(makeStreamDataChunk(20, 2))
 
 		first := pq.peek()
 		second := pq.peek()
@@ -276,14 +276,14 @@ func TestInterleavingPendingQueuePolicy(t *testing.T) {
 	t.Run("pop errors", func(t *testing.T) {
 		t.Run("requires selection", func(t *testing.T) {
 			pq := newInterleavingPendingQueuePolicy()
-			err := pq.pop(makeStreamDataChunk(30, 1, noFragment))
+			err := pq.pop(makeStreamDataChunk(30, 1))
 			assert.ErrorIs(t, err, ErrUnexpectedQState)
 		})
 
 		t.Run("validates popped chunk", func(t *testing.T) {
 			pq := newInterleavingPendingQueuePolicy()
-			first := makeStreamDataChunk(40, 1, noFragment)
-			second := makeStreamDataChunk(41, 1, noFragment)
+			first := makeStreamDataChunk(40, 1)
+			second := makeStreamDataChunk(41, 1)
 			pq.push(first)
 			pq.push(second)
 

@@ -99,49 +99,60 @@ func (q *messagePendingQueuePolicy) peek() *chunkPayloadData {
 }
 
 func (q *messagePendingQueuePolicy) pop(chunkPayload *chunkPayloadData) error {
-	if q.selected { //nolint:nestif
-		var popped *chunkPayloadData
-		if q.unorderedIsSelected {
-			popped = q.unorderedQueue.pop()
-			if popped != chunkPayload {
-				return ErrUnexpectedChunkPoppedUnordered
-			}
-		} else {
-			popped = q.orderedQueue.pop()
-			if popped != chunkPayload {
-				return ErrUnexpectedChunkPoppedOrdered
-			}
-		}
-		if popped.endingFragment {
-			q.selected = false
-		}
-
-		return nil
+	if q.selected {
+		return q.popSelected(chunkPayload)
 	}
-
 	if !chunkPayload.beginningFragment {
 		return ErrUnexpectedQState
 	}
-	if chunkPayload.unordered {
-		popped := q.unorderedQueue.pop()
-		if popped != chunkPayload {
-			return ErrUnexpectedChunkPoppedUnordered
-		}
-		if !popped.endingFragment {
-			q.selected = true
-			q.unorderedIsSelected = true
-		}
 
-		return nil
+	return q.popNewSelection(chunkPayload)
+}
+
+func (q *messagePendingQueuePolicy) popSelected(chunkPayload *chunkPayloadData) error {
+	var (
+		popped *chunkPayloadData
+		err    error
+	)
+
+	if q.unorderedIsSelected {
+		popped = q.unorderedQueue.pop()
+		err = ErrUnexpectedChunkPoppedUnordered
+	} else {
+		popped = q.orderedQueue.pop()
+		err = ErrUnexpectedChunkPoppedOrdered
+	}
+	if popped != chunkPayload {
+		return err
+	}
+	if popped.endingFragment {
+		q.selected = false
 	}
 
-	popped := q.orderedQueue.pop()
+	return nil
+}
+
+func (q *messagePendingQueuePolicy) popNewSelection(chunkPayload *chunkPayloadData) error {
+	var (
+		popped     *chunkPayloadData
+		err        error
+		isSelected bool
+	)
+
+	if chunkPayload.unordered {
+		popped = q.unorderedQueue.pop()
+		err = ErrUnexpectedChunkPoppedUnordered
+		isSelected = true
+	} else {
+		popped = q.orderedQueue.pop()
+		err = ErrUnexpectedChunkPoppedOrdered
+	}
 	if popped != chunkPayload {
-		return ErrUnexpectedChunkPoppedOrdered
+		return err
 	}
 	if !popped.endingFragment {
 		q.selected = true
-		q.unorderedIsSelected = false
+		q.unorderedIsSelected = isSelected
 	}
 
 	return nil
@@ -228,7 +239,9 @@ var (
 	ErrUnexpectedChunkPoppedOrdered   = errors.New("unexpected chunk popped (ordered)")
 	ErrUnexpectedChunkPoppedStream    = errors.New("unexpected chunk popped (stream)")
 	ErrUnexpectedQState               = errors.New("unexpected q state (should've been selected)")
-	ErrPendingQueueModeChangeNonEmpty = errors.New("cannot change pending queue interleaving mode while queue is not empty")
+	ErrPendingQueueModeChangeNonEmpty = errors.New(
+		"cannot change pending queue interleaving mode while queue is not empty",
+	)
 
 	// Deprecated: use ErrUnexpectedChunkPoppedUnordered.
 	ErrUnexpectedChuckPoppedUnordered = ErrUnexpectedChunkPoppedUnordered
