@@ -983,6 +983,7 @@ func (a *Association) readLoop() {
 		for _, s := range a.streams {
 			a.unregisterStream(s, closeErr)
 		}
+		a.unblockPendingWrites()
 		a.lock.Unlock()
 		close(a.acceptCh)
 		close(a.readLoopCloseCh)
@@ -1095,6 +1096,18 @@ func (a *Association) notifyBlockWritable() {
 	case a.writeNotify <- struct{}{}:
 	default:
 	}
+}
+
+// unblockPendingWrites wakes all goroutines waiting on the blocked write.
+// Note: the caller should hold the association lock.
+func (a *Association) unblockPendingWrites() {
+	if !a.blockWrite {
+		return
+	}
+
+	a.writePending = false
+	close(a.writeNotify)
+	a.writeNotify = make(chan struct{}, 1)
 }
 
 // unregisterStream un-registers a stream from the association
@@ -3137,12 +3150,21 @@ func (a *Association) sendPayloadData(ctx context.Context, chunks []*chunkPayloa
 
 	if a.blockWrite {
 		for a.writePending {
+			writeNotify := a.writeNotify
 			a.lock.Unlock()
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-a.writeNotify:
-				a.lock.Lock()
+			case <-writeNotify:
+			}
+			a.lock.Lock()
+
+			state = a.getState()
+			if state != established {
+				a.lock.Unlock()
+
+				return fmt.Errorf("%w: state=%s", ErrPayloadDataStateNotExist,
+					getAssociationStateString(state))
 			}
 		}
 		a.writePending = true

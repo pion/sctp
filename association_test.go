@@ -4133,6 +4133,62 @@ func TestAssociation_BlockWrite(t *testing.T) {
 	}
 }
 
+func TestAssociation_BlockWriteUnblocksOnClose(t *testing.T) {
+	checkGoroutineLeaks(t)
+
+	conn1, conn2 := createUDPConnPair()
+	a1, a2, err := createAssociationPairWithConfig(conn1, conn2, Config{BlockWrite: true, MaxReceiveBufferSize: 4000})
+	require.NoError(t, err)
+
+	defer noErrorClose(t, a2.Close)
+
+	s1, err := a1.OpenStream(1, PayloadTypeWebRTCBinary)
+	require.NoError(t, err)
+	s3, err := a1.OpenStream(3, PayloadTypeWebRTCBinary)
+	require.NoError(t, err)
+
+	_, err = s1.WriteSCTP([]byte("hii"), PayloadTypeWebRTCBinary)
+	require.NoError(t, err)
+
+	s2, err := a2.AcceptStream()
+	require.NoError(t, err)
+
+	data := make([]byte, 4000)
+	n, err := s2.Read(data)
+	require.NoError(t, err)
+	require.Equal(t, "hii", string(data[:n]))
+
+	_, err = s1.WriteSCTP(data, PayloadTypeWebRTCBinary)
+	require.NoError(t, err)
+	_, err = s1.WriteSCTP(data, PayloadTypeWebRTCBinary)
+	require.NoError(t, err)
+
+	writeDone := make(chan error, 2)
+	for _, s := range []*Stream{s1, s3} {
+		go func(stream *Stream) {
+			_, writeErr := stream.WriteSCTP(data, PayloadTypeWebRTCBinary)
+			writeDone <- writeErr
+		}(s)
+	}
+
+	select {
+	case writeErr := <-writeDone:
+		require.FailNow(t, "WriteSCTP returned before close", "err=%v", writeErr)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	require.NoError(t, a1.Close())
+
+	for range 2 {
+		select {
+		case writeErr := <-writeDone:
+			require.ErrorIs(t, writeErr, ErrPayloadDataStateNotExist)
+		case <-time.After(500 * time.Millisecond):
+			require.FailNow(t, "blocked WriteSCTP did not return after association close")
+		}
+	}
+}
+
 func TestConfigMTU(t *testing.T) {
 	const expectedMTU = uint32(8765)
 	conn1, conn2 := createUDPConnPair()
