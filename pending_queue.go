@@ -5,6 +5,7 @@ package sctp
 
 import (
 	"errors"
+	"math"
 )
 
 // pendingBaseQueue
@@ -158,33 +159,62 @@ func (q *messagePendingQueuePolicy) popNewSelection(chunkPayload *chunkPayloadDa
 	return nil
 }
 
-type interleavingPendingQueuePolicy struct {
+type interleavingStreamSchedulerPolicy struct {
+	scheduler InterleavingStreamScheduler
+}
+
+func (q *interleavingStreamSchedulerPolicy) push(chunk *chunkPayloadData) {
+	q.scheduler.Push(chunk)
+}
+
+func (q *interleavingStreamSchedulerPolicy) peek() *chunkPayloadData {
+	chunk := q.scheduler.Peek()
+	if chunk == nil {
+		return nil
+	}
+
+	return chunk.chunkPayloadData()
+}
+
+func (q *interleavingStreamSchedulerPolicy) pop(chunk *chunkPayloadData) error {
+	return q.scheduler.Pop(chunk)
+}
+
+type roundRobinPendingQueuePolicy struct {
 	streamQueues   map[uint16]*pendingBaseQueue
 	streamOrder    []uint16
 	streamSelected bool
 	selectedStream uint16
 }
 
-func newInterleavingPendingQueuePolicy() *interleavingPendingQueuePolicy {
-	return &interleavingPendingQueuePolicy{
-		streamQueues: map[uint16]*pendingBaseQueue{},
-	}
+func (q *roundRobinPendingQueuePolicy) Reset() {
+	q.streamQueues = map[uint16]*pendingBaseQueue{}
+	q.streamOrder = nil
+	q.streamSelected = false
+	q.selectedStream = 0
 }
 
-func (q *interleavingPendingQueuePolicy) push(chunk *chunkPayloadData) {
-	streamQueue := q.streamQueues[chunk.streamIdentifier]
+func newRoundRobinPendingQueuePolicy() *roundRobinPendingQueuePolicy {
+	q := &roundRobinPendingQueuePolicy{}
+	q.Reset()
+
+	return q
+}
+
+func (q *roundRobinPendingQueuePolicy) Push(chunk StreamSchedulerChunk) {
+	streamQueue := q.streamQueues[chunk.StreamIdentifier()]
 	wasEmpty := streamQueue == nil || streamQueue.size() == 0
 	if streamQueue == nil {
 		streamQueue = newPendingBaseQueue()
-		q.streamQueues[chunk.streamIdentifier] = streamQueue
+		q.streamQueues[chunk.StreamIdentifier()] = streamQueue
 	}
-	streamQueue.push(chunk)
+	streamQueue.push(chunk.chunkPayloadData())
 	if wasEmpty {
-		q.streamOrder = append(q.streamOrder, chunk.streamIdentifier)
+		q.streamOrder = append(q.streamOrder, chunk.StreamIdentifier())
 	}
 }
 
-func (q *interleavingPendingQueuePolicy) peek() *chunkPayloadData {
+func (q *roundRobinPendingQueuePolicy) Peek() StreamSchedulerChunk {
 	if q.streamSelected {
 		return q.streamQueues[q.selectedStream].get(0)
 	}
@@ -197,7 +227,7 @@ func (q *interleavingPendingQueuePolicy) peek() *chunkPayloadData {
 	return q.streamQueues[q.selectedStream].get(0)
 }
 
-func (q *interleavingPendingQueuePolicy) pop(chunkPayload *chunkPayloadData) error {
+func (q *roundRobinPendingQueuePolicy) Pop(chunkPayload StreamSchedulerChunk) error {
 	if !q.streamSelected {
 		return ErrUnexpectedQState
 	}
@@ -208,7 +238,7 @@ func (q *interleavingPendingQueuePolicy) pop(chunkPayload *chunkPayloadData) err
 	}
 
 	popped := streamQueue.pop()
-	if popped != chunkPayload {
+	if popped != chunkPayload.chunkPayloadData() {
 		return ErrUnexpectedChunkPoppedStream
 	}
 
@@ -226,11 +256,127 @@ func (q *interleavingPendingQueuePolicy) pop(chunkPayload *chunkPayloadData) err
 	return nil
 }
 
+type weightedFairQueueingPendingQueuePolicy struct {
+	streamQueues   map[uint16]*pendingBaseQueue
+	streamFinish   map[uint16]float64
+	chunkFinish    map[*chunkPayloadData]float64
+	weights        map[uint16]uint16
+	virtualTime    float64
+	streamSelected bool
+	selectedStream uint16
+}
+
+func (q *weightedFairQueueingPendingQueuePolicy) Reset() {
+	q.streamQueues = map[uint16]*pendingBaseQueue{}
+	q.streamFinish = map[uint16]float64{}
+	q.chunkFinish = map[*chunkPayloadData]float64{}
+	q.virtualTime = 0
+	q.streamSelected = false
+	q.selectedStream = 0
+}
+
+func newWeightedFairQueueingPendingQueuePolicy(weights map[uint16]uint16) *weightedFairQueueingPendingQueuePolicy {
+	copiedWeights := map[uint16]uint16{}
+	for streamID, weight := range weights {
+		if weight != 0 {
+			copiedWeights[streamID] = weight
+		}
+	}
+
+	q := &weightedFairQueueingPendingQueuePolicy{
+		weights: copiedWeights,
+	}
+	q.Reset()
+
+	return q
+}
+
+func (q *weightedFairQueueingPendingQueuePolicy) Push(chunk StreamSchedulerChunk) {
+	streamID := chunk.StreamIdentifier()
+	streamQueue := q.streamQueues[streamID]
+	if streamQueue == nil {
+		streamQueue = newPendingBaseQueue()
+		q.streamQueues[streamID] = streamQueue
+	}
+
+	weight := float64(q.weights[streamID])
+	if weight == 0 {
+		weight = 1
+	}
+
+	start := math.Max(q.virtualTime, q.streamFinish[streamID])
+	finish := start + (float64(chunk.UserDataLen()) / weight)
+	q.streamFinish[streamID] = finish
+	q.chunkFinish[chunk.chunkPayloadData()] = finish
+	streamQueue.push(chunk.chunkPayloadData())
+}
+
+func (q *weightedFairQueueingPendingQueuePolicy) Peek() StreamSchedulerChunk {
+	if q.streamSelected {
+		return q.streamQueues[q.selectedStream].get(0)
+	}
+
+	var (
+		selectedChunk  *chunkPayloadData
+		selectedStream uint16
+		selectedFinish = math.Inf(1)
+	)
+
+	for streamID, streamQueue := range q.streamQueues {
+		chunk := streamQueue.get(0)
+		if chunk == nil {
+			continue
+		}
+		finish := q.chunkFinish[chunk]
+		if finish < selectedFinish || (finish == selectedFinish && streamID < selectedStream) {
+			selectedChunk = chunk
+			selectedStream = streamID
+			selectedFinish = finish
+		}
+	}
+	if selectedChunk == nil {
+		return nil
+	}
+
+	q.streamSelected = true
+	q.selectedStream = selectedStream
+
+	return selectedChunk
+}
+
+func (q *weightedFairQueueingPendingQueuePolicy) Pop(chunkPayload StreamSchedulerChunk) error {
+	if !q.streamSelected {
+		return ErrUnexpectedQState
+	}
+
+	streamQueue := q.streamQueues[q.selectedStream]
+	if streamQueue == nil {
+		return ErrUnexpectedQState
+	}
+
+	popped := streamQueue.pop()
+	if popped != chunkPayload.chunkPayloadData() {
+		return ErrUnexpectedChunkPoppedStream
+	}
+
+	q.virtualTime = math.Max(q.virtualTime, q.chunkFinish[chunkPayload.chunkPayloadData()])
+	delete(q.chunkFinish, chunkPayload.chunkPayloadData())
+	if streamQueue.size() == 0 {
+		delete(q.streamQueues, q.selectedStream)
+	}
+
+	q.streamSelected = false
+	q.selectedStream = 0
+
+	return nil
+}
+
 type pendingQueue struct {
-	nBytes       int
-	nChunks      int
-	interleaving bool
-	policy       pendingQueuePolicy
+	nBytes             int
+	nChunks            int
+	interleaving       bool
+	newStreamScheduler InterleavingStreamSchedulerFactory
+	policy             pendingQueuePolicy
 }
 
 // Pending queue errors.
@@ -249,9 +395,10 @@ var (
 	ErrUnexpectedChuckPoppedOrdered = ErrUnexpectedChunkPoppedOrdered
 )
 
-func newPendingQueue() *pendingQueue {
+func newPendingQueue(newStreamScheduler InterleavingStreamSchedulerFactory) *pendingQueue {
 	return &pendingQueue{
-		policy: newMessagePendingQueuePolicy(),
+		newStreamScheduler: newStreamScheduler,
+		policy:             newMessagePendingQueuePolicy(),
 	}
 }
 
@@ -265,8 +412,19 @@ func (q *pendingQueue) setInterleaving(enabled bool) error {
 
 	q.interleaving = enabled
 	if enabled {
-		q.policy = newInterleavingPendingQueuePolicy()
+		if q.newStreamScheduler == nil {
+			return errNilStreamScheduler
+		}
+		streamScheduler := q.newStreamScheduler()
+		if streamScheduler == nil {
+			return errNilStreamScheduler
+		}
+		streamScheduler.Reset()
+		q.policy = &interleavingStreamSchedulerPolicy{scheduler: streamScheduler}
 	} else {
+		if schedulerPolicy, ok := q.policy.(*interleavingStreamSchedulerPolicy); ok {
+			schedulerPolicy.scheduler.Reset()
+		}
 		q.policy = newMessagePendingQueuePolicy()
 	}
 

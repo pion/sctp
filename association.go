@@ -362,6 +362,9 @@ type Config struct {
 	// RACK config options
 	rack rackSettings
 
+	// User message interleaving config options
+	interleaving *interleavingSettings
+
 	// SNAP/sctp-init
 	snapConfig *snapConfig
 
@@ -479,6 +482,12 @@ func (c *Config) applyDefaults() {
 	if !c.enableInterleavingSet {
 		c.enableInterleaving = true
 	}
+	if c.interleaving == nil {
+		c.interleaving = &interleavingSettings{}
+	}
+	if c.interleaving.newStreamScheduler == nil {
+		setWeightedFairQueueingStreamScheduler(c.interleaving)
+	}
 }
 
 func createServerAssociation(opts ...ServerOption) (*Association, error) {
@@ -536,6 +545,7 @@ func (c Config) applyServer(cfg *Config) error { //nolint:dupl,cyclop
 	}
 
 	cfg.rack = c.rack
+	cfg.interleaving = cloneInterleavingSettings(c.interleaving)
 	if c.enableInterleavingSet {
 		cfg.enableInterleaving = c.enableInterleaving
 		cfg.enableInterleavingSet = true
@@ -648,6 +658,7 @@ func (c Config) applyClient(cfg *Config) error { //nolint:dupl,cyclop
 	}
 
 	cfg.rack = c.rack
+	cfg.interleaving = cloneInterleavingSettings(c.interleaving)
 	if c.enableInterleavingSet {
 		cfg.enableInterleaving = c.enableInterleaving
 		cfg.enableInterleavingSet = true
@@ -703,6 +714,11 @@ func createAssociationFromConfigWithTsn(cfg *Config, tsn uint32) *Association {
 	}
 
 	rtoMax := cfg.RTOMax
+	interleaving := cfg.interleaving
+	if interleaving == nil {
+		interleaving = &interleavingSettings{}
+		setWeightedFairQueueingStreamScheduler(interleaving)
+	}
 
 	assoc := &Association{
 		netConn:              cfg.NetConn,
@@ -717,7 +733,7 @@ func createAssociationFromConfigWithTsn(cfg *Config, tsn uint32) *Association {
 
 		payloadQueue:            newReceivePayloadQueue(getMaxTSNOffset(maxReceiveBufferSize)),
 		inflightQueue:           newPayloadQueue(),
-		pendingQueue:            newPendingQueue(),
+		pendingQueue:            newPendingQueue(interleaving.newStreamScheduler),
 		controlQueue:            newControlQueue(),
 		mtu:                     mtu,
 		maxPayloadSize:          mtu - (commonHeaderSize + dataChunkHeaderSize),

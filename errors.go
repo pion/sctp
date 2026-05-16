@@ -36,4 +36,10 @@ var (
 
 	// errInvalidSnapToken indicates a SNAP token that is not parseable.
 	errInvalidSnapToken = errors.New("SNAP token is invalid")
+
+	// errNilStreamScheduler indicates that a nil stream scheduler factory was configured.
+	errNilStreamScheduler = errors.New("stream scheduler must not be nil")
+
+	// errInvalidStreamSchedulerWeight indicates a stream scheduler weight was set to zero.
+	errInvalidStreamSchedulerWeight = errors.New("stream scheduler weight must be > 0")
 )

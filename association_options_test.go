@@ -32,6 +32,10 @@ func TestAssociationOptions_ApplyBothSides(t *testing.T) {
 	assert.Equal(t, "x", cCfg.Name)
 }
 
+func TestConfigComparable(t *testing.T) {
+	_ = map[Config]struct{}{}
+}
+
 func TestAssociationOptions_Interleaving(t *testing.T) {
 	ca, cb := udpPiper(t)
 	defer func() {
@@ -92,6 +96,20 @@ func TestAssociationOptions_Validation(t *testing.T) {
 		assert.ErrorIs(t, err, errInvalidSnapToken)
 		err = WithSNAP([]byte{}, []byte{}).applyServer(&cfg)
 		assert.ErrorIs(t, err, errInvalidSnapToken)
+	})
+
+	t.Run("nil stream scheduler", func(t *testing.T) {
+		var cfg Config
+		err := WithInterleavingOptions(WithInterleavingStreamSchedulerFactory(nil)).applyServer(&cfg)
+		assert.ErrorIs(t, err, errNilStreamScheduler)
+	})
+
+	t.Run("invalid stream scheduler weight", func(t *testing.T) {
+		var cfg Config
+		err := WithInterleavingOptions(
+			WithInterleavingWeightedFairQueueingWeight(1, 0),
+		).applyServer(&cfg)
+		assert.ErrorIs(t, err, errInvalidStreamSchedulerWeight)
 	})
 }
 

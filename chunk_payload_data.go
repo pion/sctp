@@ -84,6 +84,22 @@ type chunkPayloadData struct {
 	rackInList bool
 }
 
+func (p *chunkPayloadData) StreamIdentifier() uint16 {
+	return p.streamIdentifier
+}
+
+func (p *chunkPayloadData) UserDataLen() int {
+	return len(p.userData)
+}
+
+func (p *chunkPayloadData) IsStreamReset() bool {
+	return p.userData == nil
+}
+
+func (p *chunkPayloadData) chunkPayloadData() *chunkPayloadData {
+	return p
+}
+
 const (
 	payloadDataEndingFragmentBitmask   = 1
 	payloadDataBeginingFragmentBitmask = 2
