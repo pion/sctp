@@ -3082,6 +3082,8 @@ func (a *Association) sendResetRequest(streamIdentifier uint16) error {
 }
 
 // The caller should hold the lock.
+//
+//nolint:cyclop
 func (a *Association) handleReconfigParam(raw param) (*packet, error) {
 	switch par := raw.(type) {
 	case *paramOutgoingResetRequest:
@@ -3122,6 +3124,9 @@ func (a *Association) handleReconfigParam(raw param) (*packet, error) {
 
 			return nil, nil //nolint:nilnil
 		}
+		if par.result == reconfigResultSuccessPerformed {
+			a.resetOutgoingStreamSequenceNumbers(par.reconfigResponseSequenceNumber)
+		}
 		delete(a.reconfigs, par.reconfigResponseSequenceNumber)
 		if len(a.reconfigs) == 0 {
 			a.tReconfig.stop()
@@ -3130,6 +3135,23 @@ func (a *Association) handleReconfigParam(raw param) (*packet, error) {
 		return nil, nil //nolint:nilnil
 	default:
 		return nil, fmt.Errorf("%w: %t", ErrParamterType, par)
+	}
+}
+
+// The caller should hold the lock.
+func (a *Association) resetOutgoingStreamSequenceNumbers(reconfigRequestSequenceNumber uint32) {
+	reconfig := a.reconfigs[reconfigRequestSequenceNumber]
+	if reconfig == nil {
+		return
+	}
+	resetRequest, ok := reconfig.paramA.(*paramOutgoingResetRequest)
+	if !ok {
+		return
+	}
+	for _, id := range resetRequest.streamIdentifiers {
+		if s, ok := a.streams[id]; ok {
+			s.resetOutgoingStreamSequenceNumbers()
+		}
 	}
 }
 

@@ -509,6 +509,32 @@ func capturePayloadChunkTypes(br *test.Bridge, fromID int) <-chan chunkType {
 	return chunkTypes
 }
 
+func captureChunkTypes(br *test.Bridge, fromID int) <-chan chunkType {
+	chunkTypes := make(chan chunkType, 16)
+	br.Filter(fromID, func(raw []byte) bool {
+		p := &packet{}
+		if err := p.unmarshal(true, raw); err != nil {
+			return true
+		}
+		for _, c := range p.chunks {
+			switch typed := c.(type) {
+			case *chunkPayloadData:
+				chunkTypes <- typed.typ
+			case *chunkForwardTSN:
+				chunkTypes <- ctForwardTSN
+			case *chunkIForwardTSN:
+				chunkTypes <- ctIForwardTSN
+			case *chunkSelectiveAck:
+				chunkTypes <- ctSack
+			}
+		}
+
+		return true
+	})
+
+	return chunkTypes
+}
+
 func requireNextPayloadChunkType(t *testing.T, chunkTypes <-chan chunkType, expected chunkType) {
 	t.Helper()
 
@@ -517,6 +543,22 @@ func requireNextPayloadChunkType(t *testing.T, chunkTypes <-chan chunkType, expe
 		require.Equal(t, expected, actual)
 	case <-time.After(500 * time.Millisecond):
 		require.Fail(t, "timed out waiting for payload chunk")
+	}
+}
+
+func requireEventuallyChunkType(t *testing.T, chunkTypes <-chan chunkType, expected chunkType) {
+	t.Helper()
+
+	timeout := time.After(time.Second)
+	for {
+		select {
+		case actual := <-chunkTypes:
+			if actual == expected {
+				return
+			}
+		case <-timeout:
+			require.Failf(t, "timed out waiting for chunk type", "expected %s", expected)
+		}
 	}
 }
 
@@ -550,11 +592,11 @@ func captureProtocolViolationAborts(br *test.Bridge, fromID int) <-chan string {
 	return reasons
 }
 
-func marshalPayloadPacketFromAssociation(t *testing.T, a *Association, iData bool) []byte {
+func marshalPayloadPacketFromAssociation(t *testing.T, assoc *Association, iData bool) []byte {
 	t.Helper()
 
 	payload := &chunkPayloadData{
-		tsn:                  a.myNextTSN,
+		tsn:                  assoc.myNextTSN,
 		streamIdentifier:     1,
 		streamSequenceNumber: 0,
 		messageIdentifier:    0,
@@ -565,10 +607,26 @@ func marshalPayloadPacketFromAssociation(t *testing.T, a *Association, iData boo
 		iData:                iData,
 	}
 	p := &packet{
+		sourcePort:      assoc.sourcePort,
+		destinationPort: assoc.destinationPort,
+		verificationTag: assoc.peerVerificationTag,
+		chunks:          []chunk{payload},
+	}
+
+	raw, err := assoc.marshalPacket(p)
+	require.NoError(t, err)
+
+	return raw
+}
+
+func marshalChunkPacketFromAssociation(t *testing.T, a *Association, c chunk) []byte {
+	t.Helper()
+
+	p := &packet{
 		sourcePort:      a.sourcePort,
 		destinationPort: a.destinationPort,
 		verificationTag: a.peerVerificationTag,
-		chunks:          []chunk{payload},
+		chunks:          []chunk{c},
 	}
 
 	raw, err := a.marshalPacket(p)
@@ -580,7 +638,7 @@ func marshalPayloadPacketFromAssociation(t *testing.T, a *Association, iData boo
 func requireProtocolViolationAbort(
 	t *testing.T,
 	br *test.Bridge,
-	a *Association,
+	assoc *Association,
 	reasons <-chan string,
 	expectedReason string,
 ) {
@@ -597,7 +655,7 @@ func requireProtocolViolationAbort(
 			require.Equal(t, expectedReason, reason)
 
 			return
-		case <-a.abortSentCh:
+		case <-assoc.abortSentCh:
 			require.Fail(t, "abort was sent without captured protocol violation reason")
 
 			return
@@ -608,6 +666,71 @@ func requireProtocolViolationAbort(
 
 			return
 		}
+	}
+}
+
+func TestAssociationPRForwardTSNChunkTypeMatchesInterleaving(t *testing.T) {
+	tests := []struct {
+		name                string
+		enableInterleaving  bool
+		expectedForwardType chunkType
+	}{
+		{
+			name:                "DATA uses FORWARD-TSN",
+			enableInterleaving:  false,
+			expectedForwardType: ctForwardTSN,
+		},
+		{
+			name:                "I-DATA uses I-FORWARD-TSN",
+			enableInterleaving:  true,
+			expectedForwardType: ctIForwardTSN,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			lim := test.TimeOut(time.Second * 10)
+			defer lim.Stop()
+
+			const si uint16 = 1
+			br := test.NewBridge()
+			a0, a1, err := createNewAssociationPairWithInterleaving(
+				br,
+				ackModeNoDelay,
+				0,
+				tt.enableInterleaving,
+				tt.enableInterleaving,
+			)
+			require.NoError(t, err, "failed to create associations")
+			defer closeAssociationPair(br, a0, a1)
+
+			s0, s1, err := establishSessionPair(br, a0, a1, si)
+			require.NoError(t, err, "failed to establish session pair")
+			s0.SetReliabilityParams(false, ReliabilityTypeRexmit, 0)
+
+			chunkTypes := captureChunkTypes(br, 0)
+			br.DropNextNWrites(0, 1)
+
+			sbuf := make([]byte, 1000)
+			binary.BigEndian.PutUint32(sbuf, uint32(0))
+			n, err := s0.WriteSCTP(sbuf, PayloadTypeWebRTCBinary)
+			require.NoError(t, err)
+			require.Equal(t, len(sbuf), n, "unexpected length of written data")
+
+			binary.BigEndian.PutUint32(sbuf, uint32(1))
+			n, err = s0.WriteSCTP(sbuf, PayloadTypeWebRTCBinary)
+			require.NoError(t, err)
+			require.Equal(t, len(sbuf), n, "unexpected length of written data")
+
+			flushBuffers(br, a0, a1)
+			requireEventuallyChunkType(t, chunkTypes, tt.expectedForwardType)
+
+			buf := make([]byte, 2000)
+			n, ppi, err := s1.ReadSCTP(buf)
+			require.NoError(t, err, "ReadSCTP failed")
+			require.Equal(t, PayloadTypeWebRTCBinary, ppi)
+			require.Equal(t, uint32(1), binary.BigEndian.Uint32(buf[:n]), "unexpected received data")
+		})
 	}
 }
 
@@ -734,6 +857,62 @@ func TestAssociationInterleavingProtocolViolationWrongPayloadChunkType(t *testin
 
 			reasons := captureProtocolViolationAborts(br, 1)
 			require.True(t, br.Push(marshalPayloadPacketFromAssociation(t, a0, tt.sendIData), 0))
+			requireProtocolViolationAbort(t, br, a1, reasons, tt.expectedAbortReason)
+		})
+	}
+}
+
+func TestAssociationInterleavingProtocolViolationWrongForwardTSNChunkType(t *testing.T) {
+	tests := []struct {
+		name                string
+		clientInterleaving  bool
+		serverInterleaving  bool
+		forwardTSNChunk     chunk
+		expectedAbortReason string
+	}{
+		{
+			name:               "FORWARD-TSN after interleaving negotiated",
+			clientInterleaving: true,
+			serverInterleaving: true,
+			forwardTSNChunk: &chunkForwardTSN{
+				newCumulativeTSN: 1,
+				streams:          []chunkForwardTSNStream{{identifier: 1, sequence: 0}},
+			},
+			expectedAbortReason: "received FORWARD-TSN with interleaving enabled",
+		},
+		{
+			name:               "I-FORWARD-TSN without interleaving negotiated",
+			clientInterleaving: false,
+			serverInterleaving: false,
+			forwardTSNChunk: &chunkIForwardTSN{
+				newCumulativeTSN: 1,
+				streams: []chunkIForwardTSNStream{{
+					identifier:        1,
+					messageIdentifier: 0,
+				}},
+			},
+			expectedAbortReason: "received I-FORWARD-TSN without support",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			lim := test.TimeOut(time.Second * 10)
+			defer lim.Stop()
+
+			br := test.NewBridge()
+			a0, a1, err := createNewAssociationPairWithInterleaving(
+				br,
+				ackModeNoDelay,
+				0,
+				tt.clientInterleaving,
+				tt.serverInterleaving,
+			)
+			require.NoError(t, err, "failed to create associations")
+			defer closeAssociationPair(br, a0, a1)
+
+			reasons := captureProtocolViolationAborts(br, 1)
+			require.True(t, br.Push(marshalChunkPacketFromAssociation(t, a0, tt.forwardTSNChunk), 0))
 			requireProtocolViolationAbort(t, br, a1, reasons, tt.expectedAbortReason)
 		})
 	}
@@ -3057,6 +3236,109 @@ func TestAssocReset(t *testing.T) { //nolint:cyclop
 		time.Sleep(2 * time.Second)
 
 		closeAssociationPair(br, a0, a1)
+	})
+}
+
+func TestAssocResetResetsInterleavingCounters(t *testing.T) {
+	t.Run("outbound reset response resets SSN and ordered and unordered MIDs", func(t *testing.T) {
+		lim := test.TimeOut(time.Second * 10)
+		defer lim.Stop()
+
+		const si uint16 = 1
+		br := test.NewBridge()
+		a0, a1, err := createNewAssociationPairWithInterleaving(br, ackModeNoDelay, 0, true, true)
+		require.NoError(t, err, "failed to create associations")
+		defer closeAssociationPair(br, a0, a1)
+
+		s0, _, err := establishSessionPair(br, a0, a1, si)
+		require.NoError(t, err, "failed to establish session pair")
+
+		s0.SetReliabilityParams(false, ReliabilityTypeReliable, 0)
+		n, err := s0.WriteSCTP([]byte("ordered"), PayloadTypeWebRTCBinary)
+		require.NoError(t, err)
+		require.Equal(t, len("ordered"), n)
+
+		s0.SetReliabilityParams(true, ReliabilityTypeReliable, 0)
+		n, err = s0.WriteSCTP([]byte("unordered"), PayloadTypeWebRTCBinary)
+		require.NoError(t, err)
+		require.Equal(t, len("unordered"), n)
+		flushBuffers(br, a0, a1)
+
+		s0.lock.Lock()
+		s0.sequenceNumber = 9
+		require.Greater(t, s0.nextOrderedMID, uint32(0), "ordered MID should have advanced before reset")
+		require.Greater(t, s0.nextUnorderedMID, uint32(0), "unordered MID should have advanced before reset")
+		s0.lock.Unlock()
+
+		require.NoError(t, s0.Close())
+		for range 100 {
+			br.Process()
+
+			a0.lock.RLock()
+			pendingReconfigs := len(a0.reconfigs)
+			a0.lock.RUnlock()
+			if pendingReconfigs == 0 {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+
+		a0.lock.RLock()
+		pendingReconfigs := len(a0.reconfigs)
+		a0.lock.RUnlock()
+		require.Zero(t, pendingReconfigs, "reset response should clear pending reconfig")
+
+		s0.lock.RLock()
+		assert.Equal(t, uint16(0), s0.sequenceNumber, "outbound SSN should reset")
+		assert.Equal(t, uint32(0), s0.nextOrderedMID, "ordered MID should reset")
+		assert.Equal(t, uint32(0), s0.nextUnorderedMID, "unordered MID should reset")
+		s0.lock.RUnlock()
+	})
+
+	t.Run("inbound reset removes stream so recreated stream starts from zero", func(t *testing.T) {
+		const si uint16 = 1
+		assoc := &Association{
+			payloadQueue:        newReceivePayloadQueue(64),
+			streams:             map[uint16]*Stream{},
+			reconfigRequests:    map[uint32]*paramOutgoingResetRequest{},
+			log:                 logging.NewDefaultLoggerFactory().NewLogger("sctp-test"),
+			sourcePort:          5000,
+			destinationPort:     5000,
+			peerVerificationTag: 1,
+		}
+		stream := assoc.createStream(si, false)
+		require.NotNil(t, stream)
+
+		stream.reassemblyQueue.nextSSN = 7
+		stream.reassemblyQueue.nextMID = 11
+		stream.sequenceNumber = 13
+		stream.nextOrderedMID = 17
+		stream.nextUnorderedMID = 19
+
+		resetRequest := &paramOutgoingResetRequest{
+			reconfigRequestSequenceNumber: 1,
+			senderLastTSN:                 0,
+			streamIdentifiers:             []uint16{si},
+		}
+		assoc.reconfigRequests[resetRequest.reconfigRequestSequenceNumber] = resetRequest
+
+		assoc.lock.Lock()
+		resp := assoc.resetStreamsIfAny(resetRequest)
+		assoc.lock.Unlock()
+		require.NotNil(t, resp)
+		require.NotContains(t, assoc.streams, si, "inbound reset should remove the visible stream")
+
+		stream.lock.RLock()
+		assert.Equal(t, io.EOF, stream.readErr, "inbound reset should close reads on the old stream")
+		stream.lock.RUnlock()
+
+		recreated := assoc.getOrCreateStream(si, false, PayloadTypeWebRTCBinary)
+		require.NotNil(t, recreated)
+		assert.Equal(t, uint16(0), recreated.reassemblyQueue.nextSSN, "recreated inbound SSN should start at zero")
+		assert.Equal(t, uint32(0), recreated.reassemblyQueue.nextMID, "recreated inbound MID should start at zero")
+		assert.Equal(t, uint16(0), recreated.sequenceNumber, "recreated outbound SSN should start at zero")
+		assert.Equal(t, uint32(0), recreated.nextOrderedMID, "recreated ordered MID should start at zero")
+		assert.Equal(t, uint32(0), recreated.nextUnorderedMID, "recreated unordered MID should start at zero")
 	})
 }
 

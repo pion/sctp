@@ -567,6 +567,17 @@ func (s *Stream) onInboundStreamReset() {
 	}
 }
 
+func (s *Stream) resetOutgoingStreamSequenceNumbers() {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+
+	// RFC 8260 extends RFC 6525 stream reset, so when an outgoing stream is
+	// reset, the SSN and both ordered/unordered MID counters restart at zero.
+	s.sequenceNumber = 0
+	s.nextOrderedMID = 0
+	s.nextUnorderedMID = 0
+}
+
 // State return the stream state.
 func (s *Stream) State() StreamState {
 	s.lock.RLock()
