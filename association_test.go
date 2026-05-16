@@ -288,6 +288,17 @@ func createNewAssociationPair(
 	ackMode int,
 	recvBufSize uint32,
 ) (*Association, *Association, error) {
+	return createNewAssociationPairWithInterleaving(br, ackMode, recvBufSize, false, false)
+}
+
+//nolint:cyclop
+func createNewAssociationPairWithInterleaving(
+	br *test.Bridge,
+	ackMode int,
+	recvBufSize uint32,
+	clientInterleaving bool,
+	serverInterleaving bool,
+) (*Association, *Association, error) {
 	c0 := br.GetConn0()
 	c1 := br.GetConn1()
 
@@ -306,7 +317,7 @@ func createNewAssociationPair(
 			WithName("a0"),
 			WithNetConn(c0),
 			WithLoggerFactory(loggerFactory),
-			WithEnableInterleaving(false),
+			WithEnableInterleaving(clientInterleaving),
 		}
 		if recvBufSize != 0 {
 			opts = append(opts, WithMaxReceiveBufferSize(recvBufSize))
@@ -321,7 +332,7 @@ func createNewAssociationPair(
 			WithName("a1"),
 			WithNetConn(c1),
 			WithLoggerFactory(loggerFactory),
-			WithEnableInterleaving(false),
+			WithEnableInterleaving(serverInterleaving),
 		}
 		if recvBufSize != 0 {
 			opts = append(opts, WithMaxReceiveBufferSize(recvBufSize))
@@ -477,6 +488,255 @@ func establishSessionPair(br *test.Bridge, a0, a1 *Association, si uint16) (*Str
 	flushBuffers(br, a0, a1)
 
 	return s0, s1, nil
+}
+
+func capturePayloadChunkTypes(br *test.Bridge, fromID int) <-chan chunkType {
+	chunkTypes := make(chan chunkType, 8)
+	br.Filter(fromID, func(raw []byte) bool {
+		p := &packet{}
+		if err := p.unmarshal(true, raw); err != nil {
+			return true
+		}
+		for _, c := range p.chunks {
+			if pd, ok := c.(*chunkPayloadData); ok {
+				chunkTypes <- pd.typ
+			}
+		}
+
+		return true
+	})
+
+	return chunkTypes
+}
+
+func requireNextPayloadChunkType(t *testing.T, chunkTypes <-chan chunkType, expected chunkType) {
+	t.Helper()
+
+	select {
+	case actual := <-chunkTypes:
+		require.Equal(t, expected, actual)
+	case <-time.After(500 * time.Millisecond):
+		require.Fail(t, "timed out waiting for payload chunk")
+	}
+}
+
+func captureProtocolViolationAborts(br *test.Bridge, fromID int) <-chan string {
+	reasons := make(chan string, 4)
+	br.Filter(fromID, func(raw []byte) bool {
+		p := &packet{}
+		if err := p.unmarshal(true, raw); err != nil {
+			return true
+		}
+		for _, c := range p.chunks {
+			abort, ok := c.(*chunkAbort)
+			if !ok {
+				continue
+			}
+			for _, cause := range abort.errorCauses {
+				protocolViolation, ok := cause.(*errorCauseProtocolViolation)
+				if !ok {
+					continue
+				}
+				select {
+				case reasons <- string(protocolViolation.additionalInformation):
+				default:
+				}
+			}
+		}
+
+		return true
+	})
+
+	return reasons
+}
+
+func marshalPayloadPacketFromAssociation(t *testing.T, a *Association, iData bool) []byte {
+	t.Helper()
+
+	payload := &chunkPayloadData{
+		tsn:                  a.myNextTSN,
+		streamIdentifier:     1,
+		streamSequenceNumber: 0,
+		messageIdentifier:    0,
+		payloadType:          PayloadTypeWebRTCBinary,
+		userData:             []byte("bad"),
+		beginningFragment:    true,
+		endingFragment:       true,
+		iData:                iData,
+	}
+	p := &packet{
+		sourcePort:      a.sourcePort,
+		destinationPort: a.destinationPort,
+		verificationTag: a.peerVerificationTag,
+		chunks:          []chunk{payload},
+	}
+
+	raw, err := a.marshalPacket(p)
+	require.NoError(t, err)
+
+	return raw
+}
+
+func requireProtocolViolationAbort(
+	t *testing.T,
+	br *test.Bridge,
+	a *Association,
+	reasons <-chan string,
+	expectedReason string,
+) {
+	t.Helper()
+
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case reason := <-reasons:
+			require.Equal(t, expectedReason, reason)
+
+			return
+		case <-a.abortSentCh:
+			require.Fail(t, "abort was sent without captured protocol violation reason")
+
+			return
+		case <-ticker.C:
+			br.Tick()
+		case <-timer.C:
+			require.Fail(t, "timed out waiting for protocol violation abort")
+
+			return
+		}
+	}
+}
+
+func TestAssociationInterleavingNegotiationPayloadChunkType(t *testing.T) {
+	tests := []struct {
+		name                string
+		clientInterleaving  bool
+		serverInterleaving  bool
+		useInterleaving     bool
+		expectedPayloadType chunkType
+	}{
+		{
+			name:                "enabled enabled uses I-DATA",
+			clientInterleaving:  true,
+			serverInterleaving:  true,
+			useInterleaving:     true,
+			expectedPayloadType: ctIData,
+		},
+		{
+			name:                "enabled disabled uses DATA",
+			clientInterleaving:  true,
+			serverInterleaving:  false,
+			useInterleaving:     false,
+			expectedPayloadType: ctPayloadData,
+		},
+		{
+			name:                "disabled enabled uses DATA",
+			clientInterleaving:  false,
+			serverInterleaving:  true,
+			useInterleaving:     false,
+			expectedPayloadType: ctPayloadData,
+		},
+		{
+			name:                "disabled disabled uses DATA",
+			clientInterleaving:  false,
+			serverInterleaving:  false,
+			useInterleaving:     false,
+			expectedPayloadType: ctPayloadData,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			lim := test.TimeOut(time.Second * 10)
+			defer lim.Stop()
+
+			const si uint16 = 1
+			const msg = "ABC"
+			br := test.NewBridge()
+
+			a0, a1, err := createNewAssociationPairWithInterleaving(
+				br,
+				ackModeNoDelay,
+				0,
+				tt.clientInterleaving,
+				tt.serverInterleaving,
+			)
+			require.NoError(t, err, "failed to create associations")
+			defer closeAssociationPair(br, a0, a1)
+
+			require.Equal(t, tt.useInterleaving, a0.useInterleaving)
+			require.Equal(t, tt.useInterleaving, a1.useInterleaving)
+
+			s0, s1, err := establishSessionPair(br, a0, a1, si)
+			require.NoError(t, err, "failed to establish session pair")
+
+			chunkTypes := capturePayloadChunkTypes(br, 0)
+
+			n, err := s0.WriteSCTP([]byte(msg), PayloadTypeWebRTCBinary)
+			require.NoError(t, err)
+			require.Equal(t, len(msg), n)
+
+			flushBuffers(br, a0, a1)
+			requireNextPayloadChunkType(t, chunkTypes, tt.expectedPayloadType)
+
+			buf := make([]byte, 32)
+			n, ppi, err := s1.ReadSCTP(buf)
+			require.NoError(t, err, "ReadSCTP failed")
+			require.Equal(t, PayloadTypeWebRTCBinary, ppi)
+			require.Equal(t, msg, string(buf[:n]))
+		})
+	}
+}
+
+func TestAssociationInterleavingProtocolViolationWrongPayloadChunkType(t *testing.T) {
+	tests := []struct {
+		name                string
+		clientInterleaving  bool
+		serverInterleaving  bool
+		sendIData           bool
+		expectedAbortReason string
+	}{
+		{
+			name:                "DATA after interleaving negotiated",
+			clientInterleaving:  true,
+			serverInterleaving:  true,
+			sendIData:           false,
+			expectedAbortReason: "received DATA with interleaving negotiated",
+		},
+		{
+			name:                "I-DATA without interleaving negotiated",
+			clientInterleaving:  true,
+			serverInterleaving:  false,
+			sendIData:           true,
+			expectedAbortReason: "received I-DATA without interleaving negotiated",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			lim := test.TimeOut(time.Second * 10)
+			defer lim.Stop()
+
+			br := test.NewBridge()
+			a0, a1, err := createNewAssociationPairWithInterleaving(
+				br,
+				ackModeNoDelay,
+				0,
+				tt.clientInterleaving,
+				tt.serverInterleaving,
+			)
+			require.NoError(t, err, "failed to create associations")
+			defer closeAssociationPair(br, a0, a1)
+
+			reasons := captureProtocolViolationAborts(br, 1)
+			require.True(t, br.Push(marshalPayloadPacketFromAssociation(t, a0, tt.sendIData), 0))
+			requireProtocolViolationAbort(t, br, a1, reasons, tt.expectedAbortReason)
+		})
+	}
 }
 
 func TestAssocReliable(t *testing.T) { //nolint:maintidx
@@ -5274,6 +5534,7 @@ func TestAssociationAbortProtocolViolation(t *testing.T) {
 
 	cause, ok := assoc.willSendAbortCause.(*errorCauseProtocolViolation)
 	require.True(t, ok)
+	assert.Equal(t, protocolViolation, cause.errorCauseCode())
 	assert.Equal(t, []byte(reason), cause.additionalInformation)
 
 	select {

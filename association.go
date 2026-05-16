@@ -1761,6 +1761,7 @@ func (a *Association) abortProtocolViolation(reason string) {
 	a.log.Warnf("[%s] protocol violation: %s", a.name, reason)
 	a.willSendAbort = true
 	a.willSendAbortCause = &errorCauseProtocolViolation{
+		errorCauseHeader:      errorCauseHeader{code: protocolViolation},
 		additionalInformation: []byte(reason),
 	}
 	a.awakeWriteLoop()
