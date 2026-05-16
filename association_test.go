@@ -5654,6 +5654,119 @@ func TestTLR_GetDataPacketsToRetransmit_RespectsBurstBudget_LaterRTT(t *testing.
 	assert.True(t, consumed)
 }
 
+func TestPopPendingDataChunksToSend_UsesIDataChunkSizeForBudget(t *testing.T) {
+	assoc, peer := newTLRAssociationForTest(t)
+	defer shutdownTLRAssociationForTest(assoc, peer)
+
+	assoc.lock.Lock()
+	defer assoc.lock.Unlock()
+
+	assoc.setCWND(1_000_000)
+	assoc.setRWND(1_000_000)
+	assoc.tlrActive = true
+
+	first := &chunkPayloadData{
+		beginningFragment: true,
+		endingFragment:    true,
+		userData:          []byte{0x01},
+	}
+	second := &chunkPayloadData{
+		iData:             true,
+		beginningFragment: true,
+		endingFragment:    true,
+		userData:          make([]byte, 100),
+	}
+	assoc.pendingQueue.push(first)
+	assoc.pendingQueue.push(second)
+
+	firstBytes := first.chunkSizeInPacket()
+	oldSecondBytes := int(dataChunkHeaderSize) + len(second.userData)
+	oldSecondBytes += getPadding(oldSecondBytes)
+	budget := int64(int(commonHeaderSize)+firstBytes+oldSecondBytes) * tlrUnitsPerMTU
+	consumed := false
+
+	chunks, _ := assoc.popPendingDataChunksToSend(&budget, &consumed)
+
+	require.Len(t, chunks, 1)
+	assert.Same(t, first, chunks[0])
+	assert.Equal(t, 1, assoc.inflightQueue.size())
+	assert.Equal(t, 1, assoc.pendingQueue.size())
+}
+
+func TestGetDataPacketsToRetransmit_UsesIDataChunkSizeForBudget(t *testing.T) {
+	assoc, peer := newTLRAssociationForTest(t)
+	defer shutdownTLRAssociationForTest(assoc, peer)
+
+	assoc.lock.Lock()
+	defer assoc.lock.Unlock()
+
+	assoc.setCWND(1_000_000)
+	assoc.setRWND(1_000_000)
+	assoc.tlrActive = true
+	assoc.cumulativeTSNAckPoint = 99
+
+	first := &chunkPayloadData{
+		tsn:        100,
+		userData:   []byte{0x01},
+		nSent:      1,
+		retransmit: true,
+	}
+	second := &chunkPayloadData{
+		tsn:        101,
+		iData:      true,
+		userData:   make([]byte, 100),
+		nSent:      1,
+		retransmit: true,
+	}
+	assoc.inflightQueue.pushNoCheck(first)
+	assoc.inflightQueue.pushNoCheck(second)
+
+	firstBytes := first.chunkSizeInPacket()
+	oldSecondBytes := int(dataChunkHeaderSize) + len(second.userData)
+	oldSecondBytes += getPadding(oldSecondBytes)
+	budget := int64(int(commonHeaderSize)+firstBytes+oldSecondBytes) * tlrUnitsPerMTU
+	consumed := false
+
+	pkts := assoc.getDataPacketsToRetransmit(&budget, &consumed)
+
+	require.Len(t, pkts, 1)
+	require.Len(t, pkts[0].chunks, 1)
+	assert.Same(t, first, pkts[0].chunks[0])
+	assert.False(t, first.retransmit)
+	assert.True(t, second.retransmit)
+}
+
+func TestGatherOutboundFastRetransmissionPackets_UsesFullDataChunkSizeForBudget(t *testing.T) {
+	assoc, peer := newTLRAssociationForTest(t)
+	defer shutdownTLRAssociationForTest(assoc, peer)
+
+	assoc.lock.Lock()
+	defer assoc.lock.Unlock()
+
+	assoc.tlrActive = true
+	assoc.willRetransmitFast = true
+	assoc.cumulativeTSNAckPoint = 99
+
+	chunkPayload := &chunkPayloadData{
+		tsn:           100,
+		userData:      []byte{0x01},
+		nSent:         1,
+		missIndicator: 3,
+	}
+	assoc.inflightQueue.pushNoCheck(chunkPayload)
+
+	oldChunkBytes := payloadDataHeaderSize + len(chunkPayload.userData)
+	oldChunkBytes += getPadding(oldChunkBytes)
+	budget := int64(int(commonHeaderSize)+oldChunkBytes) * tlrUnitsPerMTU
+	consumed := true
+
+	rawPackets := assoc.gatherOutboundFastRetransmissionPackets(nil, &budget, &consumed)
+
+	assert.Empty(t, rawPackets)
+	assert.Equal(t, uint32(1), chunkPayload.nSent)
+	assert.Equal(t, uint64(0), assoc.stats.getNumFastRetrans())
+}
+
 type dummyAddr struct{}
 
 func (dummyAddr) Network() string { return "dummy" }

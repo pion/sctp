@@ -311,3 +311,9 @@ func (p *chunkPayloadData) chunkSize() int {
 
 	return chunkHeaderSize + payloadDataHeaderSize + len(p.userData)
 }
+
+func (p *chunkPayloadData) chunkSizeInPacket() int {
+	chunkSize := p.chunkSize()
+
+	return chunkSize + getPadding(chunkSize)
+}

@@ -1370,12 +1370,7 @@ func (a *Association) gatherOutboundFastRetransmissionPackets( //nolint:gocognit
 		//      of cwnd and SHOULD NOT delay retransmission for this single
 		//		packet.
 
-		// include padding for sizing. Use chunkSize() to properly handle both DATA and I-DATA chunks.
-		// chunkSize() returns chunkHeaderSize + payloadHeaderSize + len(userData)
-		// We need to subtract chunkHeaderSize to match the original dataChunkHeaderSize calculation
-		chunkSize := chunkPayload.chunkSize()
-		chunkBytes := chunkSize - int(chunkHeaderSize)
-		chunkBytes += getPadding(chunkBytes)
+		chunkBytes := chunkPayload.chunkSizeInPacket()
 
 		// fast retransmit window cap
 		if fastRetransWnd < fastRetransSize+chunkBytes {
@@ -3349,9 +3344,7 @@ func (a *Association) popPendingDataChunksToSend( //nolint:cyclop,gocognit
 				break // no more rwnd
 			}
 
-			// compute current DATA chunk size including padding.
-			chunkBytes := int(dataChunkHeaderSize) + len(chunkPayload.userData)
-			chunkBytes += getPadding(chunkBytes)
+			chunkBytes := chunkPayload.chunkSizeInPacket()
 
 			// ensure MTU bundling matches bundleDataChunksIntoPackets().
 			addBytes := chunkBytes
@@ -3394,8 +3387,7 @@ func (a *Association) popPendingDataChunksToSend( //nolint:cyclop,gocognit
 			c := a.pendingQueue.peek()
 			if c != nil && len(c.userData) > 0 {
 				// probe is a new packet: common header + chunk bytes.
-				chunkBytes := int(dataChunkHeaderSize) + len(c.userData)
-				chunkBytes += getPadding(chunkBytes)
+				chunkBytes := c.chunkSizeInPacket()
 				addBytes := int(commonHeaderSize) + chunkBytes
 
 				if addBytes <= int(a.MTU()) && a.tlrAllowSendLocked(budgetScaled, consumed, addBytes) {
@@ -3429,8 +3421,7 @@ func (a *Association) bundleDataChunksIntoPackets(chunks []*chunkPayloadData) []
 		//   single packet.  Furthermore, DATA chunks being retransmitted MAY be
 		//   bundled with new DATA chunks, as long as the resulting packet size
 		//   does not exceed the path MTU.
-		chunkSizeInPacket := chunkPayload.chunkSize()
-		chunkSizeInPacket += getPadding(chunkSizeInPacket)
+		chunkSizeInPacket := chunkPayload.chunkSizeInPacket()
 		if bytesInPacket+chunkSizeInPacket > int(a.MTU()) {
 			packets = append(packets, a.createPacket(chunksToSend))
 			chunksToSend = []chunk{}
@@ -3564,8 +3555,7 @@ func (a *Association) getDataPacketsToRetransmit(budgetScaled *int64, consumed *
 			break
 		}
 
-		chunkBytes := int(dataChunkHeaderSize) + len(chunkPayload.userData)
-		chunkBytes += getPadding(chunkBytes)
+		chunkBytes := chunkPayload.chunkSizeInPacket()
 
 		// retry as first chunk in a new packet if needed.
 		for {
