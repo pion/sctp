@@ -345,7 +345,6 @@ type Config struct {
 	NetConn            net.Conn
 	BlockWrite         bool
 	EnableZeroChecksum bool
-	EnableInterleaving bool
 	MTU                uint32
 
 	// congestion control configuration
@@ -365,6 +364,9 @@ type Config struct {
 
 	// SNAP/sctp-init
 	snapConfig *snapConfig
+
+	enableInterleaving    bool
+	enableInterleavingSet bool
 }
 
 // Server accepts a SCTP stream over a conn.
@@ -474,6 +476,9 @@ func (c *Config) applyDefaults() {
 	if c.MTU == 0 {
 		c.MTU = initialMTU
 	}
+	if !c.enableInterleavingSet {
+		c.enableInterleaving = true
+	}
 }
 
 func createServerAssociation(opts ...ServerOption) (*Association, error) {
@@ -507,7 +512,6 @@ func (c Config) applyServer(cfg *Config) error { //nolint:dupl,cyclop
 
 	cfg.BlockWrite = c.BlockWrite
 	cfg.EnableZeroChecksum = c.EnableZeroChecksum
-	cfg.EnableInterleaving = c.EnableInterleaving
 
 	if c.MTU != 0 {
 		cfg.MTU = c.MTU
@@ -532,6 +536,10 @@ func (c Config) applyServer(cfg *Config) error { //nolint:dupl,cyclop
 	}
 
 	cfg.rack = c.rack
+	if c.enableInterleavingSet {
+		cfg.enableInterleaving = c.enableInterleaving
+		cfg.enableInterleavingSet = true
+	}
 
 	return nil
 }
@@ -616,7 +624,6 @@ func (c Config) applyClient(cfg *Config) error { //nolint:dupl,cyclop
 
 	cfg.BlockWrite = c.BlockWrite
 	cfg.EnableZeroChecksum = c.EnableZeroChecksum
-	cfg.EnableInterleaving = c.EnableInterleaving
 
 	if c.MTU != 0 {
 		cfg.MTU = c.MTU
@@ -641,6 +648,10 @@ func (c Config) applyClient(cfg *Config) error { //nolint:dupl,cyclop
 	}
 
 	cfg.rack = c.rack
+	if c.enableInterleavingSet {
+		cfg.enableInterleaving = c.enableInterleaving
+		cfg.enableInterleavingSet = true
+	}
 
 	cfg.snapConfig = c.snapConfig
 
@@ -728,7 +739,7 @@ func createAssociationFromConfigWithTsn(cfg *Config, tsn uint32) *Association {
 		cumulativeTSNAckPoint:   tsn - 1,
 		advancedPeerTSNAckPoint: tsn - 1,
 		recvZeroChecksum:        cfg.EnableZeroChecksum,
-		localInterleaving:       cfg.EnableInterleaving,
+		localInterleaving:       cfg.enableInterleaving,
 		silentError:             ErrSilentlyDiscard,
 		stats:                   &associationStats{},
 		log:                     cfg.LoggerFactory.NewLogger("sctp"),
@@ -4549,7 +4560,7 @@ func GenerateOutOfBandToken(opts ...ClientOption) ([]byte, error) {
 	init.numInboundStreams = math.MaxUint16
 	init.initiateTag = generateInitiateTag()
 	init.advertisedReceiverWindowCredit = config.MaxReceiveBufferSize
-	setSupportedExtensions(&init.chunkInitCommon, config.EnableInterleaving)
+	setSupportedExtensions(&init.chunkInitCommon, config.enableInterleaving)
 
 	if config.EnableZeroChecksum {
 		init.params = append(init.params, &paramZeroChecksumAcceptable{edmid: dtlsErrorDetectionMethod})

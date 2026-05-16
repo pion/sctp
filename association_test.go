@@ -302,22 +302,32 @@ func createNewAssociationPair(
 	ch := make(chan result, 2)
 
 	go func() {
-		a, err := Client(Config{
-			Name:                 "a0",
-			NetConn:              c0,
-			MaxReceiveBufferSize: recvBufSize,
-			LoggerFactory:        loggerFactory,
-		})
+		opts := []ClientOption{
+			WithName("a0"),
+			WithNetConn(c0),
+			WithLoggerFactory(loggerFactory),
+			WithEnableInterleaving(false),
+		}
+		if recvBufSize != 0 {
+			opts = append(opts, WithMaxReceiveBufferSize(recvBufSize))
+		}
+
+		a, err := ClientWithOptions(opts...)
 		ch <- result{side: 0, a: a, err: err}
 	}()
 
 	go func() {
-		a, err := Server(Config{
-			Name:                 "a1",
-			NetConn:              c1,
-			MaxReceiveBufferSize: recvBufSize,
-			LoggerFactory:        loggerFactory,
-		})
+		opts := []ServerOption{
+			WithName("a1"),
+			WithNetConn(c1),
+			WithLoggerFactory(loggerFactory),
+			WithEnableInterleaving(false),
+		}
+		if recvBufSize != 0 {
+			opts = append(opts, WithMaxReceiveBufferSize(recvBufSize))
+		}
+
+		a, err := ServerWithOptions(opts...)
 		ch <- result{side: 1, a: a, err: err}
 	}()
 

@@ -84,6 +84,17 @@ func WithEnableZeroChecksum(b bool) AssociationOption {
 	})
 }
 
+// WithEnableInterleaving sets whether the association should negotiate message interleaving.
+// By default this is true.
+func WithEnableInterleaving(b bool) AssociationOption {
+	return sharedOption(func(c *Config) error {
+		c.enableInterleaving = b
+		c.enableInterleavingSet = true
+
+		return nil
+	})
+}
+
 // WithMTU sets the MTU size for the association.
 // By default this is 1228.
 func WithMTU(size uint32) AssociationOption {
