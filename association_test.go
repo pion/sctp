@@ -5972,3 +5972,116 @@ func TestAssociationSNAP(t *testing.T) {
 
 	closeAssociationPair(br, assocA, assocB)
 }
+
+func TestAssociationSNAPInterleavingNegotiationPayloadChunkType(t *testing.T) {
+	tests := []struct {
+		name                string
+		localInterleaving   bool
+		remoteInterleaving  bool
+		useInterleaving     bool
+		expectedPayloadType chunkType
+	}{
+		{
+			name:                "enabled enabled uses I-DATA",
+			localInterleaving:   true,
+			remoteInterleaving:  true,
+			useInterleaving:     true,
+			expectedPayloadType: ctIData,
+		},
+		{
+			name:                "enabled disabled uses DATA",
+			localInterleaving:   true,
+			remoteInterleaving:  false,
+			useInterleaving:     false,
+			expectedPayloadType: ctPayloadData,
+		},
+		{
+			name:                "disabled enabled uses DATA",
+			localInterleaving:   false,
+			remoteInterleaving:  true,
+			useInterleaving:     false,
+			expectedPayloadType: ctPayloadData,
+		},
+		{
+			name:                "disabled disabled uses DATA",
+			localInterleaving:   false,
+			remoteInterleaving:  false,
+			useInterleaving:     false,
+			expectedPayloadType: ctPayloadData,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			lim := test.TimeOut(time.Second * 10)
+			defer lim.Stop()
+
+			loggerFactory := logging.NewDefaultLoggerFactory()
+			br := test.NewBridge()
+
+			localInit, err := GenerateOutOfBandToken(WithEnableInterleaving(tt.localInterleaving))
+			require.NoError(t, err)
+
+			remoteInit, err := GenerateOutOfBandToken(WithEnableInterleaving(tt.remoteInterleaving))
+			require.NoError(t, err)
+
+			assocA, err := ClientWithOptions(
+				WithName("a"),
+				WithNetConn(br.GetConn0()),
+				WithLoggerFactory(loggerFactory),
+				WithSNAP(localInit, remoteInit))
+			require.NoError(t, err)
+			require.NotNil(t, assocA)
+
+			assocB, err := ClientWithOptions(
+				WithName("b"),
+				WithNetConn(br.GetConn1()),
+				WithLoggerFactory(loggerFactory),
+				WithSNAP(remoteInit, localInit))
+			require.NoError(t, err)
+			require.NotNil(t, assocB)
+			defer closeAssociationPair(br, assocA, assocB)
+
+			require.Equal(t, tt.useInterleaving, assocA.useInterleaving)
+			require.Equal(t, tt.useInterleaving, assocB.useInterleaving)
+
+			const si uint16 = 1
+			const msg = "SNAP interleaving"
+
+			streamA, err := assocA.OpenStream(si, PayloadTypeWebRTCBinary)
+			require.NoError(t, err)
+
+			chunkTypes := capturePayloadChunkTypes(br, 0)
+
+			n, err := streamA.WriteSCTP([]byte(msg), PayloadTypeWebRTCBinary)
+			require.NoError(t, err)
+			require.Equal(t, len(msg), n)
+
+			br.Process()
+			requireNextPayloadChunkType(t, chunkTypes, tt.expectedPayloadType)
+
+			accepted := make(chan *Stream)
+			go func() {
+				s, errAccept := assocB.AcceptStream()
+				assert.NoError(t, errAccept)
+				accepted <- s
+			}()
+
+			flushBuffers(br, assocA, assocB)
+
+			var streamB *Stream
+			select {
+			case streamB = <-accepted:
+			case <-time.After(5 * time.Second):
+				require.Fail(t, "timed out waiting for accept stream")
+			}
+
+			buf := make([]byte, 64)
+			n, ppi, err := streamB.ReadSCTP(buf)
+			require.NoError(t, err, "ReadSCTP failed")
+			require.Equal(t, len(msg), n, "unexpected length of received data")
+			require.Equal(t, PayloadTypeWebRTCBinary, ppi, "unexpected ppi")
+			require.Equal(t, msg, string(buf[:n]))
+		})
+	}
+}

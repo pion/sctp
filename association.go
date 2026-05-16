@@ -428,7 +428,9 @@ func createSNAPAssociation(config *Config) (*Association, error) {
 		return nil, err
 	}
 	assoc := createAssociationFromConfigWithTsn(config, local.initialTSN)
-	assoc.initWithOutOfBandTokens(local, remote)
+	if err = assoc.initWithOutOfBandTokens(local, remote); err != nil {
+		return nil, err
+	}
 
 	return assoc, nil
 }
@@ -805,7 +807,7 @@ func createAssociationFromConfigWithTsn(cfg *Config, tsn uint32) *Association {
 	return assoc
 }
 
-func (a *Association) initWithOutOfBandTokens(localInit *chunkInit, remoteInit *chunkInit) {
+func (a *Association) initWithOutOfBandTokens(localInit *chunkInit, remoteInit *chunkInit) error {
 	a.lock.Lock()
 	defer a.lock.Unlock()
 
@@ -819,27 +821,50 @@ func (a *Association) initWithOutOfBandTokens(localInit *chunkInit, remoteInit *
 	a.peerVerificationTag = remoteInit.initiateTag
 	a.sourcePort = defaultSCTPSrcDstPort
 	a.destinationPort = defaultSCTPSrcDstPort
-	for _, param := range remoteInit.params {
-		switch v := param.(type) { // nolint:gocritic
-		case *paramSupportedExtensions:
-			for _, t := range v.ChunkTypes {
-				if t == ctForwardTSN {
-					a.log.Debugf("[%s] use ForwardTSN (on init)", a.name)
-					a.useForwardTSN = true
-				}
-			}
-		case *paramZeroChecksumAcceptable:
-			a.sendZeroChecksum = v.edmid == dtlsErrorDetectionMethod
-		}
-	}
 
-	if !a.useForwardTSN {
-		a.log.Warnf("[%s] not using ForwardTSN (on init)", a.name)
+	localExtensions := getSupportedExtensions(localInit.params)
+	a.localInterleaving = localExtensions.interleaving
+	a.setPeerSupportedExtensions(getSupportedExtensions(remoteInit.params))
+	a.setSendZeroChecksum(remoteInit.params)
+
+	if err := a.updateInterleavingState(); err != nil {
+		return err
 	}
+	a.logNegotiatedExtensions("init")
 
 	a.ssthresh = a.RWND()
 
 	a.setState(established)
+
+	return nil
+}
+
+func (a *Association) setPeerSupportedExtensions(extensions supportedExtensions) {
+	a.peerForwardTSN = extensions.forwardTSN
+	a.peerInterleaving = extensions.interleaving
+	a.peerIForwardTSN = extensions.iForwardTSN
+}
+
+func (a *Association) setSendZeroChecksum(params []param) {
+	for _, param := range params {
+		if zeroChecksum, ok := param.(*paramZeroChecksumAcceptable); ok {
+			a.sendZeroChecksum = zeroChecksum.edmid == dtlsErrorDetectionMethod
+		}
+	}
+}
+
+func (a *Association) logNegotiatedExtensions(stage string) {
+	switch {
+	case a.useInterleaving:
+		a.log.Debugf("[%s] use interleaving (on %s)", a.name, stage)
+		if !a.useIForwardTSN {
+			a.log.Warnf("[%s] not using I-ForwardTSN (on %s)", a.name, stage)
+		}
+	case a.useForwardTSN:
+		a.log.Debugf("[%s] use ForwardTSN (on %s)", a.name, stage)
+	default:
+		a.log.Warnf("[%s] not using ForwardTSN (on %s)", a.name, stage)
+	}
 }
 
 // caller must hold a.lock.
@@ -1755,6 +1780,43 @@ func setSupportedExtensions(init *chunkInitCommon, enableInterleaving bool) {
 	})
 }
 
+type supportedExtensions struct {
+	forwardTSN   bool
+	interleaving bool
+	iForwardTSN  bool
+}
+
+func getSupportedExtensions(params []param) supportedExtensions {
+	var extensions supportedExtensions
+	for _, param := range params {
+		if supported, ok := param.(*paramSupportedExtensions); ok {
+			parsed := supportedExtensionsFromChunkTypes(supported.ChunkTypes)
+			extensions.forwardTSN = extensions.forwardTSN || parsed.forwardTSN
+			extensions.interleaving = extensions.interleaving || parsed.interleaving
+			extensions.iForwardTSN = extensions.iForwardTSN || parsed.iForwardTSN
+		}
+	}
+
+	return extensions
+}
+
+func supportedExtensionsFromChunkTypes(chunkTypes []chunkType) supportedExtensions {
+	var extensions supportedExtensions
+	for _, t := range chunkTypes {
+		switch t {
+		case ctForwardTSN:
+			extensions.forwardTSN = true
+		case ctIData:
+			extensions.interleaving = true
+		case ctIForwardTSN:
+			extensions.iForwardTSN = true
+		default:
+		}
+	}
+
+	return extensions
+}
+
 func (a *Association) updateInterleavingState() error {
 	useInterleaving := a.localInterleaving && a.peerInterleaving
 	if useInterleaving != a.useInterleaving {
@@ -1842,17 +1904,10 @@ func (a *Association) handleInit(pkt *packet, initChunk *chunkInit) ([]*packet, 
 	for _, param := range initChunk.params {
 		switch val := param.(type) { // nolint:gocritic
 		case *paramSupportedExtensions:
-			for _, t := range val.ChunkTypes {
-				switch t {
-				case ctForwardTSN:
-					a.peerForwardTSN = true
-				case ctIData:
-					a.peerInterleaving = true
-				case ctIForwardTSN:
-					a.peerIForwardTSN = true
-				default:
-				}
-			}
+			extensions := supportedExtensionsFromChunkTypes(val.ChunkTypes)
+			a.peerForwardTSN = a.peerForwardTSN || extensions.forwardTSN
+			a.peerInterleaving = a.peerInterleaving || extensions.interleaving
+			a.peerIForwardTSN = a.peerIForwardTSN || extensions.iForwardTSN
 		case *paramZeroChecksumAcceptable:
 			a.sendZeroChecksum = val.edmid == dtlsErrorDetectionMethod
 		}
@@ -1958,17 +2013,10 @@ func (a *Association) handleInitAck(pkt *packet, initChunkAck *chunkInitAck) err
 		case *paramStateCookie:
 			cookieParam = val
 		case *paramSupportedExtensions:
-			for _, t := range val.ChunkTypes {
-				switch t {
-				case ctForwardTSN:
-					a.peerForwardTSN = true
-				case ctIData:
-					a.peerInterleaving = true
-				case ctIForwardTSN:
-					a.peerIForwardTSN = true
-				default:
-				}
-			}
+			extensions := supportedExtensionsFromChunkTypes(val.ChunkTypes)
+			a.peerForwardTSN = a.peerForwardTSN || extensions.forwardTSN
+			a.peerInterleaving = a.peerInterleaving || extensions.interleaving
+			a.peerIForwardTSN = a.peerIForwardTSN || extensions.iForwardTSN
 		case *paramZeroChecksumAcceptable:
 			a.sendZeroChecksum = val.edmid == dtlsErrorDetectionMethod
 		}
