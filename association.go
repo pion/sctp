@@ -481,9 +481,10 @@ func (c *Config) applyDefaults() {
 	if c.MTU == 0 {
 		c.MTU = initialMTU
 	}
-	if !c.enableInterleavingSet {
-		c.enableInterleaving = true
-	}
+	// We should flip this to the default with Pion/webrtc@4.3
+	// if !c.enableInterleavingSet {
+	// 	c.enableInterleaving = true
+	// }
 	if c.interleaving == nil {
 		c.interleaving = &interleavingSettings{}
 	}

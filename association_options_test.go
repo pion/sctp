@@ -45,7 +45,8 @@ func TestAssociationOptions_Interleaving(t *testing.T) {
 
 	defaultCfg, err := buildClientConfig(WithNetConn(ca))
 	assert.NoError(t, err)
-	assert.True(t, defaultCfg.enableInterleaving)
+	// we should flip this to the default with Pion/webrtc@4.3
+	assert.False(t, defaultCfg.enableInterleaving)
 
 	disabledCfg, err := buildServerConfig(WithNetConn(cb), WithEnableInterleaving(false))
 	assert.NoError(t, err)
