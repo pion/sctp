@@ -280,7 +280,7 @@ func TestStreamWriteSCTPRollsBackInterleavingMIDsOnSendError(t *testing.T) {
 		{
 			name:      "ordered",
 			ppi:       PayloadTypeWebRTCDCEP,
-			unordered: true,
+			unordered: false,
 		},
 		{
 			name:      "unordered",
