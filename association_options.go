@@ -164,6 +164,15 @@ func WithCwndCAStep(cwndCAStep uint32) AssociationOption {
 	})
 }
 
+func WithNumStreams(numInbound, numOutbound uint16) AssociationOption {
+	return sharedOption(func(c *Config) error {
+		c.NumInboundStreams = numInbound
+		c.NumOutboundStreams = numOutbound
+
+		return nil
+	})
+}
+
 // WithSNAP enables SNAP, https://datatracker.ietf.org/doc/draft-hancke-tsvwg-snap/.
 func WithSNAP(localSctpInit []byte, remoteSctpInit []byte) AssociationOption {
 	return sharedOption(func(c *Config) error {

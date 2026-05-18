@@ -183,6 +183,78 @@ func association( //nolint:cyclop
 	return client, server, nil
 }
 
+func associationWithClientServerOptions( //nolint:cyclop
+	t *testing.T,
+	piper piperFunc,
+	clientExtra []ClientOption,
+	serverExtra []ServerOption,
+) (*Association, *Association, error) {
+	t.Helper()
+
+	ca, cb := piper(t)
+
+	loggerFactory := logging.NewDefaultLoggerFactory()
+	clientOpts := make([]ClientOption, 0, len(clientExtra)+2)
+	serverOpts := make([]ServerOption, 0, len(serverExtra)+2)
+
+	clientOpts = append(clientOpts, WithNetConn(ca), WithLoggerFactory(loggerFactory))
+	serverOpts = append(serverOpts, WithNetConn(cb), WithLoggerFactory(loggerFactory))
+	clientOpts = append(clientOpts, clientExtra...)
+	serverOpts = append(serverOpts, serverExtra...)
+
+	type result struct {
+		side string
+		a    *Association
+		err  error
+	}
+
+	ch := make(chan result, 2)
+
+	go func() {
+		a, err := ClientWithOptions(clientOpts...)
+		ch <- result{side: "client", a: a, err: err}
+	}()
+
+	go func() {
+		a, err := ServerWithOptions(serverOpts...)
+		ch <- result{side: "server", a: a, err: err}
+	}()
+
+	timeout := 5 * time.Second
+	if dl, ok := t.Deadline(); ok {
+		if rem := time.Until(dl); rem > 0 && rem < timeout {
+			timeout = rem
+		}
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	var client, server *Association
+	for client == nil || server == nil {
+		select {
+		case res := <-ch:
+			if res.err != nil {
+				_ = ca.Close()
+				_ = cb.Close()
+
+				return nil, nil, res.err
+			}
+			if res.side == "client" {
+				client = res.a
+			} else {
+				server = res.a
+			}
+		case <-timer.C:
+			_ = ca.Close()
+			_ = cb.Close()
+
+			return nil, nil, fmt.Errorf("timeout establishing association") //nolint:err113
+		}
+	}
+
+	return client, server, nil
+}
+
 type piperFunc func(t *testing.T) (net.Conn, net.Conn)
 
 func pipeDump(t *testing.T) (net.Conn, net.Conn) {
@@ -2717,8 +2789,8 @@ func TestAssocHandleInit(t *testing.T) {
 		}
 		assert.NoError(t, err, "should succeed")
 		assert.Equal(t, init.initialTSN-1, assoc.peerLastTSN(), "should match")
-		assert.Equal(t, uint16(1001), assoc.myMaxNumOutboundStreams, "should match")
-		assert.Equal(t, uint16(1002), assoc.myMaxNumInboundStreams, "should match")
+		assert.Equal(t, uint16(1001), assoc.NumInboundStreams(), "should match")
+		assert.Equal(t, uint16(1002), assoc.NumOutboundStreams(), "should match")
 		assert.Equal(t, uint32(5678), assoc.peerVerificationTag, "should match")
 		assert.Equal(t, pkt.sourcePort, assoc.destinationPort, "should match")
 		assert.Equal(t, pkt.destinationPort, assoc.sourcePort, "should match")
@@ -2812,9 +2884,9 @@ func TestAssocNumStreams(t *testing.T) {
 			LoggerFactory: loggerFactory,
 		})
 		assert.NotNil(t, assoc, "should succeed")
-		// Before handshake, should return the initial max values
-		assert.Equal(t, uint16(65535), assoc.NumInboundStreams(), "should be max uint16 before handshake")
-		assert.Equal(t, uint16(65535), assoc.NumOutboundStreams(), "should be max uint16 before handshake")
+		// Before handshake, should return 0
+		assert.Equal(t, uint16(0), assoc.NumInboundStreams(), "should be 0 before handshake")
+		assert.Equal(t, uint16(0), assoc.NumOutboundStreams(), "should be 0 before handshake")
 	})
 
 	t.Run("after handshake with negotiated values", func(t *testing.T) {
@@ -2835,6 +2907,34 @@ func TestAssocNumStreams(t *testing.T) {
 		assert.Greater(t, a1.NumOutboundStreams(), uint16(0), "should have outbound streams after handshake")
 
 		closeAssociationPair(br, a0, a1)
+	})
+
+	t.Run("after handshake with local limits smaller than peer", func(t *testing.T) {
+		checkGoroutineLeaks(t)
+
+		clientLocalInbound := uint16(3)
+		clientLocalOutbound := uint16(4)
+		serverLocalInbound := uint16(11)
+		serverLocalOutbound := uint16(12)
+
+		a0, a1, err := associationWithClientServerOptions(
+			t,
+			pipeDump,
+			[]ClientOption{WithNumStreams(clientLocalInbound, clientLocalOutbound)},
+			[]ServerOption{WithNumStreams(serverLocalInbound, serverLocalOutbound)},
+		)
+		assert.NoError(t, err, "failed to create associations")
+		if err != nil {
+			return
+		}
+
+		assert.Equal(t, clientLocalInbound, a0.NumInboundStreams(), "client inbound streams should clamp to its local limit")
+		assert.Equal(t, clientLocalOutbound, a0.NumOutboundStreams(), "client outbound streams should clamp to its local limit")
+		assert.Equal(t, clientLocalOutbound, a1.NumInboundStreams(), "server inbound streams should clamp to the peer outbound offer")
+		assert.Equal(t, clientLocalInbound, a1.NumOutboundStreams(), "server outbound streams should clamp to the peer inbound offer")
+
+		assert.NoError(t, a0.Close())
+		assert.NoError(t, a1.Close())
 	})
 
 	t.Run("thread-safe concurrent access", func(t *testing.T) {
@@ -2859,6 +2959,114 @@ func TestAssocNumStreams(t *testing.T) {
 			<-done
 		}
 	})
+}
+
+func TestAssocInitStreamCountsOnWire(t *testing.T) {
+	type streamCounts struct {
+		outbound uint16
+		inbound  uint16
+	}
+
+	clientLocalInbound := uint16(3)
+	clientLocalOutbound := uint16(4)
+	serverLocalInbound := uint16(11)
+	serverLocalOutbound := uint16(12)
+
+	conn1, conn2 := createUDPConnPair()
+	dbConn1, ok := conn1.(*dumbConn2)
+	require.True(t, ok)
+	dbConn2, ok := conn2.(*dumbConn2)
+	require.True(t, ok)
+
+	initCh := make(chan streamCounts, 1)
+	initAckCh := make(chan streamCounts, 1)
+	unmarshalErrCh := make(chan error, 2)
+
+	dbConn1.setRemoteHandler(func(buf []byte) {
+		p := &packet{}
+		if err := p.unmarshal(true, buf); err != nil {
+			select {
+			case unmarshalErrCh <- err:
+			default:
+			}
+			dbConn2.inboundHandler(buf)
+
+			return
+		}
+
+		if len(p.chunks) == 1 {
+			if init, ok := p.chunks[0].(*chunkInit); ok {
+				select {
+				case initCh <- streamCounts{outbound: init.numOutboundStreams, inbound: init.numInboundStreams}:
+				default:
+				}
+			}
+		}
+
+		dbConn2.inboundHandler(buf)
+	})
+
+	dbConn2.setRemoteHandler(func(buf []byte) {
+		p := &packet{}
+		if err := p.unmarshal(true, buf); err != nil {
+			select {
+			case unmarshalErrCh <- err:
+			default:
+			}
+			dbConn1.inboundHandler(buf)
+
+			return
+		}
+
+		if len(p.chunks) == 1 {
+			if initAck, ok := p.chunks[0].(*chunkInitAck); ok {
+				select {
+				case initAckCh <- streamCounts{outbound: initAck.numOutboundStreams, inbound: initAck.numInboundStreams}:
+				default:
+				}
+			}
+		}
+
+		dbConn1.inboundHandler(buf)
+	})
+
+	piper := func(t *testing.T) (net.Conn, net.Conn) {
+		t.Helper()
+
+		return conn1, conn2
+	}
+
+	a0, a1, err := associationWithClientServerOptions(
+		t,
+		piper,
+		[]ClientOption{WithNumStreams(clientLocalInbound, clientLocalOutbound)},
+		[]ServerOption{WithNumStreams(serverLocalInbound, serverLocalOutbound)},
+	)
+	require.NoError(t, err)
+	defer noErrorClose(t, a0.Close)
+	defer noErrorClose(t, a1.Close)
+
+	select {
+	case err := <-unmarshalErrCh:
+		require.NoError(t, err)
+	default:
+	}
+
+	select {
+	case init := <-initCh:
+		assert.Equal(t, clientLocalOutbound, init.outbound, "INIT OS should advertise the sender's configured outbound streams per RFC 9260 section 5.1.1")
+		assert.Equal(t, clientLocalInbound, init.inbound, "INIT MIS should advertise the sender's configured inbound streams per RFC 9260 section 5.1.1")
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for INIT capture")
+	}
+
+	select {
+	case initAck := <-initAckCh:
+		assert.Equal(t, clientLocalInbound, initAck.outbound, "INIT ACK OS must not exceed the INIT MIS per RFC 9260 section 5.1.1")
+		assert.Equal(t, clientLocalOutbound, initAck.inbound, "INIT ACK MIS should clamp to the peer's requested outbound streams per RFC 9260 section 5.1.1")
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for INIT ACK capture")
+	}
 }
 
 func TestAssocOnStreamResetCompleteSetAndThreadSafe(t *testing.T) {
