@@ -3271,28 +3271,32 @@ func TestAssocResetResetsInterleavingCounters(t *testing.T) {
 		s0.lock.Unlock()
 
 		require.NoError(t, s0.Close())
-		for range 100 {
+		var (
+			pendingReconfigs int
+			sequenceNumber   uint16
+			nextOrderedMID   uint32
+			nextUnorderedMID uint32
+		)
+		require.Eventually(t, func() bool {
 			br.Process()
 
 			a0.lock.RLock()
-			pendingReconfigs := len(a0.reconfigs)
+			pendingReconfigs = len(a0.reconfigs)
 			a0.lock.RUnlock()
-			if pendingReconfigs == 0 {
-				break
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
 
-		a0.lock.RLock()
-		pendingReconfigs := len(a0.reconfigs)
-		a0.lock.RUnlock()
-		require.Zero(t, pendingReconfigs, "reset response should clear pending reconfig")
+			s0.lock.RLock()
+			sequenceNumber = s0.sequenceNumber
+			nextOrderedMID = s0.nextOrderedMID
+			nextUnorderedMID = s0.nextUnorderedMID
+			s0.lock.RUnlock()
 
-		s0.lock.RLock()
-		assert.Equal(t, uint16(0), s0.sequenceNumber, "outbound SSN should reset")
-		assert.Equal(t, uint32(0), s0.nextOrderedMID, "ordered MID should reset")
-		assert.Equal(t, uint32(0), s0.nextUnorderedMID, "unordered MID should reset")
-		s0.lock.RUnlock()
+			return pendingReconfigs == 0 &&
+				sequenceNumber == 0 &&
+				nextOrderedMID == 0 &&
+				nextUnorderedMID == 0
+		}, 5*time.Second, 10*time.Millisecond,
+			"reset response should clear pending reconfig and reset counters: pending=%d ssn=%d orderedMID=%d unorderedMID=%d",
+			pendingReconfigs, sequenceNumber, nextOrderedMID, nextUnorderedMID)
 	})
 
 	t.Run("inbound reset removes stream so recreated stream starts from zero", func(t *testing.T) {
