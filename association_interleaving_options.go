@@ -11,8 +11,9 @@ type interleavingSettings struct {
 }
 
 func setWeightedFairQueueingStreamScheduler(s *interleavingSettings) {
+	weights := maps.Clone(s.wfqWeights)
 	s.newStreamScheduler = func() InterleavingStreamScheduler {
-		return newWeightedFairQueueingPendingQueuePolicy(s.wfqWeights)
+		return newWeightedFairQueueingPendingQueuePolicy(weights)
 	}
 }
 

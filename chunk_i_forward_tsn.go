@@ -44,11 +44,15 @@ type chunkIForwardTSN struct {
 
 const (
 	iForwardTSNEntryLength = 8
+	maxIForwardTSNStreams  = ((1 << 16) - 1 - chunkHeaderSize - newCumulativeTSNLength) / iForwardTSNEntryLength
 )
 
 // I-FORWARD-TSN chunk errors.
 var (
-	ErrIForwardTSNChunkTooShort = errors.New("i-forward-tsn chunk too short")
+	errIForwardTSNChunkTooShort      = errors.New("i-forward-tsn chunk too short")
+	errIForwardTSNChunkInvalidLength = errors.New("i-forward-tsn chunk invalid length")
+	errIForwardTSNTooManyStreams     = errors.New("i-forward-tsn chunk contains too many streams")
+	errIForwardTSNDuplicateStream    = errors.New("i-forward-tsn chunk contains duplicate stream")
 )
 
 func (c *chunkIForwardTSN) unmarshal(raw []byte) error {
@@ -57,29 +61,42 @@ func (c *chunkIForwardTSN) unmarshal(raw []byte) error {
 	}
 
 	if len(c.raw) < newCumulativeTSNLength {
-		return ErrIForwardTSNChunkTooShort
+		return errIForwardTSNChunkTooShort
 	}
+	c.streams = nil
 
 	c.newCumulativeTSN = binary.BigEndian.Uint32(c.raw[0:])
 
-	offset := newCumulativeTSNLength
-	remaining := len(c.raw) - offset
-	for remaining > 0 {
+	streamBytes := len(c.raw) - newCumulativeTSNLength
+	if streamBytes%iForwardTSNEntryLength != 0 {
+		return fmt.Errorf("%w: %w", ErrMarshalStreamFailed, errIForwardTSNChunkInvalidLength)
+	}
+
+	streamCount := streamBytes / iForwardTSNEntryLength
+	if streamCount > maxIForwardTSNStreams {
+		return fmt.Errorf("%w: %d exceeds %d", errIForwardTSNTooManyStreams, streamCount, maxIForwardTSNStreams)
+	}
+
+	streams := make([]chunkIForwardTSNStream, 0, streamCount)
+	for i := range streamCount {
+		offset := newCumulativeTSNLength + i*iForwardTSNEntryLength
 		s := chunkIForwardTSNStream{}
-		if err := s.unmarshal(c.raw[offset:]); err != nil {
-			return fmt.Errorf("%w: %v", ErrMarshalStreamFailed, err) //nolint:errorlint
+		if err := s.unmarshal(c.raw[offset : offset+iForwardTSNEntryLength]); err != nil {
+			return fmt.Errorf("%w: %w", ErrMarshalStreamFailed, err)
 		}
 
-		c.streams = append(c.streams, s)
-
-		offset += s.length()
-		remaining -= s.length()
+		streams = append(streams, s)
 	}
+	c.streams = streams
 
 	return nil
 }
 
 func (c *chunkIForwardTSN) marshal() ([]byte, error) {
+	if _, err := c.check(); err != nil {
+		return nil, err
+	}
+
 	out := make([]byte, newCumulativeTSNLength+len(c.streams)*iForwardTSNEntryLength)
 	binary.BigEndian.PutUint32(out[0:], c.newCumulativeTSN)
 
@@ -101,7 +118,29 @@ func (c *chunkIForwardTSN) marshal() ([]byte, error) {
 }
 
 func (c *chunkIForwardTSN) check() (abort bool, err error) {
-	return true, nil
+	if len(c.streams) > maxIForwardTSNStreams {
+		return true, fmt.Errorf("%w: %d exceeds %d", errIForwardTSNTooManyStreams, len(c.streams), maxIForwardTSNStreams)
+	}
+
+	type streamForwardKey struct {
+		identifier uint16
+		unordered  bool
+	}
+
+	forwarded := make(map[streamForwardKey]struct{}, len(c.streams))
+	for _, s := range c.streams {
+		key := streamForwardKey{
+			identifier: s.identifier,
+			unordered:  s.unordered,
+		}
+		if _, ok := forwarded[key]; ok {
+			return true, fmt.Errorf("%w: si=%d unordered=%t",
+				errIForwardTSNDuplicateStream, s.identifier, s.unordered)
+		}
+		forwarded[key] = struct{}{}
+	}
+
+	return false, nil
 }
 
 // String makes chunkIForwardTSN printable.
@@ -127,7 +166,7 @@ func (s *chunkIForwardTSNStream) length() int {
 
 func (s *chunkIForwardTSNStream) unmarshal(raw []byte) error {
 	if len(raw) < iForwardTSNEntryLength {
-		return ErrIForwardTSNChunkTooShort
+		return errIForwardTSNChunkTooShort
 	}
 	s.identifier = binary.BigEndian.Uint16(raw[0:])
 	flags := binary.BigEndian.Uint16(raw[2:])

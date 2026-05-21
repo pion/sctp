@@ -142,7 +142,7 @@ func TestStreamHandleForwardTSNForMID(t *testing.T) {
 		assert.Equal(t, 0, stream.getNumBytesInReassemblyQueue(), "queue should be empty after read")
 	})
 
-	t.Run("unordered MID forward drops forwarded data and keeps newer complete message", func(t *testing.T) {
+	t.Run("unordered MID forward keeps complete data and drops old incomplete message", func(t *testing.T) {
 		stream := newTestStream(t)
 		orgPpi := PayloadTypeWebRTCBinary
 
@@ -198,17 +198,27 @@ func TestStreamHandleForwardTSNForMID(t *testing.T) {
 
 		stream.handleForwardTSNForUnorderedMID(2)
 
-		if assert.Len(t, stream.reassemblyQueue.unorderedMID, 1, "only newer complete MID should remain queued") {
-			assert.Equal(t, uint32(4), stream.reassemblyQueue.unorderedMID[0].mid, "unexpected queued MID")
+		if assert.Len(t, stream.reassemblyQueue.unorderedMID, 2, "complete MIDs should remain queued") {
+			assert.Equal(t, uint32(1), stream.reassemblyQueue.unorderedMID[0].mid, "unexpected first queued MID")
+			assert.Equal(t, uint32(4), stream.reassemblyQueue.unorderedMID[1].mid, "unexpected second queued MID")
 		}
 		if assert.Len(t, stream.reassemblyQueue.unorderedMIDMap, 1, "only newer incomplete MID should remain mapped") {
 			_, ok := stream.reassemblyQueue.unorderedMIDMap[5]
 			assert.True(t, ok, "MID 5 should remain mapped")
 		}
-		assert.True(t, stream.reassemblyQueue.isReadable(), "newer complete MID should stay readable")
+		assert.Equal(t, 12, stream.getNumBytesInReassemblyQueue(), "only incomplete forwarded MID bytes should be removed")
+		assert.True(t, stream.reassemblyQueue.isReadable(), "complete MID should stay readable")
 
 		buf := make([]byte, 8)
 		n, ppi, err := stream.ReadSCTP(buf)
+		assert.NoError(t, err)
+		assert.Equal(t, 3, n, "should read the old complete MID")
+		assert.Equal(t, orgPpi, ppi, "should preserve payload type")
+		assert.Equal(t, "old", string(buf[:n]), "unexpected payload")
+		assert.Equal(t, 9, stream.getNumBytesInReassemblyQueue(), "newer complete and incomplete MID bytes should remain")
+		assert.True(t, stream.reassemblyQueue.isReadable(), "newer complete MID should stay readable")
+
+		n, ppi, err = stream.ReadSCTP(buf)
 		assert.NoError(t, err)
 		assert.Equal(t, 4, n, "should read the kept MID")
 		assert.Equal(t, orgPpi, ppi, "should preserve payload type")

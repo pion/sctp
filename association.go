@@ -827,14 +827,11 @@ func (a *Association) initWithOutOfBandTokens(localInit *chunkInit, remoteInit *
 	a.setPeerSupportedExtensions(getSupportedExtensions(remoteInit.params))
 	a.setSendZeroChecksum(remoteInit.params)
 
-	if err := a.updateInterleavingState(); err != nil {
-		return err
-	}
-	a.logNegotiatedExtensions("init")
-
 	a.ssthresh = a.RWND()
 
-	a.setState(established)
+	if err := a.establish("init"); err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -865,6 +862,18 @@ func (a *Association) logNegotiatedExtensions(stage string) {
 	default:
 		a.log.Warnf("[%s] not using ForwardTSN (on %s)", a.name, stage)
 	}
+}
+
+// establish finalizes negotiated options and transitions the association to ESTABLISHED.
+// The caller should hold the lock.
+func (a *Association) establish(stage string) error {
+	if err := a.updateInterleavingState(); err != nil {
+		return err
+	}
+	a.logNegotiatedExtensions(stage)
+	a.setState(established)
+
+	return nil
 }
 
 // caller must hold a.lock.
@@ -2154,7 +2163,11 @@ func (a *Association) handleCookieEcho(cookieEcho *chunkCookieEcho) []*packet {
 		a.t1Cookie.stop()
 		a.storedCookieEcho = nil
 
-		a.setState(established)
+		if err := a.establish("cookieEcho"); err != nil {
+			a.completeHandshake(err)
+
+			return nil
+		}
 		if !a.completeHandshake(nil) {
 			return nil
 		}
@@ -2185,12 +2198,21 @@ func (a *Association) handleCookieAck() {
 	a.t1Cookie.stop()
 	a.storedCookieEcho = nil
 
-	a.setState(established)
+	if err := a.establish("cookieAck"); err != nil {
+		a.completeHandshake(err)
+
+		return
+	}
 	a.completeHandshake(nil)
 }
 
 // The caller should hold the lock.
 func (a *Association) handleData(chunkPayload *chunkPayloadData) []*packet {
+	state := a.getState()
+	if state != established && state != shutdownPending && state != shutdownReceived {
+		return nil
+	}
+
 	if chunkPayload.isIData() != a.useInterleaving {
 		if chunkPayload.isIData() {
 			a.abortProtocolViolation("received I-DATA without interleaving negotiated")
@@ -2206,36 +2228,9 @@ func (a *Association) handleData(chunkPayload *chunkPayloadData) []*packet {
 	a.stats.incDATAs()
 
 	canPush := a.payloadQueue.canPush(chunkPayload.tsn)
-	if canPush { //nolint:nestif
-		stream := a.getOrCreateStream(chunkPayload.streamIdentifier, true, PayloadTypeUnknown)
-		if stream == nil {
-			// silently discard the data. (sender will retry on T3-rtx timeout)
-			// see pion/sctp#30
-			a.log.Debugf("[%s] discard %d", a.name, chunkPayload.streamSequenceNumber)
-
+	if canPush {
+		if !a.acceptPayloadData(chunkPayload) {
 			return nil
-		}
-
-		if a.getMyReceiverWindowCredit() > 0 {
-			// Pass the new chunk to stream level as soon as it arrives
-			a.payloadQueue.push(chunkPayload.tsn)
-			stream.handleData(chunkPayload)
-		} else {
-			// Receive buffer is full
-			lastTSN, ok := a.payloadQueue.getLastTSNReceived()
-			if ok && sna32LT(chunkPayload.tsn, lastTSN) {
-				a.log.Debugf(
-					"[%s] receive buffer full, but accepted as this is a missing chunk with tsn=%d ssn=%d",
-					a.name, chunkPayload.tsn, chunkPayload.streamSequenceNumber,
-				)
-				a.payloadQueue.push(chunkPayload.tsn)
-				stream.handleData(chunkPayload)
-			} else {
-				a.log.Debugf(
-					"[%s] receive buffer full. dropping DATA with tsn=%d ssn=%d",
-					a.name, chunkPayload.tsn, chunkPayload.streamSequenceNumber,
-				)
-			}
 		}
 	}
 
@@ -2251,6 +2246,53 @@ func (a *Association) handleData(chunkPayload *chunkPayloadData) []*packet {
 	sackNow := chunkPayload.immediateSack || gapDetected
 
 	return a.handlePeerLastTSNAndAcknowledgement(sackNow)
+}
+
+// The caller should hold the lock.
+func (a *Association) acceptPayloadData(chunkPayload *chunkPayloadData) bool {
+	stream := a.getOrCreateStream(chunkPayload.streamIdentifier, true, PayloadTypeUnknown)
+	if stream == nil {
+		// silently discard the data. (sender will retry on T3-rtx timeout)
+		// see pion/sctp#30
+		a.log.Debugf("[%s] discard %d", a.name, chunkPayload.streamSequenceNumber)
+
+		return false
+	}
+
+	if a.getMyReceiverWindowCredit() > 0 {
+		// Pass the new chunk to stream level as soon as it arrives
+		return a.pushPayloadDataToStream(stream, chunkPayload)
+	}
+
+	// Receive buffer is full
+	lastTSN, ok := a.payloadQueue.getLastTSNReceived()
+	if !ok || !sna32LT(chunkPayload.tsn, lastTSN) {
+		a.log.Debugf(
+			"[%s] receive buffer full. dropping DATA with tsn=%d ssn=%d",
+			a.name, chunkPayload.tsn, chunkPayload.streamSequenceNumber,
+		)
+
+		return true
+	}
+
+	a.log.Debugf(
+		"[%s] receive buffer full, but accepted as this is a missing chunk with tsn=%d ssn=%d",
+		a.name, chunkPayload.tsn, chunkPayload.streamSequenceNumber,
+	)
+
+	return a.pushPayloadDataToStream(stream, chunkPayload)
+}
+
+// The caller should hold the lock.
+func (a *Association) pushPayloadDataToStream(stream *Stream, chunkPayload *chunkPayloadData) bool {
+	a.payloadQueue.push(chunkPayload.tsn)
+	if err := stream.handleData(chunkPayload); err != nil {
+		a.abortProtocolViolation(err.Error())
+
+		return false
+	}
+
+	return true
 }
 
 // A common routine for handleData and handleForwardTSN routines
@@ -3064,10 +3106,7 @@ func (a *Association) handleForwardTSN(chunkTSN *chunkForwardTSN) []*packet {
 	//   its cumulative TSN point to the value carried in the FORWARD TSN
 	//   chunk,
 
-	// Advance peerLastTSN
-	for sna32LT(a.peerLastTSN(), chunkTSN.newCumulativeTSN) {
-		a.payloadQueue.pop(true) // may not exist
-	}
+	a.payloadQueue.advanceCumulativeTSN(chunkTSN.newCumulativeTSN)
 
 	// Report new peerLastTSN value and abandoned largest SSN value to
 	// corresponding streams so that the abandoned chunks can be removed
@@ -3111,9 +3150,7 @@ func (a *Association) handleIForwardTSN(chunkTSN *chunkIForwardTSN) []*packet {
 		return nil
 	}
 
-	for sna32LT(a.peerLastTSN(), chunkTSN.newCumulativeTSN) {
-		a.payloadQueue.pop(true)
-	}
+	a.payloadQueue.advanceCumulativeTSN(chunkTSN.newCumulativeTSN)
 
 	for _, forwarded := range chunkTSN.streams {
 		if s, ok := a.streams[forwarded.identifier]; ok {
@@ -3670,8 +3707,12 @@ func (a *Association) handleChunk(receivedPacket *packet, receivedChunk chunk) e
 	var packets []*packet
 	var err error
 
-	if _, err = receivedChunk.check(); err != nil {
+	var abort bool
+	if abort, err = receivedChunk.check(); err != nil {
 		a.log.Errorf("[%s] failed validating chunk: %s ", a.name, err)
+		if abort && shouldAbortOnChunkValidationError(receivedChunk) {
+			a.abortProtocolViolation(err.Error())
+		}
 
 		return nil
 	}
@@ -3755,6 +3796,15 @@ func (a *Association) handleChunk(receivedPacket *packet, receivedChunk chunk) e
 	}
 
 	return nil
+}
+
+func shouldAbortOnChunkValidationError(receivedChunk chunk) bool {
+	switch receivedChunk.(type) {
+	case *chunkInit, *chunkInitAck, *chunkCookieEcho:
+		return false
+	default:
+		return true
+	}
 }
 
 func (a *Association) onRetransmissionTimeout(id int, nRtos uint) { //nolint:cyclop

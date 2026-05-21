@@ -200,12 +200,16 @@ func (s *Stream) SetReadDeadline(deadline time.Time) error {
 	return nil
 }
 
-func (s *Stream) handleData(pd *chunkPayloadData) {
+func (s *Stream) handleData(pd *chunkPayloadData) error {
 	s.lock.Lock()
 	defer s.lock.Unlock()
 
 	var readable bool
-	if s.reassemblyQueue.push(pd) {
+	complete, err := s.reassemblyQueue.pushWithError(pd)
+	if err != nil {
+		return err
+	}
+	if complete {
 		readable = s.reassemblyQueue.isReadable()
 		s.log.Debugf("[%s] reassemblyQueue readable=%v", s.name, readable)
 		if readable {
@@ -214,6 +218,8 @@ func (s *Stream) handleData(pd *chunkPayloadData) {
 			s.log.Debugf("[%s] readNotifier.signal() done", s.name)
 		}
 	}
+
+	return nil
 }
 
 func (s *Stream) handleForwardTSNForOrdered(ssn uint16) {

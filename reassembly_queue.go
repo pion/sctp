@@ -28,10 +28,16 @@ func sortChunksByFSN(a []*chunkPayloadData) {
 	})
 }
 
-func sortChunkSetsByMID(a []*chunkSetMID) {
-	sort.Slice(a, func(i, j int) bool {
-		return sna32LT(a[i].mid, a[j].mid)
+func insertChunkSetByMID(a []*chunkSetMID, cset *chunkSetMID) []*chunkSetMID {
+	insertAt := sort.Search(len(a), func(i int) bool {
+		return !sna32LT(a[i].mid, cset.mid)
 	})
+
+	a = append(a, nil)
+	copy(a[insertAt+1:], a[insertAt:])
+	a[insertAt] = cset
+
+	return a
 }
 
 // chunkSet is a set of chunks that share the same SSN.
@@ -191,6 +197,10 @@ type reassemblyQueue struct {
 
 var errTryAgain = errors.New("try again")
 
+const maxReassemblyQueueMIDEntries = 1024
+
+var errReassemblyQueueMIDLimitExceeded = errors.New("reassembly queue i-data message identifier limit exceeded")
+
 func newReassemblyQueue(si uint16) *reassemblyQueue {
 	// From RFC 4960 Sec 6.5:
 	//   The Stream Sequence Number in all the streams MUST start from 0 when
@@ -210,7 +220,13 @@ func newReassemblyQueue(si uint16) *reassemblyQueue {
 	}
 }
 
-func (r *reassemblyQueue) push(chunk *chunkPayloadData) bool { //nolint:cyclop
+func (r *reassemblyQueue) push(chunk *chunkPayloadData) bool {
+	complete, _ := r.pushWithError(chunk)
+
+	return complete
+}
+
+func (r *reassemblyQueue) pushWithError(chunk *chunkPayloadData) (bool, error) { //nolint:cyclop
 	var cset *chunkSet
 
 	if chunk.isIData() {
@@ -220,7 +236,7 @@ func (r *reassemblyQueue) push(chunk *chunkPayloadData) bool { //nolint:cyclop
 	}
 
 	if chunk.streamIdentifier != r.si {
-		return false
+		return false, nil
 	}
 
 	if chunk.unordered {
@@ -236,16 +252,16 @@ func (r *reassemblyQueue) push(chunk *chunkPayloadData) bool { //nolint:cyclop
 		if cset != nil {
 			r.unordered = append(r.unordered, cset)
 
-			return true
+			return true, nil
 		}
 
-		return false
+		return false, nil
 	}
 
 	// This is an ordered chunk
 
 	if sna16LT(chunk.streamSequenceNumber, r.nextSSN) {
-		return false
+		return false, nil
 	}
 
 	// Check if a fragmented chunkSet with the fragmented SSN already exists
@@ -279,49 +295,65 @@ func (r *reassemblyQueue) push(chunk *chunkPayloadData) bool { //nolint:cyclop
 
 	atomic.AddUint64(&r.nBytes, uint64(len(chunk.userData)))
 
-	return cset.push(chunk)
+	return cset.push(chunk), nil
 }
 
-func (r *reassemblyQueue) pushIData(chunk *chunkPayloadData) bool {
+func (r *reassemblyQueue) pushIData(chunk *chunkPayloadData) (bool, error) {
 	if chunk.streamIdentifier != r.si {
-		return false
+		return false, nil
 	}
 
-	var cset *chunkSetMID
 	if chunk.unordered {
-		if r.unorderedMIDMap == nil {
-			r.unorderedMIDMap = map[uint32]*chunkSetMID{}
-		}
-		cset = r.unorderedMIDMap[chunk.messageIdentifier]
-		if cset == nil {
-			cset = newChunkSetMID(chunk.messageIdentifier, chunk.payloadType)
-			r.unorderedMIDMap[chunk.messageIdentifier] = cset
-		}
-		atomic.AddUint64(&r.nBytes, uint64(len(chunk.userData)))
-		if cset.push(chunk) {
-			delete(r.unorderedMIDMap, chunk.messageIdentifier)
-			r.unorderedMID = append(r.unorderedMID, cset)
-
-			return true
-		}
-
-		return false
+		return r.pushUnorderedIData(chunk)
 	}
 
+	return r.pushOrderedIData(chunk)
+}
+
+func (r *reassemblyQueue) pushUnorderedIData(chunk *chunkPayloadData) (bool, error) {
+	if r.unorderedMIDMap == nil {
+		r.unorderedMIDMap = map[uint32]*chunkSetMID{}
+	}
+	cset := r.unorderedMIDMap[chunk.messageIdentifier]
+	if cset == nil {
+		if r.unorderedMIDEntryCount() >= maxReassemblyQueueMIDEntries {
+			return false, errReassemblyQueueMIDLimitExceeded
+		}
+		cset = newChunkSetMID(chunk.messageIdentifier, chunk.payloadType)
+		r.unorderedMIDMap[chunk.messageIdentifier] = cset
+	}
+	atomic.AddUint64(&r.nBytes, uint64(len(chunk.userData)))
+	if cset.push(chunk) {
+		delete(r.unorderedMIDMap, chunk.messageIdentifier)
+		r.unorderedMID = append(r.unorderedMID, cset)
+
+		return true, nil
+	}
+
+	return false, nil
+}
+
+func (r *reassemblyQueue) pushOrderedIData(chunk *chunkPayloadData) (bool, error) {
 	if r.orderedMIDMap == nil {
 		r.orderedMIDMap = map[uint32]*chunkSetMID{}
 	}
-	cset = r.orderedMIDMap[chunk.messageIdentifier]
+	cset := r.orderedMIDMap[chunk.messageIdentifier]
 	if cset == nil {
+		if len(r.orderedMIDMap) >= maxReassemblyQueueMIDEntries {
+			return false, errReassemblyQueueMIDLimitExceeded
+		}
 		cset = newChunkSetMID(chunk.messageIdentifier, chunk.payloadType)
 		r.orderedMIDMap[chunk.messageIdentifier] = cset
-		r.orderedMID = append(r.orderedMID, cset)
-		sortChunkSetsByMID(r.orderedMID)
+		r.orderedMID = insertChunkSetByMID(r.orderedMID, cset)
 	}
 
 	atomic.AddUint64(&r.nBytes, uint64(len(chunk.userData)))
 
-	return cset.push(chunk)
+	return cset.push(chunk), nil
+}
+
+func (r *reassemblyQueue) unorderedMIDEntryCount() int {
+	return len(r.unorderedMIDMap) + len(r.unorderedMID)
 }
 
 func (r *reassemblyQueue) findCompleteUnorderedChunkSet() *chunkSet {
@@ -584,19 +616,6 @@ func (r *reassemblyQueue) forwardTSNForOrderedMID(lastMID uint32) {
 }
 
 func (r *reassemblyQueue) forwardTSNForUnorderedMID(lastMID uint32) {
-	keep := []*chunkSetMID{}
-	for _, set := range r.unorderedMID {
-		if sna32LTE(set.mid, lastMID) {
-			for _, c := range set.chunks {
-				r.subtractNumBytes(len(c.userData))
-			}
-
-			continue
-		}
-		keep = append(keep, set)
-	}
-	r.unorderedMID = keep
-
 	for mid, set := range r.unorderedMIDMap {
 		if sna32LTE(mid, lastMID) {
 			for _, c := range set.chunks {

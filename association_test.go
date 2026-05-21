@@ -546,6 +546,22 @@ func requireNextPayloadChunkType(t *testing.T, chunkTypes <-chan chunkType, expe
 	}
 }
 
+func requireCompletesWithin(t *testing.T, timeout time.Duration, f func()) {
+	t.Helper()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f()
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		require.Failf(t, "operation timed out", "did not complete within %s", timeout)
+	}
+}
+
 func requireEventuallyChunkType(t *testing.T, chunkTypes <-chan chunkType, expected chunkType) {
 	t.Helper()
 
@@ -862,6 +878,70 @@ func TestAssociationInterleavingProtocolViolationWrongPayloadChunkType(t *testin
 	}
 }
 
+func TestAssociationInterleavingFinalizedOnEstablishedTransition(t *testing.T) {
+	t.Run("cookie ack", func(t *testing.T) {
+		assoc := createTestAssociation(t, Config{})
+		assoc.handshakeCompletedCh = make(chan error, 1)
+		assoc.localInterleaving = true
+		assoc.peerInterleaving = true
+		assoc.peerIForwardTSN = true
+		assoc.setState(cookieEchoed)
+
+		assoc.handleCookieAck()
+
+		require.Equal(t, established, assoc.getState())
+		require.True(t, assoc.useInterleaving)
+		require.True(t, assoc.useIForwardTSN)
+		require.False(t, assoc.useForwardTSN)
+		require.NoError(t, <-assoc.handshakeCompletedCh)
+	})
+
+	t.Run("cookie echo", func(t *testing.T) {
+		assoc := createTestAssociation(t, Config{})
+		assoc.handshakeCompletedCh = make(chan error, 1)
+		assoc.myCookie = &paramStateCookie{cookie: []byte("cookie")}
+		assoc.localInterleaving = true
+		assoc.peerInterleaving = true
+		assoc.peerIForwardTSN = true
+		assoc.setState(cookieEchoed)
+
+		packets := assoc.handleCookieEcho(&chunkCookieEcho{cookie: []byte("cookie")})
+
+		require.NotEmpty(t, packets)
+		require.Equal(t, established, assoc.getState())
+		require.True(t, assoc.useInterleaving)
+		require.True(t, assoc.useIForwardTSN)
+		require.False(t, assoc.useForwardTSN)
+		require.NoError(t, <-assoc.handshakeCompletedCh)
+	})
+}
+
+func TestAssociationDataIgnoredBeforeEstablished(t *testing.T) {
+	assoc := createTestAssociation(t, Config{})
+	assoc.localInterleaving = true
+	assoc.peerInterleaving = true
+	assoc.useInterleaving = false
+	assoc.payloadQueue.init(0)
+	assoc.setState(cookieEchoed)
+
+	packets := assoc.handleData(&chunkPayloadData{
+		iData:                  true,
+		messageIdentifier:      1,
+		fragmentSequenceNumber: 0,
+		beginningFragment:      true,
+		endingFragment:         true,
+		tsn:                    1,
+		streamIdentifier:       1,
+		payloadType:            PayloadTypeWebRTCBinary,
+		userData:               []byte("pre-established"),
+	})
+
+	require.Nil(t, packets)
+	require.False(t, assoc.willSendAbort)
+	require.Equal(t, uint32(0), assoc.peerLastTSN())
+	require.Zero(t, assoc.stats.getNumDATAs())
+}
+
 func TestAssociationInterleavingProtocolViolationWrongForwardTSNChunkType(t *testing.T) {
 	tests := []struct {
 		name                string
@@ -916,6 +996,86 @@ func TestAssociationInterleavingProtocolViolationWrongForwardTSNChunkType(t *tes
 			requireProtocolViolationAbort(t, br, a1, reasons, tt.expectedAbortReason)
 		})
 	}
+}
+
+func TestAssociationIForwardTSNValidationAbort(t *testing.T) {
+	tests := []struct {
+		name        string
+		chunk       *chunkIForwardTSN
+		expectedErr error
+	}{
+		{
+			name: "duplicate ordered stream forward",
+			chunk: &chunkIForwardTSN{
+				newCumulativeTSN: 1,
+				streams: []chunkIForwardTSNStream{
+					{identifier: 1, unordered: false, messageIdentifier: 2},
+					{identifier: 1, unordered: false, messageIdentifier: 3},
+				},
+			},
+			expectedErr: errIForwardTSNDuplicateStream,
+		},
+		{
+			name: "too many streams",
+			chunk: &chunkIForwardTSN{
+				newCumulativeTSN: 1,
+				streams:          make([]chunkIForwardTSNStream, maxIForwardTSNStreams+1),
+			},
+			expectedErr: errIForwardTSNTooManyStreams,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assoc := createTestAssociation(t, Config{})
+			assoc.useIForwardTSN = true
+			assoc.payloadQueue.init(0)
+			assoc.setState(established)
+
+			require.NoError(t, assoc.handleChunk(&packet{}, tt.chunk))
+			require.True(t, assoc.willSendAbort, "association should send an abort on invalid I-FORWARD-TSN")
+			cause, ok := assoc.willSendAbortCause.(*errorCauseProtocolViolation)
+			require.True(t, ok, "abort cause should be a protocol violation")
+			assert.Contains(t, string(cause.additionalInformation), tt.expectedErr.Error())
+		})
+	}
+}
+
+func TestAssociationInterleavingProtocolViolationMIDLimit(t *testing.T) {
+	assoc := createTestAssociation(t, Config{})
+	assoc.useInterleaving = true
+	assoc.payloadQueue.init(0)
+	assoc.setState(established)
+
+	for i := range maxReassemblyQueueMIDEntries {
+		packets := assoc.handleData(&chunkPayloadData{
+			iData:                  true,
+			messageIdentifier:      uint32(i), //nolint:gosec // bounded by maxReassemblyQueueMIDEntries
+			fragmentSequenceNumber: 0,
+			beginningFragment:      true,
+			tsn:                    uint32(i + 1), //nolint:gosec // bounded by maxReassemblyQueueMIDEntries
+			streamIdentifier:       1,
+			payloadType:            PayloadTypeWebRTCBinary,
+		})
+		require.Nil(t, packets)
+		require.False(t, assoc.willSendAbort, "association should remain open below the MID limit")
+	}
+
+	packets := assoc.handleData(&chunkPayloadData{
+		iData:                  true,
+		messageIdentifier:      maxReassemblyQueueMIDEntries,
+		fragmentSequenceNumber: 0,
+		beginningFragment:      true,
+		tsn:                    maxReassemblyQueueMIDEntries + 1,
+		streamIdentifier:       1,
+		payloadType:            PayloadTypeWebRTCBinary,
+	})
+	require.Nil(t, packets)
+	require.True(t, assoc.willSendAbort, "association should abort on a new MID over the limit")
+
+	cause, ok := assoc.willSendAbortCause.(*errorCauseProtocolViolation)
+	require.True(t, ok, "abort cause should be a protocol violation")
+	assert.Equal(t, errReassemblyQueueMIDLimitExceeded.Error(), string(cause.additionalInformation))
 }
 
 func TestAssocReliable(t *testing.T) { //nolint:maintidx
@@ -2080,6 +2240,29 @@ func TestHandleForwardTSN(t *testing.T) {
 		assert.Equal(t, ackStateImmediate, ackState, "sack should be requested")
 		assert.Nil(t, p, "should return nil")
 	})
+
+	t.Run("far forward tsn advances in bounded time", func(t *testing.T) {
+		assoc := createTestAssociation(t, Config{
+			NetConn:       &dumbConn{},
+			LoggerFactory: loggerFactory,
+		})
+		assoc.useForwardTSN = true
+		prevTSN := assoc.peerLastTSN()
+		newCumulativeTSN := prevTSN + (1<<31 - 1)
+		assoc.payloadQueue.push(prevTSN + 2)
+
+		var p []*packet
+		requireCompletesWithin(t, time.Second, func() {
+			p = assoc.handleForwardTSN(&chunkForwardTSN{
+				newCumulativeTSN: newCumulativeTSN,
+				streams:          []chunkForwardTSNStream{{identifier: 0, sequence: 0}},
+			})
+		})
+
+		assert.Equal(t, newCumulativeTSN, assoc.peerLastTSN(), "peerLastTSN should advance")
+		assert.Zero(t, assoc.payloadQueue.size(), "payload queue should be cleared")
+		assert.Nil(t, p, "should return nil")
+	})
 }
 
 func TestHandleIForwardTSN(t *testing.T) {
@@ -2201,15 +2384,21 @@ func TestHandleIForwardTSN(t *testing.T) {
 		assert.Equal(t, 2, orderedStream.reassemblyQueue.getNumBytes(), "only the kept ordered MID bytes should remain")
 		assert.True(t, orderedStream.reassemblyQueue.isReadable(), "kept ordered MID should remain readable")
 
-		assert.Len(t, unorderedStream.reassemblyQueue.unorderedMID, 1, "should only keep one unordered MID")
-		assert.Equal(t, uint32(4), unorderedStream.reassemblyQueue.unorderedMID[0].mid, "unexpected unordered MID kept")
+		assert.Len(t, unorderedStream.reassemblyQueue.unorderedMID, 2, "should keep complete unordered MIDs")
+		assert.Equal(t, uint32(1), unorderedStream.reassemblyQueue.unorderedMID[0].mid, "unexpected first unordered MID kept")
+		assert.Equal(
+			t, uint32(4), unorderedStream.reassemblyQueue.unorderedMID[1].mid, "unexpected second unordered MID kept",
+		)
 		_, ok = unorderedStream.reassemblyQueue.unorderedMIDMap[2]
 		assert.False(t, ok, "forwarded incomplete unordered MID should be removed from the map")
-		assert.Len(t, unorderedStream.reassemblyQueue.unorderedMIDMap, 1, "should only keep one unordered MID")
+		assert.Len(t, unorderedStream.reassemblyQueue.unorderedMIDMap, 1, "should only keep newer incomplete unordered MID")
 		_, ok = unorderedStream.reassemblyQueue.unorderedMIDMap[5]
 		assert.True(t, ok, "newer incomplete unordered MID should remain mapped")
-		assert.Equal(t, 9, unorderedStream.reassemblyQueue.getNumBytes(), "only newer unordered MID bytes should remain")
-		assert.True(t, unorderedStream.reassemblyQueue.isReadable(), "kept unordered MID should remain readable")
+		assert.Equal(
+			t, 12, unorderedStream.reassemblyQueue.getNumBytes(),
+			"only incomplete forwarded unordered MID bytes should be removed",
+		)
+		assert.True(t, unorderedStream.reassemblyQueue.isReadable(), "complete unordered MID should remain readable")
 
 		_, ok = untouchedStream.reassemblyQueue.orderedMIDMap[1]
 		assert.True(t, ok, "unmentioned stream should not be touched")
@@ -2240,6 +2429,31 @@ func TestHandleIForwardTSN(t *testing.T) {
 		assert.Equal(t, ackStateImmediate, ackState, "sack should be requested")
 		assert.Nil(t, pack, "should return nil")
 	})
+
+	t.Run("far i-forward tsn advances in bounded time", func(t *testing.T) {
+		assoc := createTestAssociation(t, Config{
+			NetConn:       &dumbConn{},
+			LoggerFactory: loggerFactory,
+		})
+		assoc.useIForwardTSN = true
+		prevTSN := assoc.peerLastTSN()
+		newCumulativeTSN := prevTSN + (1<<31 - 1)
+		assoc.payloadQueue.push(prevTSN + 2)
+
+		var pack []*packet
+		requireCompletesWithin(t, time.Second, func() {
+			pack = assoc.handleIForwardTSN(&chunkIForwardTSN{
+				newCumulativeTSN: newCumulativeTSN,
+				streams: []chunkIForwardTSNStream{
+					{identifier: 0, messageIdentifier: 1},
+				},
+			})
+		})
+
+		assert.Equal(t, newCumulativeTSN, assoc.peerLastTSN(), "peerLastTSN should advance")
+		assert.Zero(t, assoc.payloadQueue.size(), "payload queue should be cleared")
+		assert.Nil(t, pack, "should return nil")
+	})
 }
 
 func TestHandleDataAckTriggering(t *testing.T) {
@@ -2250,6 +2464,7 @@ func TestHandleDataAckTriggering(t *testing.T) {
 			LoggerFactory: loggerFactory,
 		})
 		assoc.payloadQueue.init(0)
+		assoc.setState(established)
 
 		return assoc
 	}
@@ -2643,6 +2858,7 @@ func TestAssocCreateNewStream(t *testing.T) {
 			NetConn:       &dumbConn{},
 			LoggerFactory: loggerFactory,
 		})
+		assoc.setState(established)
 
 		for i := range acceptChSize {
 			s := assoc.createStream(uint16(i), true) //nolint:gosec

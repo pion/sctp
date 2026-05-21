@@ -58,3 +58,122 @@ func TestChunkIForwardTSNUnmarshal_Failure(t *testing.T) {
 		assert.Errorf(t, err, "expected unmarshal #%d: '%s' to fail.", i, tc.name)
 	}
 }
+
+func TestChunkIForwardTSNUnmarshal_FailureDoesNotKeepPartialStreams(t *testing.T) {
+	actual := &chunkIForwardTSN{
+		streams: []chunkIForwardTSNStream{{
+			identifier:        1,
+			messageIdentifier: 2,
+		}},
+	}
+	err := actual.unmarshal([]byte{
+		0xc2, 0x0, 0x0, 0x12, 0x0, 0x0, 0x0, 0x3,
+		0x0, 0x4, 0x0, 0x1, 0x0, 0x0, 0x0, 0x5,
+		0x0, 0x6,
+	})
+
+	assert.Error(t, err)
+	assert.ErrorIs(t, err, ErrMarshalStreamFailed)
+	assert.ErrorIs(t, err, errIForwardTSNChunkInvalidLength)
+	assert.Empty(t, actual.streams)
+}
+
+func TestChunkIForwardTSNCheck(t *testing.T) {
+	tt := []struct {
+		name      string
+		chunk     *chunkIForwardTSN
+		wantAbort bool
+		wantErr   error
+	}{
+		{
+			name: "valid with ordered and unordered forwards for same stream",
+			chunk: &chunkIForwardTSN{
+				newCumulativeTSN: 1,
+				streams: []chunkIForwardTSNStream{
+					{identifier: 1, unordered: false, messageIdentifier: 2},
+					{identifier: 1, unordered: true, messageIdentifier: 3},
+				},
+			},
+		},
+		{
+			name: "zero new cumulative tsn",
+			chunk: &chunkIForwardTSN{
+				newCumulativeTSN: 0,
+				streams: []chunkIForwardTSNStream{
+					{identifier: 1, messageIdentifier: 2},
+				},
+			},
+		},
+		{
+			name: "too many streams",
+			chunk: &chunkIForwardTSN{
+				newCumulativeTSN: 1,
+				streams:          make([]chunkIForwardTSNStream, maxIForwardTSNStreams+1),
+			},
+			wantAbort: true,
+			wantErr:   errIForwardTSNTooManyStreams,
+		},
+		{
+			name: "duplicate ordered stream forward",
+			chunk: &chunkIForwardTSN{
+				newCumulativeTSN: 1,
+				streams: []chunkIForwardTSNStream{
+					{identifier: 1, unordered: false, messageIdentifier: 2},
+					{identifier: 1, unordered: false, messageIdentifier: 3},
+				},
+			},
+			wantAbort: true,
+			wantErr:   errIForwardTSNDuplicateStream,
+		},
+		{
+			name: "duplicate unordered stream forward",
+			chunk: &chunkIForwardTSN{
+				newCumulativeTSN: 1,
+				streams: []chunkIForwardTSNStream{
+					{identifier: 1, unordered: true, messageIdentifier: 2},
+					{identifier: 1, unordered: true, messageIdentifier: 3},
+				},
+			},
+			wantAbort: true,
+			wantErr:   errIForwardTSNDuplicateStream,
+		},
+	}
+
+	for _, tc := range tt {
+		t.Run(tc.name, func(t *testing.T) {
+			abort, err := tc.chunk.check()
+			assert.Equal(t, tc.wantAbort, abort)
+			if tc.wantErr == nil {
+				assert.NoError(t, err)
+
+				return
+			}
+
+			assert.ErrorIs(t, err, tc.wantErr)
+		})
+	}
+}
+
+func TestChunkIForwardTSNMarshal_Failure(t *testing.T) {
+	_, err := (&chunkIForwardTSN{
+		newCumulativeTSN: 1,
+		streams: []chunkIForwardTSNStream{
+			{identifier: 1, messageIdentifier: 2},
+			{identifier: 1, messageIdentifier: 3},
+		},
+	}).marshal()
+
+	assert.ErrorIs(t, err, errIForwardTSNDuplicateStream)
+}
+
+func TestChunkIForwardTSNMarshal_ZeroCumulativeTSN(t *testing.T) {
+	_, err := (&chunkIForwardTSN{
+		newCumulativeTSN: 0,
+		streams: []chunkIForwardTSNStream{{
+			identifier:        1,
+			messageIdentifier: 2,
+		}},
+	}).marshal()
+
+	assert.NoError(t, err)
+}

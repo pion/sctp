@@ -610,7 +610,7 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 		assert.Equal(t, uint32(2), rq.nextMID, "next MID should remain forwarded")
 	})
 
-	t.Run("forwardTSN for unordered i-data drops old mids from queue and map", func(t *testing.T) {
+	t.Run("forwardTSN for unordered i-data keeps complete mids and drops old incomplete mids", func(t *testing.T) {
 		rq := newReassemblyQueue(0)
 		orgPpi := PayloadTypeWebRTCBinary
 
@@ -667,8 +667,9 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 
 		rq.forwardTSNForUnorderedMID(2)
 
-		if assert.Len(t, rq.unorderedMID, 1, "only newer complete MIDs should remain queued") {
-			assert.Equal(t, uint32(4), rq.unorderedMID[0].mid, "unexpected MID kept")
+		if assert.Len(t, rq.unorderedMID, 2, "complete MIDs should remain queued") {
+			assert.Equal(t, uint32(1), rq.unorderedMID[0].mid, "unexpected first MID kept")
+			assert.Equal(t, uint32(4), rq.unorderedMID[1].mid, "unexpected second MID kept")
 		}
 		_, ok := rq.unorderedMIDMap[2]
 		assert.False(t, ok, "forwarded incomplete MID should be removed from the map")
@@ -676,17 +677,167 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 			_, ok = rq.unorderedMIDMap[5]
 			assert.True(t, ok, "MID 5 should remain mapped")
 		}
-		assert.Equal(t, 9, rq.getNumBytes(), "bytes for forwarded MIDs should be removed")
-		assert.True(t, rq.isReadable(), "newer complete unordered MID should still be readable")
+		assert.Equal(t, 12, rq.getNumBytes(), "only incomplete forwarded MID bytes should be removed")
+		assert.True(t, rq.isReadable(), "complete unordered MID should still be readable")
 
 		buf := make([]byte, 8)
 		n, ppi, err := rq.read(buf)
+		assert.NoError(t, err)
+		assert.Equal(t, 3, n, "should receive 3 bytes")
+		assert.Equal(t, orgPpi, ppi, "should have valid ppi")
+		assert.Equal(t, "old", string(buf[:n]), "data should match")
+		assert.Equal(t, 9, rq.getNumBytes(), "newer complete and incomplete MID bytes should remain")
+		assert.True(t, rq.isReadable(), "newer complete unordered MID should still be readable")
+
+		n, ppi, err = rq.read(buf)
 		assert.NoError(t, err)
 		assert.Equal(t, 4, n, "should receive 4 bytes")
 		assert.Equal(t, orgPpi, ppi, "should have valid ppi")
 		assert.Equal(t, "keep", string(buf[:n]), "data should match")
 		assert.Equal(t, 5, rq.getNumBytes(), "only the remaining incomplete MID bytes should remain")
 		assert.False(t, rq.isReadable(), "only an incomplete MID should remain")
+	})
+
+	t.Run("ordered i-data rejects new mids after descriptor limit", func(t *testing.T) {
+		rq := newReassemblyQueue(0)
+
+		for i := range maxReassemblyQueueMIDEntries {
+			complete, err := rq.pushWithError(&chunkPayloadData{
+				iData:                  true,
+				messageIdentifier:      uint32(i), //nolint:gosec // bounded by maxReassemblyQueueMIDEntries
+				fragmentSequenceNumber: 0,
+				beginningFragment:      true,
+				tsn:                    uint32(i + 1), //nolint:gosec // bounded by maxReassemblyQueueMIDEntries
+				streamIdentifier:       0,
+				payloadType:            PayloadTypeWebRTCBinary,
+			})
+			assert.NoError(t, err)
+			assert.False(t, complete, "MID should remain incomplete")
+		}
+
+		complete, err := rq.pushWithError(&chunkPayloadData{
+			iData:                  true,
+			messageIdentifier:      0,
+			fragmentSequenceNumber: 1,
+			endingFragment:         true,
+			tsn:                    maxReassemblyQueueMIDEntries + 1,
+			streamIdentifier:       0,
+			payloadType:            PayloadTypeWebRTCBinary,
+		})
+		assert.NoError(t, err, "existing MIDs should still accept fragments at the limit")
+		assert.True(t, complete, "existing MID should complete")
+
+		complete, err = rq.pushWithError(&chunkPayloadData{
+			iData:                  true,
+			messageIdentifier:      maxReassemblyQueueMIDEntries,
+			fragmentSequenceNumber: 0,
+			beginningFragment:      true,
+			tsn:                    maxReassemblyQueueMIDEntries + 2,
+			streamIdentifier:       0,
+			payloadType:            PayloadTypeWebRTCBinary,
+		})
+		assert.ErrorIs(t, err, errReassemblyQueueMIDLimitExceeded)
+		assert.False(t, complete, "new MID should be rejected")
+		assert.Len(t, rq.orderedMIDMap, maxReassemblyQueueMIDEntries)
+		assert.Len(t, rq.orderedMID, maxReassemblyQueueMIDEntries)
+		assert.Equal(t, 0, rq.getNumBytes(), "zero-byte fragments must not hide descriptor growth")
+	})
+
+	t.Run("ordered i-data inserts new mids in order", func(t *testing.T) {
+		rq := newReassemblyQueue(0)
+
+		for i, mid := range []uint32{3, 1, 2} {
+			complete, err := rq.pushWithError(&chunkPayloadData{
+				iData:                  true,
+				messageIdentifier:      mid,
+				fragmentSequenceNumber: 0,
+				beginningFragment:      true,
+				tsn:                    uint32(i + 1), //nolint:gosec // test values are small
+				streamIdentifier:       0,
+				payloadType:            PayloadTypeWebRTCBinary,
+			})
+			assert.NoError(t, err)
+			assert.False(t, complete, "MID should remain incomplete")
+		}
+
+		assert.Len(t, rq.orderedMID, 3)
+		assert.Equal(t, []uint32{1, 2, 3}, []uint32{
+			rq.orderedMID[0].mid,
+			rq.orderedMID[1].mid,
+			rq.orderedMID[2].mid,
+		})
+	})
+
+	t.Run("unordered i-data rejects new incomplete mids after descriptor limit", func(t *testing.T) {
+		rq := newReassemblyQueue(0)
+
+		for i := range maxReassemblyQueueMIDEntries {
+			complete, err := rq.pushWithError(&chunkPayloadData{
+				iData:                  true,
+				unordered:              true,
+				messageIdentifier:      uint32(i), //nolint:gosec // bounded by maxReassemblyQueueMIDEntries
+				fragmentSequenceNumber: 0,
+				beginningFragment:      true,
+				tsn:                    uint32(i + 1), //nolint:gosec // bounded by maxReassemblyQueueMIDEntries
+				streamIdentifier:       0,
+				payloadType:            PayloadTypeWebRTCBinary,
+			})
+			assert.NoError(t, err)
+			assert.False(t, complete, "MID should remain incomplete")
+		}
+
+		complete, err := rq.pushWithError(&chunkPayloadData{
+			iData:                  true,
+			unordered:              true,
+			messageIdentifier:      maxReassemblyQueueMIDEntries,
+			fragmentSequenceNumber: 0,
+			beginningFragment:      true,
+			tsn:                    maxReassemblyQueueMIDEntries + 1,
+			streamIdentifier:       0,
+			payloadType:            PayloadTypeWebRTCBinary,
+		})
+		assert.ErrorIs(t, err, errReassemblyQueueMIDLimitExceeded)
+		assert.False(t, complete, "new MID should be rejected")
+		assert.Len(t, rq.unorderedMIDMap, maxReassemblyQueueMIDEntries)
+		assert.Len(t, rq.unorderedMID, 0)
+		assert.Equal(t, 0, rq.getNumBytes(), "zero-byte fragments must not hide descriptor growth")
+	})
+
+	t.Run("unordered i-data counts complete queued mids against descriptor limit", func(t *testing.T) {
+		rq := newReassemblyQueue(0)
+
+		for i := range maxReassemblyQueueMIDEntries {
+			complete, err := rq.pushWithError(&chunkPayloadData{
+				iData:                  true,
+				unordered:              true,
+				messageIdentifier:      uint32(i), //nolint:gosec // bounded by maxReassemblyQueueMIDEntries
+				fragmentSequenceNumber: 0,
+				beginningFragment:      true,
+				endingFragment:         true,
+				tsn:                    uint32(i + 1), //nolint:gosec // bounded by maxReassemblyQueueMIDEntries
+				streamIdentifier:       0,
+				payloadType:            PayloadTypeWebRTCBinary,
+			})
+			assert.NoError(t, err)
+			assert.True(t, complete, "MID should complete")
+		}
+
+		complete, err := rq.pushWithError(&chunkPayloadData{
+			iData:                  true,
+			unordered:              true,
+			messageIdentifier:      maxReassemblyQueueMIDEntries,
+			fragmentSequenceNumber: 0,
+			beginningFragment:      true,
+			endingFragment:         true,
+			tsn:                    maxReassemblyQueueMIDEntries + 1,
+			streamIdentifier:       0,
+			payloadType:            PayloadTypeWebRTCBinary,
+		})
+		assert.ErrorIs(t, err, errReassemblyQueueMIDLimitExceeded)
+		assert.False(t, complete, "new MID should be rejected")
+		assert.Len(t, rq.unorderedMIDMap, 0)
+		assert.Len(t, rq.unorderedMID, maxReassemblyQueueMIDEntries)
+		assert.Equal(t, 0, rq.getNumBytes(), "zero-byte messages must not hide descriptor growth")
 	})
 }
 
