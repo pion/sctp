@@ -1005,21 +1005,10 @@ func TestAssociationIForwardTSNValidationAbort(t *testing.T) {
 		expectedErr error
 	}{
 		{
-			name: "duplicate ordered stream forward",
-			chunk: &chunkIForwardTSN{
-				newCumulativeTSN: 1,
-				streams: []chunkIForwardTSNStream{
-					{identifier: 1, unordered: false, messageIdentifier: 2},
-					{identifier: 1, unordered: false, messageIdentifier: 3},
-				},
-			},
-			expectedErr: errIForwardTSNDuplicateStream,
-		},
-		{
 			name: "too many streams",
 			chunk: &chunkIForwardTSN{
 				newCumulativeTSN: 1,
-				streams:          make([]chunkIForwardTSNStream, maxIForwardTSNStreams+1),
+				streams:          makeDistinctIForwardTSNStreams(maxIForwardTSNStreams + 1),
 			},
 			expectedErr: errIForwardTSNTooManyStreams,
 		},
@@ -1039,6 +1028,53 @@ func TestAssociationIForwardTSNValidationAbort(t *testing.T) {
 			assert.Contains(t, string(cause.additionalInformation), tt.expectedErr.Error())
 		})
 	}
+}
+
+func TestAssociationIForwardTSNDuplicateEntriesUseLargestMID(t *testing.T) {
+	assoc := createTestAssociation(t, Config{})
+	assoc.useIForwardTSN = true
+	assoc.payloadQueue.init(0)
+	assoc.setState(established)
+
+	stream := assoc.createStream(1, false)
+	require.NotNil(t, stream)
+	require.False(t, stream.reassemblyQueue.push(&chunkPayloadData{
+		iData:             true,
+		messageIdentifier: 2,
+		beginningFragment: true,
+		tsn:               10,
+		streamIdentifier:  1,
+		payloadType:       PayloadTypeWebRTCBinary,
+		userData:          []byte("MID2"),
+	}))
+	require.False(t, stream.reassemblyQueue.push(&chunkPayloadData{
+		iData:             true,
+		messageIdentifier: 3,
+		beginningFragment: true,
+		tsn:               11,
+		streamIdentifier:  1,
+		payloadType:       PayloadTypeWebRTCBinary,
+		userData:          []byte("MID3"),
+	}))
+
+	chunk := &chunkIForwardTSN{
+		newCumulativeTSN: assoc.peerLastTSN() + 1,
+		streams: []chunkIForwardTSNStream{
+			{identifier: 1, unordered: false, messageIdentifier: 2},
+			{identifier: 1, unordered: false, messageIdentifier: 3},
+		},
+	}
+	require.NoError(t, assoc.handleChunk(&packet{}, chunk))
+
+	require.False(t, assoc.willSendAbort, "duplicate I-FORWARD-TSN entries should not abort")
+	assert.Equal(t, []chunkIForwardTSNStream{{
+		identifier:        1,
+		unordered:         false,
+		messageIdentifier: 3,
+	}}, chunk.streams)
+	assert.Equal(t, uint32(4), stream.reassemblyQueue.nextMID, "largest duplicate MID should be applied")
+	assert.Empty(t, stream.reassemblyQueue.orderedMIDMap, "forwarded incomplete MIDs should be removed")
+	assert.Equal(t, 0, stream.reassemblyQueue.getNumBytes(), "forwarded bytes should be removed")
 }
 
 func TestAssociationInterleavingProtocolViolationMIDLimit(t *testing.T) {

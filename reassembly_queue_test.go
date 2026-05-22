@@ -559,6 +559,234 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 		assert.Equal(t, "AB", string(buf[:n]), "data should match")
 	})
 
+	t.Run("ordered i-data ignores duplicate fsn with different tsn", func(t *testing.T) {
+		rq := newReassemblyQueue(0)
+		orgPpi := PayloadTypeWebRTCBinary
+
+		complete := rq.push(&chunkPayloadData{
+			iData:                  true,
+			messageIdentifier:      0,
+			fragmentSequenceNumber: 0,
+			beginningFragment:      true,
+			tsn:                    5,
+			streamIdentifier:       0,
+			payloadType:            orgPpi,
+			userData:               []byte("A"),
+		})
+		assert.False(t, complete, "chunk set should not be complete yet")
+		assert.Equal(t, 1, rq.getNumBytes(), "num bytes mismatch")
+
+		complete = rq.push(&chunkPayloadData{
+			iData:                  true,
+			messageIdentifier:      0,
+			fragmentSequenceNumber: 0,
+			tsn:                    10,
+			streamIdentifier:       0,
+			payloadType:            orgPpi,
+			userData:               []byte("duplicate"),
+		})
+		assert.False(t, complete, "duplicate FSN should be ignored")
+		assert.Equal(t, 1, rq.getNumBytes(), "duplicate FSN must not count toward queued bytes")
+
+		complete = rq.push(&chunkPayloadData{
+			iData:                  true,
+			messageIdentifier:      0,
+			fragmentSequenceNumber: 1,
+			endingFragment:         true,
+			tsn:                    6,
+			streamIdentifier:       0,
+			payloadType:            orgPpi,
+			userData:               []byte("B"),
+		})
+		assert.True(t, complete, "chunk set should be complete")
+		assert.Equal(t, 2, rq.getNumBytes(), "num bytes mismatch")
+
+		buf := make([]byte, 4)
+		n, ppi, err := rq.read(buf)
+		assert.NoError(t, err, "read() should succeed")
+		assert.Equal(t, 2, n, "should receive 2 bytes")
+		assert.Equal(t, orgPpi, ppi, "should have valid ppi")
+		assert.Equal(t, "AB", string(buf[:n]), "data should match")
+		assert.Equal(t, 0, rq.getNumBytes(), "num bytes mismatch")
+	})
+
+	t.Run("ordered i-data ignores stale incomplete mid after read advances nextMID", func(t *testing.T) {
+		rq := newReassemblyQueue(0)
+		orgPpi := PayloadTypeWebRTCBinary
+
+		complete, err := rq.pushWithError(&chunkPayloadData{
+			iData:             true,
+			messageIdentifier: 0,
+			beginningFragment: true,
+			endingFragment:    true,
+			tsn:               1,
+			streamIdentifier:  0,
+			payloadType:       orgPpi,
+			userData:          []byte("M0"),
+		})
+		assert.NoError(t, err)
+		assert.True(t, complete, "MID 0 should be complete")
+
+		buf := make([]byte, 4)
+		n, ppi, err := rq.read(buf)
+		assert.NoError(t, err, "read() should succeed")
+		assert.Equal(t, 2, n, "should receive 2 bytes")
+		assert.Equal(t, orgPpi, ppi, "should have valid ppi")
+		assert.Equal(t, "M0", string(buf[:n]), "data should match")
+		assert.Equal(t, uint32(1), rq.nextMID, "next MID should advance")
+		assert.Equal(t, 0, rq.getNumBytes(), "queue should be empty after read")
+
+		complete, err = rq.pushWithError(&chunkPayloadData{
+			iData:                  true,
+			messageIdentifier:      0,
+			fragmentSequenceNumber: 0,
+			beginningFragment:      true,
+			tsn:                    2,
+			streamIdentifier:       0,
+			payloadType:            orgPpi,
+			userData:               []byte("stale"),
+		})
+		assert.NoError(t, err)
+		assert.False(t, complete, "stale MID should be ignored")
+		assert.Len(t, rq.orderedMID, 0, "stale MID must not be queued")
+		assert.Len(t, rq.orderedMIDMap, 0, "stale MID must not be mapped")
+		assert.Equal(t, 0, rq.getNumBytes(), "stale MID must not count toward queued bytes")
+
+		complete, err = rq.pushWithError(&chunkPayloadData{
+			iData:             true,
+			messageIdentifier: 1,
+			beginningFragment: true,
+			endingFragment:    true,
+			tsn:               3,
+			streamIdentifier:  0,
+			payloadType:       orgPpi,
+			userData:          []byte("M1"),
+		})
+		assert.NoError(t, err)
+		assert.True(t, complete, "MID 1 should be complete")
+		assert.True(t, rq.isReadable(), "current MID should not be blocked by stale MID")
+
+		n, ppi, err = rq.read(buf)
+		assert.NoError(t, err, "read() should succeed")
+		assert.Equal(t, 2, n, "should receive 2 bytes")
+		assert.Equal(t, orgPpi, ppi, "should have valid ppi")
+		assert.Equal(t, "M1", string(buf[:n]), "data should match")
+		assert.Equal(t, uint32(2), rq.nextMID, "next MID should advance")
+		assert.Equal(t, 0, rq.getNumBytes(), "queue should be empty after read")
+	})
+
+	t.Run("ordered i-data ignores stale complete mid after read advances nextMID", func(t *testing.T) {
+		rq := newReassemblyQueue(0)
+		orgPpi := PayloadTypeWebRTCBinary
+
+		complete, err := rq.pushWithError(&chunkPayloadData{
+			iData:             true,
+			messageIdentifier: 0,
+			beginningFragment: true,
+			endingFragment:    true,
+			tsn:               1,
+			streamIdentifier:  0,
+			payloadType:       orgPpi,
+			userData:          []byte("M0"),
+		})
+		assert.NoError(t, err)
+		assert.True(t, complete, "MID 0 should be complete")
+
+		buf := make([]byte, 4)
+		n, ppi, err := rq.read(buf)
+		assert.NoError(t, err, "read() should succeed")
+		assert.Equal(t, 2, n, "should receive 2 bytes")
+		assert.Equal(t, orgPpi, ppi, "should have valid ppi")
+		assert.Equal(t, "M0", string(buf[:n]), "data should match")
+		assert.Equal(t, uint32(1), rq.nextMID, "next MID should advance")
+		assert.Equal(t, 0, rq.getNumBytes(), "queue should be empty after read")
+
+		complete, err = rq.pushWithError(&chunkPayloadData{
+			iData:             true,
+			messageIdentifier: 0,
+			beginningFragment: true,
+			endingFragment:    true,
+			tsn:               2,
+			streamIdentifier:  0,
+			payloadType:       orgPpi,
+			userData:          []byte("old"),
+		})
+		assert.NoError(t, err)
+		assert.False(t, complete, "stale complete MID should be ignored")
+		assert.False(t, rq.isReadable(), "stale complete MID must not become readable")
+		assert.Len(t, rq.orderedMID, 0, "stale MID must not be queued")
+		assert.Len(t, rq.orderedMIDMap, 0, "stale MID must not be mapped")
+		assert.Equal(t, 0, rq.getNumBytes(), "stale MID must not count toward queued bytes")
+	})
+
+	t.Run("unordered i-data ignores duplicate fsn with different tsn", func(t *testing.T) {
+		rq := newReassemblyQueue(0)
+		orgPpi := PayloadTypeWebRTCBinary
+
+		complete := rq.push(&chunkPayloadData{
+			iData:                  true,
+			unordered:              true,
+			messageIdentifier:      0,
+			fragmentSequenceNumber: 0,
+			beginningFragment:      true,
+			tsn:                    5,
+			streamIdentifier:       0,
+			payloadType:            orgPpi,
+			userData:               []byte("A"),
+		})
+		assert.False(t, complete, "chunk set should not be complete yet")
+		assert.Equal(t, 1, rq.getNumBytes(), "num bytes mismatch")
+
+		complete = rq.push(&chunkPayloadData{
+			iData:                  true,
+			unordered:              true,
+			messageIdentifier:      0,
+			fragmentSequenceNumber: 0,
+			tsn:                    10,
+			streamIdentifier:       0,
+			payloadType:            orgPpi,
+			userData:               []byte("duplicate"),
+		})
+		assert.False(t, complete, "duplicate FSN should be ignored")
+		assert.Equal(t, 1, rq.getNumBytes(), "duplicate FSN must not count toward queued bytes")
+
+		complete = rq.push(&chunkPayloadData{
+			iData:                  true,
+			unordered:              true,
+			messageIdentifier:      0,
+			fragmentSequenceNumber: 1,
+			endingFragment:         true,
+			tsn:                    6,
+			streamIdentifier:       0,
+			payloadType:            orgPpi,
+			userData:               []byte("B"),
+		})
+		assert.True(t, complete, "chunk set should be complete")
+		assert.Equal(t, 2, rq.getNumBytes(), "num bytes mismatch")
+
+		complete = rq.push(&chunkPayloadData{
+			iData:                  true,
+			unordered:              true,
+			messageIdentifier:      0,
+			fragmentSequenceNumber: 1,
+			endingFragment:         true,
+			tsn:                    11,
+			streamIdentifier:       0,
+			payloadType:            orgPpi,
+			userData:               []byte("late-duplicate"),
+		})
+		assert.False(t, complete, "duplicate for queued complete MID should be ignored")
+		assert.Equal(t, 2, rq.getNumBytes(), "late duplicate must not count toward queued bytes")
+
+		buf := make([]byte, 4)
+		n, ppi, err := rq.read(buf)
+		assert.NoError(t, err, "read() should succeed")
+		assert.Equal(t, 2, n, "should receive 2 bytes")
+		assert.Equal(t, orgPpi, ppi, "should have valid ppi")
+		assert.Equal(t, "AB", string(buf[:n]), "data should match")
+		assert.Equal(t, 0, rq.getNumBytes(), "num bytes mismatch")
+	})
+
 	t.Run("forwardTSN for ordered i-data drops incomplete mids and advances nextMID", func(t *testing.T) {
 		rq := newReassemblyQueue(0)
 		orgPpi := PayloadTypeWebRTCBinary
@@ -608,6 +836,69 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 		assert.Equal(t, "OK", string(buf[:n]), "data should match")
 		assert.Equal(t, 0, rq.getNumBytes(), "all bytes should be drained after read")
 		assert.Equal(t, uint32(2), rq.nextMID, "next MID should remain forwarded")
+	})
+
+	t.Run("ordered i-data ignores stale mids after forwardTSN advances nextMID", func(t *testing.T) {
+		rq := newReassemblyQueue(0)
+		orgPpi := PayloadTypeWebRTCBinary
+
+		rq.forwardTSNForOrderedMID(1)
+		assert.Equal(t, uint32(2), rq.nextMID, "next MID should advance")
+
+		complete, err := rq.pushWithError(&chunkPayloadData{
+			iData:                  true,
+			messageIdentifier:      0,
+			fragmentSequenceNumber: 0,
+			beginningFragment:      true,
+			tsn:                    1,
+			streamIdentifier:       0,
+			payloadType:            orgPpi,
+			userData:               []byte("old0"),
+		})
+		assert.NoError(t, err)
+		assert.False(t, complete, "stale MID 0 should be ignored")
+		assert.Len(t, rq.orderedMID, 0, "stale MID must not be queued")
+		assert.Len(t, rq.orderedMIDMap, 0, "stale MID must not be mapped")
+		assert.Equal(t, 0, rq.getNumBytes(), "stale MID must not count toward queued bytes")
+
+		complete, err = rq.pushWithError(&chunkPayloadData{
+			iData:             true,
+			messageIdentifier: 1,
+			beginningFragment: true,
+			endingFragment:    true,
+			tsn:               2,
+			streamIdentifier:  0,
+			payloadType:       orgPpi,
+			userData:          []byte("old1"),
+		})
+		assert.NoError(t, err)
+		assert.False(t, complete, "stale MID 1 should be ignored")
+		assert.Len(t, rq.orderedMID, 0, "stale MID must not be queued")
+		assert.Len(t, rq.orderedMIDMap, 0, "stale MID must not be mapped")
+		assert.Equal(t, 0, rq.getNumBytes(), "stale MID must not count toward queued bytes")
+
+		complete, err = rq.pushWithError(&chunkPayloadData{
+			iData:             true,
+			messageIdentifier: 2,
+			beginningFragment: true,
+			endingFragment:    true,
+			tsn:               3,
+			streamIdentifier:  0,
+			payloadType:       orgPpi,
+			userData:          []byte("M2"),
+		})
+		assert.NoError(t, err)
+		assert.True(t, complete, "MID 2 should be complete")
+		assert.True(t, rq.isReadable(), "current MID should not be blocked by stale MIDs")
+
+		buf := make([]byte, 4)
+		n, ppi, err := rq.read(buf)
+		assert.NoError(t, err, "read() should succeed")
+		assert.Equal(t, 2, n, "should receive 2 bytes")
+		assert.Equal(t, orgPpi, ppi, "should have valid ppi")
+		assert.Equal(t, "M2", string(buf[:n]), "data should match")
+		assert.Equal(t, uint32(3), rq.nextMID, "next MID should advance")
+		assert.Equal(t, 0, rq.getNumBytes(), "queue should be empty after read")
 	})
 
 	t.Run("forwardTSN for unordered i-data keeps complete mids and drops old incomplete mids", func(t *testing.T) {

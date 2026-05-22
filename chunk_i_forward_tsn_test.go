@@ -13,6 +13,18 @@ func testChunkIForwardTSN() []byte {
 	return []byte{0xc2, 0x0, 0x0, 0x8, 0x0, 0x0, 0x0, 0x3}
 }
 
+func makeDistinctIForwardTSNStreams(count int) []chunkIForwardTSNStream {
+	streams := make([]chunkIForwardTSNStream, 0, count)
+	for i := range count {
+		streams = append(streams, chunkIForwardTSNStream{
+			identifier:        uint16(i), //nolint:gosec // count is bounded by maxIForwardTSNStreams in tests.
+			messageIdentifier: uint32(i), //nolint:gosec // count is bounded by maxIForwardTSNStreams in tests.
+		})
+	}
+
+	return streams
+}
+
 func TestChunkIForwardTSN_Success(t *testing.T) {
 	tt := []struct {
 		binary []byte
@@ -40,6 +52,22 @@ func TestChunkIForwardTSN_Success(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equalf(t, tc.binary, b, "test %d not equal", i)
 	}
+}
+
+func TestChunkIForwardTSNUnmarshal_NormalizesDuplicateStreams(t *testing.T) {
+	actual := &chunkIForwardTSN{}
+	err := actual.unmarshal([]byte{
+		0xc2, 0x0, 0x0, 0x18, 0x0, 0x0, 0x0, 0x3,
+		0x0, 0x4, 0x0, 0x1, 0x0, 0x0, 0x0, 0x2,
+		0x0, 0x4, 0x0, 0x1, 0x0, 0x0, 0x0, 0x5,
+	})
+
+	assert.NoError(t, err)
+	assert.Equal(t, []chunkIForwardTSNStream{{
+		identifier:        4,
+		unordered:         true,
+		messageIdentifier: 5,
+	}}, actual.streams)
 }
 
 func TestChunkIForwardTSNUnmarshal_Failure(t *testing.T) {
@@ -84,6 +112,7 @@ func TestChunkIForwardTSNCheck(t *testing.T) {
 		chunk     *chunkIForwardTSN
 		wantAbort bool
 		wantErr   error
+		want      []chunkIForwardTSNStream
 	}{
 		{
 			name: "valid with ordered and unordered forwards for same stream",
@@ -108,13 +137,13 @@ func TestChunkIForwardTSNCheck(t *testing.T) {
 			name: "too many streams",
 			chunk: &chunkIForwardTSN{
 				newCumulativeTSN: 1,
-				streams:          make([]chunkIForwardTSNStream, maxIForwardTSNStreams+1),
+				streams:          makeDistinctIForwardTSNStreams(maxIForwardTSNStreams + 1),
 			},
 			wantAbort: true,
 			wantErr:   errIForwardTSNTooManyStreams,
 		},
 		{
-			name: "duplicate ordered stream forward",
+			name: "duplicate ordered stream forward keeps largest mid",
 			chunk: &chunkIForwardTSN{
 				newCumulativeTSN: 1,
 				streams: []chunkIForwardTSNStream{
@@ -122,11 +151,12 @@ func TestChunkIForwardTSNCheck(t *testing.T) {
 					{identifier: 1, unordered: false, messageIdentifier: 3},
 				},
 			},
-			wantAbort: true,
-			wantErr:   errIForwardTSNDuplicateStream,
+			want: []chunkIForwardTSNStream{
+				{identifier: 1, unordered: false, messageIdentifier: 3},
+			},
 		},
 		{
-			name: "duplicate unordered stream forward",
+			name: "duplicate unordered stream forward keeps largest mid",
 			chunk: &chunkIForwardTSN{
 				newCumulativeTSN: 1,
 				streams: []chunkIForwardTSNStream{
@@ -134,8 +164,9 @@ func TestChunkIForwardTSNCheck(t *testing.T) {
 					{identifier: 1, unordered: true, messageIdentifier: 3},
 				},
 			},
-			wantAbort: true,
-			wantErr:   errIForwardTSNDuplicateStream,
+			want: []chunkIForwardTSNStream{
+				{identifier: 1, unordered: true, messageIdentifier: 3},
+			},
 		},
 	}
 
@@ -145,6 +176,9 @@ func TestChunkIForwardTSNCheck(t *testing.T) {
 			assert.Equal(t, tc.wantAbort, abort)
 			if tc.wantErr == nil {
 				assert.NoError(t, err)
+				if tc.want != nil {
+					assert.Equal(t, tc.want, tc.chunk.streams)
+				}
 
 				return
 			}
@@ -154,8 +188,8 @@ func TestChunkIForwardTSNCheck(t *testing.T) {
 	}
 }
 
-func TestChunkIForwardTSNMarshal_Failure(t *testing.T) {
-	_, err := (&chunkIForwardTSN{
+func TestChunkIForwardTSNMarshal_NormalizesDuplicateStreams(t *testing.T) {
+	b, err := (&chunkIForwardTSN{
 		newCumulativeTSN: 1,
 		streams: []chunkIForwardTSNStream{
 			{identifier: 1, messageIdentifier: 2},
@@ -163,7 +197,11 @@ func TestChunkIForwardTSNMarshal_Failure(t *testing.T) {
 		},
 	}).marshal()
 
-	assert.ErrorIs(t, err, errIForwardTSNDuplicateStream)
+	assert.NoError(t, err)
+	assert.Equal(t, []byte{
+		0xc2, 0x0, 0x0, 0x10, 0x0, 0x0, 0x0, 0x1,
+		0x0, 0x1, 0x0, 0x0, 0x0, 0x0, 0x0, 0x3,
+	}, b)
 }
 
 func TestChunkIForwardTSNMarshal_ZeroCumulativeTSN(t *testing.T) {

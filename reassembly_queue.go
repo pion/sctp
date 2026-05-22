@@ -133,10 +133,14 @@ func newChunkSetMID(mid uint32, ppi PayloadProtocolIdentifier) *chunkSetMID {
 	}
 }
 
-func (set *chunkSetMID) push(chunk *chunkPayloadData) bool {
+func (set *chunkSetMID) pushAndCheck(chunk *chunkPayloadData) (complete bool, accepted bool) {
+	if set.isComplete() {
+		return false, false
+	}
+
 	for _, c := range set.chunks {
-		if c.tsn == chunk.tsn {
-			return false
+		if c.fragmentSequenceNumber == chunk.fragmentSequenceNumber {
+			return false, false
 		}
 	}
 
@@ -146,7 +150,7 @@ func (set *chunkSetMID) push(chunk *chunkPayloadData) bool {
 	}
 	sortChunksByFSN(set.chunks)
 
-	return set.isComplete()
+	return set.isComplete(), true
 }
 
 func (set *chunkSetMID) isComplete() bool {
@@ -311,6 +315,10 @@ func (r *reassemblyQueue) pushIData(chunk *chunkPayloadData) (bool, error) {
 }
 
 func (r *reassemblyQueue) pushUnorderedIData(chunk *chunkPayloadData) (bool, error) {
+	if r.hasQueuedUnorderedMID(chunk.messageIdentifier) {
+		return false, nil
+	}
+
 	if r.unorderedMIDMap == nil {
 		r.unorderedMIDMap = map[uint32]*chunkSetMID{}
 	}
@@ -322,8 +330,14 @@ func (r *reassemblyQueue) pushUnorderedIData(chunk *chunkPayloadData) (bool, err
 		cset = newChunkSetMID(chunk.messageIdentifier, chunk.payloadType)
 		r.unorderedMIDMap[chunk.messageIdentifier] = cset
 	}
+
+	complete, accepted := cset.pushAndCheck(chunk)
+	if !accepted {
+		return false, nil
+	}
+
 	atomic.AddUint64(&r.nBytes, uint64(len(chunk.userData)))
-	if cset.push(chunk) {
+	if complete {
 		delete(r.unorderedMIDMap, chunk.messageIdentifier)
 		r.unorderedMID = append(r.unorderedMID, cset)
 
@@ -334,6 +348,10 @@ func (r *reassemblyQueue) pushUnorderedIData(chunk *chunkPayloadData) (bool, err
 }
 
 func (r *reassemblyQueue) pushOrderedIData(chunk *chunkPayloadData) (bool, error) {
+	if sna32LT(chunk.messageIdentifier, r.nextMID) {
+		return false, nil
+	}
+
 	if r.orderedMIDMap == nil {
 		r.orderedMIDMap = map[uint32]*chunkSetMID{}
 	}
@@ -347,13 +365,28 @@ func (r *reassemblyQueue) pushOrderedIData(chunk *chunkPayloadData) (bool, error
 		r.orderedMID = insertChunkSetByMID(r.orderedMID, cset)
 	}
 
+	complete, accepted := cset.pushAndCheck(chunk)
+	if !accepted {
+		return false, nil
+	}
+
 	atomic.AddUint64(&r.nBytes, uint64(len(chunk.userData)))
 
-	return cset.push(chunk), nil
+	return complete, nil
 }
 
 func (r *reassemblyQueue) unorderedMIDEntryCount() int {
 	return len(r.unorderedMIDMap) + len(r.unorderedMID)
+}
+
+func (r *reassemblyQueue) hasQueuedUnorderedMID(mid uint32) bool {
+	for _, set := range r.unorderedMID {
+		if set.mid == mid {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (r *reassemblyQueue) findCompleteUnorderedChunkSet() *chunkSet {

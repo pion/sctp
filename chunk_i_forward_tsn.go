@@ -52,8 +52,12 @@ var (
 	errIForwardTSNChunkTooShort      = errors.New("i-forward-tsn chunk too short")
 	errIForwardTSNChunkInvalidLength = errors.New("i-forward-tsn chunk invalid length")
 	errIForwardTSNTooManyStreams     = errors.New("i-forward-tsn chunk contains too many streams")
-	errIForwardTSNDuplicateStream    = errors.New("i-forward-tsn chunk contains duplicate stream")
 )
+
+type iForwardTSNStreamKey struct {
+	identifier uint16
+	unordered  bool
+}
 
 func (c *chunkIForwardTSN) unmarshal(raw []byte) error {
 	if err := c.chunkHeader.unmarshal(raw); err != nil {
@@ -87,12 +91,13 @@ func (c *chunkIForwardTSN) unmarshal(raw []byte) error {
 
 		streams = append(streams, s)
 	}
-	c.streams = streams
+	c.streams = normalizeIForwardTSNStreams(streams)
 
 	return nil
 }
 
 func (c *chunkIForwardTSN) marshal() ([]byte, error) {
+	c.streams = normalizeIForwardTSNStreams(c.streams)
 	if _, err := c.check(); err != nil {
 		return nil, err
 	}
@@ -118,29 +123,40 @@ func (c *chunkIForwardTSN) marshal() ([]byte, error) {
 }
 
 func (c *chunkIForwardTSN) check() (abort bool, err error) {
+	c.streams = normalizeIForwardTSNStreams(c.streams)
+
 	if len(c.streams) > maxIForwardTSNStreams {
 		return true, fmt.Errorf("%w: %d exceeds %d", errIForwardTSNTooManyStreams, len(c.streams), maxIForwardTSNStreams)
 	}
 
-	type streamForwardKey struct {
-		identifier uint16
-		unordered  bool
-	}
-
-	forwarded := make(map[streamForwardKey]struct{}, len(c.streams))
-	for _, s := range c.streams {
-		key := streamForwardKey{
-			identifier: s.identifier,
-			unordered:  s.unordered,
-		}
-		if _, ok := forwarded[key]; ok {
-			return true, fmt.Errorf("%w: si=%d unordered=%t",
-				errIForwardTSNDuplicateStream, s.identifier, s.unordered)
-		}
-		forwarded[key] = struct{}{}
-	}
-
 	return false, nil
+}
+
+func normalizeIForwardTSNStreams(streams []chunkIForwardTSNStream) []chunkIForwardTSNStream {
+	if len(streams) < 2 {
+		return streams
+	}
+
+	normalized := make([]chunkIForwardTSNStream, 0, len(streams))
+	forwarded := make(map[iForwardTSNStreamKey]int, len(streams))
+	for _, stream := range streams {
+		key := iForwardTSNStreamKey{
+			identifier: stream.identifier,
+			unordered:  stream.unordered,
+		}
+		if idx, ok := forwarded[key]; ok {
+			if sna32LT(normalized[idx].messageIdentifier, stream.messageIdentifier) {
+				normalized[idx].messageIdentifier = stream.messageIdentifier
+			}
+
+			continue
+		}
+
+		forwarded[key] = len(normalized)
+		normalized = append(normalized, stream)
+	}
+
+	return normalized
 }
 
 // String makes chunkIForwardTSN printable.
