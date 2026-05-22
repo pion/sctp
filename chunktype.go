@@ -13,6 +13,7 @@ type chunkType uint8
 // List of known chunkType enums.
 const (
 	ctPayloadData      chunkType = 0
+	ctIData            chunkType = 64
 	ctInit             chunkType = 1
 	ctInitAck          chunkType = 2
 	ctSack             chunkType = 3
@@ -28,12 +29,15 @@ const (
 	ctShutdownComplete chunkType = 14
 	ctReconfig         chunkType = 130
 	ctForwardTSN       chunkType = 192
+	ctIForwardTSN      chunkType = 194
 )
 
 func (c chunkType) String() string { //nolint:cyclop
 	switch c {
 	case ctPayloadData:
 		return "DATA"
+	case ctIData:
+		return "I-DATA"
 	case ctInit:
 		return "INIT"
 	case ctInitAck:
@@ -64,6 +68,8 @@ func (c chunkType) String() string { //nolint:cyclop
 		return "RECONFIG" // Re-configuration
 	case ctForwardTSN:
 		return "FORWARD-TSN"
+	case ctIForwardTSN:
+		return "I-FORWARD-TSN"
 	default:
 		return fmt.Sprintf("Unknown ChunkType: %d", c)
 	}

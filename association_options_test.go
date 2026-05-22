@@ -32,6 +32,27 @@ func TestAssociationOptions_ApplyBothSides(t *testing.T) {
 	assert.Equal(t, "x", cCfg.Name)
 }
 
+func TestConfigComparable(t *testing.T) {
+	_ = map[Config]struct{}{}
+}
+
+func TestAssociationOptions_Interleaving(t *testing.T) {
+	ca, cb := udpPiper(t)
+	defer func() {
+		_ = ca.Close()
+		_ = cb.Close()
+	}()
+
+	defaultCfg, err := buildClientConfig(WithNetConn(ca))
+	assert.NoError(t, err)
+	assert.True(t, defaultCfg.enableInterleaving)
+
+	disabledCfg, err := buildServerConfig(WithNetConn(cb), WithEnableInterleaving(false))
+	assert.NoError(t, err)
+	assert.False(t, disabledCfg.enableInterleaving)
+	assert.True(t, disabledCfg.enableInterleavingSet)
+}
+
 func TestAssociationOptions_Validation(t *testing.T) {
 	t.Run("nil logger factory", func(t *testing.T) {
 		var cfg Config
@@ -75,6 +96,20 @@ func TestAssociationOptions_Validation(t *testing.T) {
 		assert.ErrorIs(t, err, errInvalidSnapToken)
 		err = WithSNAP([]byte{}, []byte{}).applyServer(&cfg)
 		assert.ErrorIs(t, err, errInvalidSnapToken)
+	})
+
+	t.Run("nil stream scheduler", func(t *testing.T) {
+		var cfg Config
+		err := WithInterleavingOptions(WithInterleavingStreamSchedulerFactory(nil)).applyServer(&cfg)
+		assert.ErrorIs(t, err, errNilStreamScheduler)
+	})
+
+	t.Run("invalid stream scheduler weight", func(t *testing.T) {
+		var cfg Config
+		err := WithInterleavingOptions(
+			WithInterleavingWeightedFairQueueingWeight(1, 0),
+		).applyServer(&cfg)
+		assert.ErrorIs(t, err, errInvalidStreamSchedulerWeight)
 	})
 }
 
@@ -135,6 +170,7 @@ func TestAssociationOptions_ClientAndServer(t *testing.T) {
 		WithCwndCAStep(7000),
 		WithBlockWrite(true),
 		WithEnableZeroChecksum(true),
+		WithEnableInterleaving(false),
 	)
 	assert.NoError(t, err)
 	defer func() {

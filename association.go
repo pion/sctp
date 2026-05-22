@@ -74,6 +74,7 @@ const (
 	initialRecvBufSize    uint32 = 1024 * 1024
 	commonHeaderSize      uint32 = 12
 	dataChunkHeaderSize   uint32 = 16
+	iDataChunkHeaderSize  uint32 = 20
 	defaultMaxMessageSize uint32 = 65536
 )
 
@@ -234,6 +235,12 @@ type Association struct {
 	cumulativeTSNAckPoint   uint32
 	advancedPeerTSNAckPoint uint32
 	useForwardTSN           bool
+	useIForwardTSN          bool
+	useInterleaving         bool
+	localInterleaving       bool
+	peerInterleaving        bool
+	peerForwardTSN          bool
+	peerIForwardTSN         bool
 	sendZeroChecksum        bool
 	recvZeroChecksum        bool
 
@@ -333,10 +340,9 @@ type snapConfig struct {
 // Config collects the arguments to createAssociation construction into
 // a single structure.
 type Config struct {
-	LoggerFactory logging.LoggerFactory
-	Name          string
-	NetConn       net.Conn
-
+	LoggerFactory      logging.LoggerFactory
+	Name               string
+	NetConn            net.Conn
 	BlockWrite         bool
 	EnableZeroChecksum bool
 	MTU                uint32
@@ -356,8 +362,14 @@ type Config struct {
 	// RACK config options
 	rack rackSettings
 
+	// User message interleaving config options
+	interleaving *interleavingSettings
+
 	// SNAP/sctp-init
 	snapConfig *snapConfig
+
+	enableInterleaving    bool
+	enableInterleavingSet bool
 }
 
 // Server accepts a SCTP stream over a conn.
@@ -416,7 +428,9 @@ func createSNAPAssociation(config *Config) (*Association, error) {
 		return nil, err
 	}
 	assoc := createAssociationFromConfigWithTsn(config, local.initialTSN)
-	assoc.initWithOutOfBandTokens(local, remote)
+	if err = assoc.initWithOutOfBandTokens(local, remote); err != nil {
+		return nil, err
+	}
 
 	return assoc, nil
 }
@@ -466,6 +480,15 @@ func (c *Config) applyDefaults() {
 	}
 	if c.MTU == 0 {
 		c.MTU = initialMTU
+	}
+	if !c.enableInterleavingSet {
+		c.enableInterleaving = true
+	}
+	if c.interleaving == nil {
+		c.interleaving = &interleavingSettings{}
+	}
+	if c.interleaving.newStreamScheduler == nil {
+		setWeightedFairQueueingStreamScheduler(c.interleaving)
 	}
 }
 
@@ -524,6 +547,11 @@ func (c Config) applyServer(cfg *Config) error { //nolint:dupl,cyclop
 	}
 
 	cfg.rack = c.rack
+	cfg.interleaving = cloneInterleavingSettings(c.interleaving)
+	if c.enableInterleavingSet {
+		cfg.enableInterleaving = c.enableInterleaving
+		cfg.enableInterleavingSet = true
+	}
 
 	return nil
 }
@@ -572,7 +600,7 @@ func (a *Association) initClient() {
 	init.numInboundStreams = a.myMaxNumInboundStreams
 	init.initiateTag = a.myVerificationTag
 	init.advertisedReceiverWindowCredit = a.maxReceiveBufferSize
-	setSupportedExtensions(&init.chunkInitCommon)
+	setSupportedExtensions(&init.chunkInitCommon, a.localInterleaving)
 
 	if a.recvZeroChecksum {
 		init.params = append(init.params, &paramZeroChecksumAcceptable{edmid: dtlsErrorDetectionMethod})
@@ -632,6 +660,11 @@ func (c Config) applyClient(cfg *Config) error { //nolint:dupl,cyclop
 	}
 
 	cfg.rack = c.rack
+	cfg.interleaving = cloneInterleavingSettings(c.interleaving)
+	if c.enableInterleavingSet {
+		cfg.enableInterleaving = c.enableInterleaving
+		cfg.enableInterleavingSet = true
+	}
 
 	cfg.snapConfig = c.snapConfig
 
@@ -683,6 +716,11 @@ func createAssociationFromConfigWithTsn(cfg *Config, tsn uint32) *Association {
 	}
 
 	rtoMax := cfg.RTOMax
+	interleaving := cfg.interleaving
+	if interleaving == nil {
+		interleaving = &interleavingSettings{}
+		setWeightedFairQueueingStreamScheduler(interleaving)
+	}
 
 	assoc := &Association{
 		netConn:              cfg.NetConn,
@@ -697,7 +735,7 @@ func createAssociationFromConfigWithTsn(cfg *Config, tsn uint32) *Association {
 
 		payloadQueue:            newReceivePayloadQueue(getMaxTSNOffset(maxReceiveBufferSize)),
 		inflightQueue:           newPayloadQueue(),
-		pendingQueue:            newPendingQueue(),
+		pendingQueue:            newPendingQueue(interleaving.newStreamScheduler),
 		controlQueue:            newControlQueue(),
 		mtu:                     mtu,
 		maxPayloadSize:          mtu - (commonHeaderSize + dataChunkHeaderSize),
@@ -719,6 +757,7 @@ func createAssociationFromConfigWithTsn(cfg *Config, tsn uint32) *Association {
 		cumulativeTSNAckPoint:   tsn - 1,
 		advancedPeerTSNAckPoint: tsn - 1,
 		recvZeroChecksum:        cfg.EnableZeroChecksum,
+		localInterleaving:       cfg.enableInterleaving,
 		silentError:             ErrSilentlyDiscard,
 		stats:                   &associationStats{},
 		log:                     cfg.LoggerFactory.NewLogger("sctp"),
@@ -768,7 +807,7 @@ func createAssociationFromConfigWithTsn(cfg *Config, tsn uint32) *Association {
 	return assoc
 }
 
-func (a *Association) initWithOutOfBandTokens(localInit *chunkInit, remoteInit *chunkInit) {
+func (a *Association) initWithOutOfBandTokens(localInit *chunkInit, remoteInit *chunkInit) error {
 	a.lock.Lock()
 	defer a.lock.Unlock()
 
@@ -782,27 +821,59 @@ func (a *Association) initWithOutOfBandTokens(localInit *chunkInit, remoteInit *
 	a.peerVerificationTag = remoteInit.initiateTag
 	a.sourcePort = defaultSCTPSrcDstPort
 	a.destinationPort = defaultSCTPSrcDstPort
-	for _, param := range remoteInit.params {
-		switch v := param.(type) { // nolint:gocritic
-		case *paramSupportedExtensions:
-			for _, t := range v.ChunkTypes {
-				if t == ctForwardTSN {
-					a.log.Debugf("[%s] use ForwardTSN (on init)", a.name)
-					a.useForwardTSN = true
-				}
-			}
-		case *paramZeroChecksumAcceptable:
-			a.sendZeroChecksum = v.edmid == dtlsErrorDetectionMethod
-		}
-	}
 
-	if !a.useForwardTSN {
-		a.log.Warnf("[%s] not using ForwardTSN (on init)", a.name)
-	}
+	localExtensions := getSupportedExtensions(localInit.params)
+	a.localInterleaving = localExtensions.interleaving
+	a.setPeerSupportedExtensions(getSupportedExtensions(remoteInit.params))
+	a.setSendZeroChecksum(remoteInit.params)
 
 	a.ssthresh = a.RWND()
 
+	if err := a.establish("init"); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (a *Association) setPeerSupportedExtensions(extensions supportedExtensions) {
+	a.peerForwardTSN = extensions.forwardTSN
+	a.peerInterleaving = extensions.interleaving
+	a.peerIForwardTSN = extensions.iForwardTSN
+}
+
+func (a *Association) setSendZeroChecksum(params []param) {
+	for _, param := range params {
+		if zeroChecksum, ok := param.(*paramZeroChecksumAcceptable); ok {
+			a.sendZeroChecksum = zeroChecksum.edmid == dtlsErrorDetectionMethod
+		}
+	}
+}
+
+func (a *Association) logNegotiatedExtensions(stage string) {
+	switch {
+	case a.useInterleaving:
+		a.log.Debugf("[%s] use interleaving (on %s)", a.name, stage)
+		if !a.useIForwardTSN {
+			a.log.Warnf("[%s] not using I-ForwardTSN (on %s)", a.name, stage)
+		}
+	case a.useForwardTSN:
+		a.log.Debugf("[%s] use ForwardTSN (on %s)", a.name, stage)
+	default:
+		a.log.Warnf("[%s] not using ForwardTSN (on %s)", a.name, stage)
+	}
+}
+
+// establish finalizes negotiated options and transitions the association to ESTABLISHED.
+// The caller should hold the lock.
+func (a *Association) establish(stage string) error {
+	if err := a.updateInterleavingState(); err != nil {
+		return err
+	}
+	a.logNegotiatedExtensions(stage)
 	a.setState(established)
+
+	return nil
 }
 
 // caller must hold a.lock.
@@ -1298,9 +1369,17 @@ func (a *Association) gatherOutboundFastRetransmissionPackets( //nolint:gocognit
 			continue
 		}
 
-		// include padding for sizing.
-		chunkBytes := int(dataChunkHeaderSize) + len(chunkPayload.userData)
-		chunkBytes += getPadding(chunkBytes)
+		// RFC 4960 Sec 7.2.4 Fast Retransmit on Gap Reports
+		//  3)  Determine how many of the earliest (i.e., lowest TSN) DATA chunks
+		//      marked for retransmission will fit into a single packet, subject
+		//      to constraint of the path MTU of the destination transport
+		//      address to which the packet is being sent.  Call this value K.
+		//      Retransmit those K DATA chunks in a single packet.  When a Fast
+		//      Retransmit is being performed, the sender SHOULD ignore the value
+		//      of cwnd and SHOULD NOT delay retransmission for this single
+		//		packet.
+
+		chunkBytes := chunkPayload.chunkSizeInPacket()
 
 		// fast retransmit window cap
 		if fastRetransWnd < fastRetransSize+chunkBytes {
@@ -1396,10 +1475,18 @@ func (a *Association) gatherOutboundSackPackets(rawPackets [][]byte) [][]byte {
 
 // The caller should hold the lock.
 func (a *Association) gatherOutboundForwardTSNPackets(rawPackets [][]byte) [][]byte {
-	if a.willSendForwardTSN {
+	if a.willSendForwardTSN { //nolint:nestif
 		a.willSendForwardTSN = false
 		if sna32GT(a.advancedPeerTSNAckPoint, a.cumulativeTSNAckPoint) {
-			fwdtsn := a.createForwardTSN()
+			var fwdtsn chunk
+			if a.useIForwardTSN {
+				fwdtsn = a.createIForwardTSN()
+			} else if a.useForwardTSN {
+				fwdtsn = a.createForwardTSN()
+			}
+			if fwdtsn == nil {
+				return rawPackets
+			}
 			raw, err := a.marshalPacket(a.createPacket([]chunk{fwdtsn}))
 			if err != nil {
 				a.log.Warnf("[%s] failed to serialize a Forward TSN packet", a.name)
@@ -1682,15 +1769,97 @@ func getMaxTSNOffset(maxReceiveBufferSize uint32) uint32 {
 	return offset
 }
 
-func setSupportedExtensions(init *chunkInitCommon) {
+func setSupportedExtensions(init *chunkInitCommon, enableInterleaving bool) {
 	// nolint:godox
 	// TODO RFC5061 https://tools.ietf.org/html/rfc6525#section-5.2
 	// An implementation supporting this (Supported Extensions Parameter)
 	// extension MUST list the ASCONF, the ASCONF-ACK, and the AUTH chunks
 	// in its INIT and INIT-ACK parameters.
+	chunkTypes := []chunkType{ctReconfig, ctForwardTSN}
+	if enableInterleaving {
+		chunkTypes = append(chunkTypes, ctIData, ctIForwardTSN)
+	}
 	init.params = append(init.params, &paramSupportedExtensions{
-		ChunkTypes: []chunkType{ctReconfig, ctForwardTSN},
+		ChunkTypes: chunkTypes,
 	})
+}
+
+type supportedExtensions struct {
+	forwardTSN   bool
+	interleaving bool
+	iForwardTSN  bool
+}
+
+func getSupportedExtensions(params []param) supportedExtensions {
+	var extensions supportedExtensions
+	for _, param := range params {
+		if supported, ok := param.(*paramSupportedExtensions); ok {
+			parsed := supportedExtensionsFromChunkTypes(supported.ChunkTypes)
+			extensions.forwardTSN = extensions.forwardTSN || parsed.forwardTSN
+			extensions.interleaving = extensions.interleaving || parsed.interleaving
+			extensions.iForwardTSN = extensions.iForwardTSN || parsed.iForwardTSN
+		}
+	}
+
+	return extensions
+}
+
+func supportedExtensionsFromChunkTypes(chunkTypes []chunkType) supportedExtensions {
+	var extensions supportedExtensions
+	for _, t := range chunkTypes {
+		switch t {
+		case ctForwardTSN:
+			extensions.forwardTSN = true
+		case ctIData:
+			extensions.interleaving = true
+		case ctIForwardTSN:
+			extensions.iForwardTSN = true
+		default:
+		}
+	}
+
+	return extensions
+}
+
+func (a *Association) updateInterleavingState() error {
+	useInterleaving := a.localInterleaving && a.peerInterleaving
+	if useInterleaving != a.useInterleaving {
+		if err := a.pendingQueue.setInterleaving(useInterleaving); err != nil {
+			return err
+		}
+
+		a.useInterleaving = useInterleaving
+		if useInterleaving {
+			a.maxPayloadSize = a.mtu - (commonHeaderSize + iDataChunkHeaderSize)
+		} else {
+			a.maxPayloadSize = a.mtu - (commonHeaderSize + dataChunkHeaderSize)
+		}
+	}
+
+	if useInterleaving {
+		a.useIForwardTSN = a.peerIForwardTSN && a.localInterleaving
+		a.useForwardTSN = false
+	} else {
+		a.useIForwardTSN = false
+		a.useForwardTSN = a.peerForwardTSN
+	}
+
+	return nil
+}
+
+func (a *Association) partialReliabilityEnabled() bool {
+	return a.useForwardTSN || a.useIForwardTSN
+}
+
+// The caller should hold the lock.
+func (a *Association) abortProtocolViolation(reason string) {
+	a.log.Warnf("[%s] protocol violation: %s", a.name, reason)
+	a.willSendAbort = true
+	a.willSendAbortCause = &errorCauseProtocolViolation{
+		errorCauseHeader:      errorCauseHeader{code: protocolViolation},
+		additionalInformation: []byte(reason),
+	}
+	a.awakeWriteLoop()
 }
 
 // The caller should hold the lock.
@@ -1732,21 +1901,33 @@ func (a *Association) handleInit(pkt *packet, initChunk *chunkInit) ([]*packet, 
 	a.setRWND(initChunk.advertisedReceiverWindowCredit)
 	a.log.Debugf("[%s] initial rwnd=%d", a.name, a.RWND())
 
+	a.peerInterleaving = false
+	a.peerForwardTSN = false
+	a.peerIForwardTSN = false
+
 	for _, param := range initChunk.params {
-		switch v := param.(type) { // nolint:gocritic
+		switch val := param.(type) { // nolint:gocritic
 		case *paramSupportedExtensions:
-			for _, t := range v.ChunkTypes {
-				if t == ctForwardTSN {
-					a.log.Debugf("[%s] use ForwardTSN (on init)", a.name)
-					a.useForwardTSN = true
-				}
-			}
+			extensions := supportedExtensionsFromChunkTypes(val.ChunkTypes)
+			a.peerForwardTSN = a.peerForwardTSN || extensions.forwardTSN
+			a.peerInterleaving = a.peerInterleaving || extensions.interleaving
+			a.peerIForwardTSN = a.peerIForwardTSN || extensions.iForwardTSN
 		case *paramZeroChecksumAcceptable:
-			a.sendZeroChecksum = v.edmid == dtlsErrorDetectionMethod
+			a.sendZeroChecksum = val.edmid == dtlsErrorDetectionMethod
 		}
 	}
 
-	if !a.useForwardTSN {
+	if err := a.updateInterleavingState(); err != nil {
+		return nil, err
+	}
+	if a.useInterleaving { //nolint:nestif,gocritic
+		a.log.Debugf("[%s] use interleaving (on init)", a.name)
+		if !a.useIForwardTSN {
+			a.log.Warnf("[%s] not using I-ForwardTSN (on init)", a.name)
+		}
+	} else if a.useForwardTSN {
+		a.log.Debugf("[%s] use ForwardTSN (on init)", a.name)
+	} else {
 		a.log.Warnf("[%s] not using ForwardTSN (on init)", a.name)
 	}
 
@@ -1780,7 +1961,7 @@ func (a *Association) handleInit(pkt *packet, initChunk *chunkInit) ([]*packet, 
 	}
 	a.log.Debugf("[%s] sendZeroChecksum=%t (on init)", a.name, a.sendZeroChecksum)
 
-	setSupportedExtensions(&initAck.chunkInitCommon)
+	setSupportedExtensions(&initAck.chunkInitCommon, a.localInterleaving)
 
 	outbound.chunks = []chunk{initAck}
 
@@ -1826,26 +2007,38 @@ func (a *Association) handleInitAck(pkt *packet, initChunkAck *chunkInitAck) err
 	a.t1Init.stop()
 	a.storedInit = nil
 
+	a.peerInterleaving = false
+	a.peerForwardTSN = false
+	a.peerIForwardTSN = false
+
 	var cookieParam *paramStateCookie
 	for _, param := range initChunkAck.params {
-		switch v := param.(type) {
+		switch val := param.(type) {
 		case *paramStateCookie:
-			cookieParam = v
+			cookieParam = val
 		case *paramSupportedExtensions:
-			for _, t := range v.ChunkTypes {
-				if t == ctForwardTSN {
-					a.log.Debugf("[%s] use ForwardTSN (on initAck)", a.name)
-					a.useForwardTSN = true
-				}
-			}
+			extensions := supportedExtensionsFromChunkTypes(val.ChunkTypes)
+			a.peerForwardTSN = a.peerForwardTSN || extensions.forwardTSN
+			a.peerInterleaving = a.peerInterleaving || extensions.interleaving
+			a.peerIForwardTSN = a.peerIForwardTSN || extensions.iForwardTSN
 		case *paramZeroChecksumAcceptable:
-			a.sendZeroChecksum = v.edmid == dtlsErrorDetectionMethod
+			a.sendZeroChecksum = val.edmid == dtlsErrorDetectionMethod
 		}
 	}
 
 	a.log.Debugf("[%s] sendZeroChecksum=%t (on initAck)", a.name, a.sendZeroChecksum)
 
-	if !a.useForwardTSN {
+	if err := a.updateInterleavingState(); err != nil {
+		return err
+	}
+	if a.useInterleaving { //nolint:gocritic
+		a.log.Tracef("[%s] use interleaving (on initAck)", a.name)
+		if !a.useIForwardTSN {
+			a.log.Warnf("[%s] not using I-ForwardTSN (on initAck)", a.name)
+		}
+	} else if a.useForwardTSN {
+		a.log.Tracef("[%s] use ForwardTSN (on initAck)", a.name)
+	} else {
 		a.log.Warnf("[%s] not using ForwardTSN (on initAck)", a.name)
 	}
 	if cookieParam == nil {
@@ -1970,7 +2163,11 @@ func (a *Association) handleCookieEcho(cookieEcho *chunkCookieEcho) []*packet {
 		a.t1Cookie.stop()
 		a.storedCookieEcho = nil
 
-		a.setState(established)
+		if err := a.establish("cookieEcho"); err != nil {
+			a.completeHandshake(err)
+
+			return nil
+		}
 		if !a.completeHandshake(nil) {
 			return nil
 		}
@@ -2001,47 +2198,39 @@ func (a *Association) handleCookieAck() {
 	a.t1Cookie.stop()
 	a.storedCookieEcho = nil
 
-	a.setState(established)
+	if err := a.establish("cookieAck"); err != nil {
+		a.completeHandshake(err)
+
+		return
+	}
 	a.completeHandshake(nil)
 }
 
 // The caller should hold the lock.
 func (a *Association) handleData(chunkPayload *chunkPayloadData) []*packet {
+	state := a.getState()
+	if state != established && state != shutdownPending && state != shutdownReceived {
+		return nil
+	}
+
+	if chunkPayload.isIData() != a.useInterleaving {
+		if chunkPayload.isIData() {
+			a.abortProtocolViolation("received I-DATA without interleaving negotiated")
+		} else {
+			a.abortProtocolViolation("received DATA with interleaving negotiated")
+		}
+
+		return nil
+	}
+
 	a.log.Tracef("[%s] DATA: tsn=%d immediateSack=%v len=%d",
 		a.name, chunkPayload.tsn, chunkPayload.immediateSack, len(chunkPayload.userData))
 	a.stats.incDATAs()
 
 	canPush := a.payloadQueue.canPush(chunkPayload.tsn)
-	if canPush { //nolint:nestif
-		stream := a.getOrCreateStream(chunkPayload.streamIdentifier, true, PayloadTypeUnknown)
-		if stream == nil {
-			// silently discard the data. (sender will retry on T3-rtx timeout)
-			// see pion/sctp#30
-			a.log.Debugf("[%s] discard %d", a.name, chunkPayload.streamSequenceNumber)
-
+	if canPush {
+		if !a.acceptPayloadData(chunkPayload) {
 			return nil
-		}
-
-		if a.getMyReceiverWindowCredit() > 0 {
-			// Pass the new chunk to stream level as soon as it arrives
-			a.payloadQueue.push(chunkPayload.tsn)
-			stream.handleData(chunkPayload)
-		} else {
-			// Receive buffer is full
-			lastTSN, ok := a.payloadQueue.getLastTSNReceived()
-			if ok && sna32LT(chunkPayload.tsn, lastTSN) {
-				a.log.Debugf(
-					"[%s] receive buffer full, but accepted as this is a missing chunk with tsn=%d ssn=%d",
-					a.name, chunkPayload.tsn, chunkPayload.streamSequenceNumber,
-				)
-				a.payloadQueue.push(chunkPayload.tsn)
-				stream.handleData(chunkPayload)
-			} else {
-				a.log.Debugf(
-					"[%s] receive buffer full. dropping DATA with tsn=%d ssn=%d",
-					a.name, chunkPayload.tsn, chunkPayload.streamSequenceNumber,
-				)
-			}
 		}
 	}
 
@@ -2057,6 +2246,53 @@ func (a *Association) handleData(chunkPayload *chunkPayloadData) []*packet {
 	sackNow := chunkPayload.immediateSack || gapDetected
 
 	return a.handlePeerLastTSNAndAcknowledgement(sackNow)
+}
+
+// The caller should hold the lock.
+func (a *Association) acceptPayloadData(chunkPayload *chunkPayloadData) bool {
+	stream := a.getOrCreateStream(chunkPayload.streamIdentifier, true, PayloadTypeUnknown)
+	if stream == nil {
+		// silently discard the data. (sender will retry on T3-rtx timeout)
+		// see pion/sctp#30
+		a.log.Debugf("[%s] discard %d", a.name, chunkPayload.streamSequenceNumber)
+
+		return false
+	}
+
+	if a.getMyReceiverWindowCredit() > 0 {
+		// Pass the new chunk to stream level as soon as it arrives
+		return a.pushPayloadDataToStream(stream, chunkPayload)
+	}
+
+	// Receive buffer is full
+	lastTSN, ok := a.payloadQueue.getLastTSNReceived()
+	if !ok || !sna32LT(chunkPayload.tsn, lastTSN) {
+		a.log.Debugf(
+			"[%s] receive buffer full. dropping DATA with tsn=%d ssn=%d",
+			a.name, chunkPayload.tsn, chunkPayload.streamSequenceNumber,
+		)
+
+		return true
+	}
+
+	a.log.Debugf(
+		"[%s] receive buffer full, but accepted as this is a missing chunk with tsn=%d ssn=%d",
+		a.name, chunkPayload.tsn, chunkPayload.streamSequenceNumber,
+	)
+
+	return a.pushPayloadDataToStream(stream, chunkPayload)
+}
+
+// The caller should hold the lock.
+func (a *Association) pushPayloadDataToStream(stream *Stream, chunkPayload *chunkPayloadData) bool {
+	a.payloadQueue.push(chunkPayload.tsn)
+	if err := stream.handleData(chunkPayload); err != nil {
+		a.abortProtocolViolation(err.Error())
+
+		return false
+	}
+
+	return true
 }
 
 // A common routine for handleData and handleForwardTSN routines
@@ -2570,7 +2806,7 @@ func (a *Association) handleSack(selectiveAckChunk *chunkSelectiveAck) error {
 		return err
 	}
 
-	if a.useForwardTSN {
+	if a.partialReliabilityEnabled() {
 		// RFC 3758 Sec 3.5 C1
 		if sna32LT(a.advancedPeerTSNAckPoint, a.cumulativeTSNAckPoint) {
 			a.advancedPeerTSNAckPoint = a.cumulativeTSNAckPoint
@@ -2732,6 +2968,52 @@ func (a *Association) createForwardTSN() *chunkForwardTSN {
 	return fwdtsn
 }
 
+// createIForwardTSN generates I-FORWARD-TSN chunk.
+// The caller should hold the lock.
+func (a *Association) createIForwardTSN() *chunkIForwardTSN {
+	ordered := map[uint16]uint32{}
+	unordered := map[uint16]uint32{}
+	for i := a.cumulativeTSNAckPoint + 1; sna32LTE(i, a.advancedPeerTSNAckPoint); i++ {
+		c, ok := a.inflightQueue.get(i)
+		if !ok {
+			break
+		}
+		if c.unordered {
+			mid, ok := unordered[c.streamIdentifier]
+			if !ok || sna32LT(mid, c.messageIdentifier) {
+				unordered[c.streamIdentifier] = c.messageIdentifier
+			}
+		} else {
+			mid, ok := ordered[c.streamIdentifier]
+			if !ok || sna32LT(mid, c.messageIdentifier) {
+				ordered[c.streamIdentifier] = c.messageIdentifier
+			}
+		}
+	}
+
+	fwdtsn := &chunkIForwardTSN{
+		newCumulativeTSN: a.advancedPeerTSNAckPoint,
+		streams:          []chunkIForwardTSNStream{},
+	}
+
+	for si, mid := range ordered {
+		fwdtsn.streams = append(fwdtsn.streams, chunkIForwardTSNStream{
+			identifier:        si,
+			unordered:         false,
+			messageIdentifier: mid,
+		})
+	}
+	for si, mid := range unordered {
+		fwdtsn.streams = append(fwdtsn.streams, chunkIForwardTSNStream{
+			identifier:        si,
+			unordered:         true,
+			messageIdentifier: mid,
+		})
+	}
+
+	return fwdtsn
+}
+
 // createPacket wraps chunks in a packet.
 // The caller should hold the read lock.
 func (a *Association) createPacket(cs []chunk) *packet {
@@ -2773,6 +3055,12 @@ func (a *Association) handleReconfig(reconfigChunk *chunkReconfig) ([]*packet, e
 // The caller should hold the lock.
 func (a *Association) handleForwardTSN(chunkTSN *chunkForwardTSN) []*packet {
 	a.log.Tracef("[%s] FwdTSN: %s", a.name, chunkTSN.String())
+
+	if a.useInterleaving {
+		a.abortProtocolViolation("received FORWARD-TSN with interleaving enabled")
+
+		return nil
+	}
 
 	if !a.useForwardTSN {
 		a.log.Warn("[%s] received FwdTSN but not enabled")
@@ -2818,10 +3106,7 @@ func (a *Association) handleForwardTSN(chunkTSN *chunkForwardTSN) []*packet {
 	//   its cumulative TSN point to the value carried in the FORWARD TSN
 	//   chunk,
 
-	// Advance peerLastTSN
-	for sna32LT(a.peerLastTSN(), chunkTSN.newCumulativeTSN) {
-		a.payloadQueue.pop(true) // may not exist
-	}
+	a.payloadQueue.advanceCumulativeTSN(chunkTSN.newCumulativeTSN)
 
 	// Report new peerLastTSN value and abandoned largest SSN value to
 	// corresponding streams so that the abandoned chunks can be removed
@@ -2839,6 +3124,42 @@ func (a *Association) handleForwardTSN(chunkTSN *chunkForwardTSN) []*packet {
 	// See https://github.com/pion/sctp/issues/106
 	for _, s := range a.streams {
 		s.handleForwardTSNForUnordered(chunkTSN.newCumulativeTSN)
+	}
+
+	return a.handlePeerLastTSNAndAcknowledgement(false)
+}
+
+// The caller should hold the lock.
+func (a *Association) handleIForwardTSN(chunkTSN *chunkIForwardTSN) []*packet {
+	a.log.Tracef("[%s] I-FwdTSN: %s", a.name, chunkTSN.String())
+
+	if !a.useIForwardTSN {
+		a.abortProtocolViolation("received I-FORWARD-TSN without support")
+
+		return nil
+	}
+
+	a.log.Tracef("[%s] should send ack? newCumTSN=%d peerLastTSN=%d",
+		a.name, chunkTSN.newCumulativeTSN, a.peerLastTSN())
+	if sna32LTE(chunkTSN.newCumulativeTSN, a.peerLastTSN()) {
+		a.log.Tracef("[%s] sending ack on I-Forward TSN", a.name)
+		a.ackState = ackStateImmediate
+		a.ackTimer.stop()
+		a.awakeWriteLoop()
+
+		return nil
+	}
+
+	a.payloadQueue.advanceCumulativeTSN(chunkTSN.newCumulativeTSN)
+
+	for _, forwarded := range chunkTSN.streams {
+		if s, ok := a.streams[forwarded.identifier]; ok {
+			if forwarded.unordered {
+				s.handleForwardTSNForUnorderedMID(forwarded.messageIdentifier)
+			} else {
+				s.handleForwardTSNForOrderedMID(forwarded.messageIdentifier)
+			}
+		}
 	}
 
 	return a.handlePeerLastTSNAndAcknowledgement(false)
@@ -2870,6 +3191,8 @@ func (a *Association) sendResetRequest(streamIdentifier uint16) error {
 }
 
 // The caller should hold the lock.
+//
+//nolint:cyclop
 func (a *Association) handleReconfigParam(raw param) (*packet, error) {
 	switch par := raw.(type) {
 	case *paramOutgoingResetRequest:
@@ -2910,6 +3233,9 @@ func (a *Association) handleReconfigParam(raw param) (*packet, error) {
 
 			return nil, nil //nolint:nilnil
 		}
+		if par.result == reconfigResultSuccessPerformed {
+			a.resetOutgoingStreamSequenceNumbers(par.reconfigResponseSequenceNumber)
+		}
 		delete(a.reconfigs, par.reconfigResponseSequenceNumber)
 		if len(a.reconfigs) == 0 {
 			a.tReconfig.stop()
@@ -2918,6 +3244,23 @@ func (a *Association) handleReconfigParam(raw param) (*packet, error) {
 		return nil, nil //nolint:nilnil
 	default:
 		return nil, fmt.Errorf("%w: %t", ErrParamterType, par)
+	}
+}
+
+// The caller should hold the lock.
+func (a *Association) resetOutgoingStreamSequenceNumbers(reconfigRequestSequenceNumber uint32) {
+	reconfig := a.reconfigs[reconfigRequestSequenceNumber]
+	if reconfig == nil {
+		return
+	}
+	resetRequest, ok := reconfig.paramA.(*paramOutgoingResetRequest)
+	if !ok {
+		return
+	}
+	for _, id := range resetRequest.streamIdentifiers {
+		if s, ok := a.streams[id]; ok {
+			s.resetOutgoingStreamSequenceNumbers()
+		}
 	}
 }
 
@@ -3038,9 +3381,7 @@ func (a *Association) popPendingDataChunksToSend( //nolint:cyclop,gocognit
 				break // no more rwnd
 			}
 
-			// compute current DATA chunk size including padding.
-			chunkBytes := int(dataChunkHeaderSize) + len(chunkPayload.userData)
-			chunkBytes += getPadding(chunkBytes)
+			chunkBytes := chunkPayload.chunkSizeInPacket()
 
 			// ensure MTU bundling matches bundleDataChunksIntoPackets().
 			addBytes := chunkBytes
@@ -3083,8 +3424,7 @@ func (a *Association) popPendingDataChunksToSend( //nolint:cyclop,gocognit
 			c := a.pendingQueue.peek()
 			if c != nil && len(c.userData) > 0 {
 				// probe is a new packet: common header + chunk bytes.
-				chunkBytes := int(dataChunkHeaderSize) + len(c.userData)
-				chunkBytes += getPadding(chunkBytes)
+				chunkBytes := c.chunkSizeInPacket()
 				addBytes := int(commonHeaderSize) + chunkBytes
 
 				if addBytes <= int(a.MTU()) && a.tlrAllowSendLocked(budgetScaled, consumed, addBytes) {
@@ -3118,8 +3458,7 @@ func (a *Association) bundleDataChunksIntoPackets(chunks []*chunkPayloadData) []
 		//   single packet.  Furthermore, DATA chunks being retransmitted MAY be
 		//   bundled with new DATA chunks, as long as the resulting packet size
 		//   does not exceed the path MTU.
-		chunkSizeInPacket := int(dataChunkHeaderSize) + len(chunkPayload.userData)
-		chunkSizeInPacket += getPadding(chunkSizeInPacket)
+		chunkSizeInPacket := chunkPayload.chunkSizeInPacket()
 		if bytesInPacket+chunkSizeInPacket > int(a.MTU()) {
 			packets = append(packets, a.createPacket(chunksToSend))
 			chunksToSend = []chunk{}
@@ -3183,7 +3522,7 @@ func (a *Association) sendPayloadData(ctx context.Context, chunks []*chunkPayloa
 
 // The caller should hold the lock.
 func (a *Association) checkPartialReliabilityStatus(chunkPayload *chunkPayloadData) {
-	if !a.useForwardTSN {
+	if !a.partialReliabilityEnabled() {
 		return
 	}
 
@@ -3253,8 +3592,7 @@ func (a *Association) getDataPacketsToRetransmit(budgetScaled *int64, consumed *
 			break
 		}
 
-		chunkBytes := int(dataChunkHeaderSize) + len(chunkPayload.userData)
-		chunkBytes += getPadding(chunkBytes)
+		chunkBytes := chunkPayload.chunkSizeInPacket()
 
 		// retry as first chunk in a new packet if needed.
 		for {
@@ -3369,8 +3707,12 @@ func (a *Association) handleChunk(receivedPacket *packet, receivedChunk chunk) e
 	var packets []*packet
 	var err error
 
-	if _, err = receivedChunk.check(); err != nil {
+	var abort bool
+	if abort, err = receivedChunk.check(); err != nil {
 		a.log.Errorf("[%s] failed validating chunk: %s ", a.name, err)
+		if abort && shouldAbortOnChunkValidationError(receivedChunk) {
+			a.abortProtocolViolation(err.Error())
+		}
 
 		return nil
 	}
@@ -3423,6 +3765,8 @@ func (a *Association) handleChunk(receivedPacket *packet, receivedChunk chunk) e
 
 	case *chunkForwardTSN:
 		packets = a.handleForwardTSN(receivedChunk)
+	case *chunkIForwardTSN:
+		packets = a.handleIForwardTSN(receivedChunk)
 
 	case *chunkShutdown:
 		a.handleShutdown(receivedChunk)
@@ -3452,6 +3796,15 @@ func (a *Association) handleChunk(receivedPacket *packet, receivedChunk chunk) e
 	}
 
 	return nil
+}
+
+func shouldAbortOnChunkValidationError(receivedChunk chunk) bool {
+	switch receivedChunk.(type) {
+	case *chunkInit, *chunkInitAck, *chunkCookieEcho:
+		return false
+	default:
+		return true
+	}
 }
 
 func (a *Association) onRetransmissionTimeout(id int, nRtos uint) { //nolint:cyclop
@@ -3523,7 +3876,7 @@ func (a *Association) onRetransmissionTimeout(id int, nRtos uint) { //nolint:cyc
 		//  A5) Any time the T3-rtx timer expires, on any destination, the sender
 		//  SHOULD try to advance the "Advanced.Peer.Ack.Point" by following
 		//  the procedures outlined in C2 - C5.
-		if a.useForwardTSN {
+		if a.partialReliabilityEnabled() {
 			// RFC 3758 Sec 3.5 C2
 			for i := a.advancedPeerTSNAckPoint + 1; ; i++ {
 				c, ok := a.inflightQueue.get(i)
@@ -4356,7 +4709,7 @@ func GenerateOutOfBandToken(opts ...ClientOption) ([]byte, error) {
 	init.numInboundStreams = math.MaxUint16
 	init.initiateTag = generateInitiateTag()
 	init.advertisedReceiverWindowCredit = config.MaxReceiveBufferSize
-	setSupportedExtensions(&init.chunkInitCommon)
+	setSupportedExtensions(&init.chunkInitCommon, config.enableInterleaving)
 
 	if config.EnableZeroChecksum {
 		init.params = append(init.params, &paramZeroChecksumAcceptable{edmid: dtlsErrorDetectionMethod})
