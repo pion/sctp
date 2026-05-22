@@ -17,8 +17,7 @@ func (e *errorCauseUnrecognizedChunkType) marshal() ([]byte, error) {
 }
 
 func (e *errorCauseUnrecognizedChunkType) unmarshal(raw []byte) error {
-	err := e.errorCauseHeader.unmarshal(raw)
-	if err != nil {
+	if err := e.errorCauseHeader.unmarshal(raw); err != nil {
 		return err
 	}
 

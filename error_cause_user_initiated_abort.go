@@ -9,9 +9,9 @@ import (
 
 /*
 This error cause MAY be included in ABORT chunks that are sent
-because of an upper-layer request.  The upper layer can specify an
+because of an upper-layer request. The upper layer can specify an
 Upper Layer Abort Reason that is transported by SCTP transparently
-and MAY be delivered to the upper-layer protocol at the peer.
+and MAY be delivered to the upper-layer protocol at the peer. (RFC 9260)
 
 	 0                   1                   2                   3
 	 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
@@ -35,8 +35,7 @@ func (e *errorCauseUserInitiatedAbort) marshal() ([]byte, error) {
 }
 
 func (e *errorCauseUserInitiatedAbort) unmarshal(raw []byte) error {
-	err := e.errorCauseHeader.unmarshal(raw)
-	if err != nil {
+	if err := e.errorCauseHeader.unmarshal(raw); err != nil {
 		return err
 	}
 
