@@ -78,6 +78,31 @@ const (
 	defaultMaxMessageSize uint32 = 65536
 )
 
+// PartialReliabilityMode indicates the negotiated partial reliability mode.
+type PartialReliabilityMode int
+
+// PartialReliabilityMode values.
+const (
+	PartialReliabilityModeNone PartialReliabilityMode = iota
+	PartialReliabilityModeForwardTSN
+	PartialReliabilityModeIForwardTSN
+)
+
+// AssociationMetadata describes negotiated association capabilities.
+type AssociationMetadata struct {
+	// MessageInterleavingEnabled indicates whether RFC 8260 user message interleaving was negotiated.
+	MessageInterleavingEnabled bool `json:"messageInterleavingEnabled"`
+
+	// PartialReliabilityMode indicates which FORWARD-TSN variant is active.
+	PartialReliabilityMode PartialReliabilityMode `json:"partialReliabilityMode"`
+
+	// ZeroChecksumSendingEnabled indicates whether outgoing packets use zero checksum.
+	ZeroChecksumSendingEnabled bool `json:"zeroChecksumSendingEnabled"`
+
+	// ZeroChecksumReceivingEnabled indicates whether incoming packets may use zero checksum.
+	ZeroChecksumReceivingEnabled bool `json:"zeroChecksumReceivingEnabled"`
+}
+
 // association state enums.
 const (
 	closed uint32 = iota
@@ -1757,6 +1782,32 @@ func (a *Association) setRWND(rwnd uint32) {
 // SRTT returns the latest smoothed round-trip time (srrt).
 func (a *Association) SRTT() float64 {
 	return a.srtt.Load().(float64) //nolint:forcetypeassert
+}
+
+// Metadata returns negotiated association metadata. The ok return value is false
+// until the SCTP handshake has completed.
+func (a *Association) Metadata() (AssociationMetadata, bool) {
+	a.lock.RLock()
+	defer a.lock.RUnlock()
+
+	if a.getState() != established {
+		return AssociationMetadata{}, false
+	}
+
+	partialReliabilityMode := PartialReliabilityModeNone
+	switch {
+	case a.useIForwardTSN:
+		partialReliabilityMode = PartialReliabilityModeIForwardTSN
+	case a.useForwardTSN:
+		partialReliabilityMode = PartialReliabilityModeForwardTSN
+	}
+
+	return AssociationMetadata{
+		MessageInterleavingEnabled:   a.useInterleaving,
+		PartialReliabilityMode:       partialReliabilityMode,
+		ZeroChecksumSendingEnabled:   a.sendZeroChecksum,
+		ZeroChecksumReceivingEnabled: a.recvZeroChecksum,
+	}, true
 }
 
 // getMaxTSNOffset returns the maximum offset over the current cummulative TSN that

@@ -9,6 +9,7 @@ import (
 	"context"
 	cryptoRand "crypto/rand"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -810,6 +811,21 @@ func TestAssociationInterleavingNegotiationPayloadChunkType(t *testing.T) {
 			require.Equal(t, tt.useInterleaving, a0.useInterleaving)
 			require.Equal(t, tt.useInterleaving, a1.useInterleaving)
 
+			metadata0, ok := a0.Metadata()
+			require.True(t, ok)
+			require.Equal(t, tt.useInterleaving, metadata0.MessageInterleavingEnabled)
+			require.False(t, metadata0.ZeroChecksumSendingEnabled)
+			require.False(t, metadata0.ZeroChecksumReceivingEnabled)
+			if tt.useInterleaving {
+				require.Equal(t, PartialReliabilityModeIForwardTSN, metadata0.PartialReliabilityMode)
+			} else {
+				require.Equal(t, PartialReliabilityModeForwardTSN, metadata0.PartialReliabilityMode)
+			}
+
+			metadata1, ok := a1.Metadata()
+			require.True(t, ok)
+			require.Equal(t, metadata0, metadata1)
+
 			s0, s1, err := establishSessionPair(br, a0, a1, si)
 			require.NoError(t, err, "failed to establish session pair")
 
@@ -829,6 +845,34 @@ func TestAssociationInterleavingNegotiationPayloadChunkType(t *testing.T) {
 			require.Equal(t, msg, string(buf[:n]))
 		})
 	}
+}
+
+func TestAssociationMetadataNotReadyBeforeHandshake(t *testing.T) {
+	assoc := createTestAssociation(t, Config{
+		NetConn: &dumbConn{},
+	})
+
+	metadata, ok := assoc.Metadata()
+	require.False(t, ok)
+	require.Equal(t, AssociationMetadata{}, metadata)
+}
+
+func TestAssociationMetadataJSON(t *testing.T) {
+	metadata := AssociationMetadata{
+		MessageInterleavingEnabled:   true,
+		PartialReliabilityMode:       PartialReliabilityModeIForwardTSN,
+		ZeroChecksumSendingEnabled:   true,
+		ZeroChecksumReceivingEnabled: true,
+	}
+
+	raw, err := json.Marshal(metadata)
+	require.NoError(t, err)
+	require.JSONEq(t, `{
+		"messageInterleavingEnabled": true,
+		"partialReliabilityMode": 2,
+		"zeroChecksumSendingEnabled": true,
+		"zeroChecksumReceivingEnabled": true
+	}`, string(raw))
 }
 
 func TestAssociationInterleavingProtocolViolationWrongPayloadChunkType(t *testing.T) {
