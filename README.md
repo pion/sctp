@@ -36,10 +36,10 @@ Ideally, we would like to add the following features as part of a [v2 refresh](h
 
 Feature | Reference | Progress
 --- | --- | ---
-RACK (tail loss probing) | [Paper](https://icnp20.cs.ucr.edu/proceedings/nipaa/RACK%20for%20SCTP.pdf), [Comment](https://github.com/pion/sctp/issues/206#issuecomment-968265853)| [In review](https://github.com/pion/sctp/pull/390)
-Adaptive burst mitigation | [Paper, see section 5A](https://icnp20.cs.ucr.edu/proceedings/nipaa/RACK%20for%20SCTP.pdf)| [In review](https://github.com/pion/sctp/pull/394)
+RACK (tail loss probing) | [Paper](https://icnp20.cs.ucr.edu/proceedings/nipaa/RACK%20for%20SCTP.pdf), [Comment](https://github.com/pion/sctp/issues/206#issuecomment-968265853)| [Implemented](https://github.com/pion/sctp/pull/390)
+Adaptive burst mitigation | [Paper, see section 5A](https://icnp20.cs.ucr.edu/proceedings/nipaa/RACK%20for%20SCTP.pdf)| [Implemented](https://github.com/pion/sctp/pull/394)
 Update to RFC 9260 | [Parent issue](https://github.com/pion/sctp/issues/402) | [In progress](https://github.com/pion/sctp/issues/402)
-Implement RFC 8260 | [Issue](https://github.com/pion/sctp/issues/435) | In progress (no PR available yet)
+Implement RFC 8260 | [Issue](https://github.com/pion/sctp/issues/435) | [Implemented](https://github.com/pion/sctp/pull/443)
 Blocking writes | [1](https://github.com/pion/sctp/issues/77), [2](https://github.com/pion/sctp/issues/357) | [Potentially in progress](https://github.com/pion/sctp/issues/357#issuecomment-3382050767)
 association.listener (and better docs) | [1](https://github.com/pion/sctp/issues/74), [2](https://github.com/pion/sctp/issues/173) | Not started, [blocked by above](https://github.com/pion/sctp/issues/74#issuecomment-545550714)
 
