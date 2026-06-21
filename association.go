@@ -2583,8 +2583,8 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 
 	// Mark selectively acknowledged chunks as "acked"
 	for _, g := range selectiveAckChunk.gapAckBlocks {
-		for i := g.start; i <= g.end; i++ {
-			tsn := selectiveAckChunk.cumulativeTSNAck + uint32(i)
+		for i := uint32(g.start); i <= uint32(g.end); i++ {
+			tsn := selectiveAckChunk.cumulativeTSNAck + i
 			chunkPayload, ok := a.inflightQueue.get(tsn)
 			if !ok {
 				return nil, 0, time.Time{}, 0, false, fmt.Errorf("%w: %v", ErrTSNRequestNotExist, tsn)

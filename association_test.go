@@ -5601,6 +5601,35 @@ func TestFastRecoveryExitOnAckedExitPoint(t *testing.T) {
 	assert.True(t, exited, "fast recovery should exit when exit point is cumulatively acked")
 }
 
+// TestProcessSelectiveAck_GapBlockUint16Max verifies that a gap block with
+// start=65535 and end=65535 (uint16 max) is processed exactly once and
+// returns no error.
+//
+// Before the fix the inner loop used a uint16 counter: after processing
+// i=65535 the post-increment wrapped to 0, the condition 0<=65535 was true,
+// and the loop tried to look up TSN cumulativeTSNAck+0 which was not in the
+// inflight queue, causing an ErrTSNRequestNotExist.
+// With the uint32 counter the post-increment produces 65536 > 65535 and the
+// loop exits cleanly.
+func TestProcessSelectiveAck_GapBlockUint16Max(t *testing.T) {
+	assoc := newRackTestAssoc(t)
+	// cumulativeTSNAckPoint == 99; place a chunk at TSN 99+65535 = 65634.
+	tsnInGap := assoc.cumulativeTSNAckPoint + 65535
+	assoc.inflightQueue.pushNoCheck(mkChunk(tsnInGap, time.Now()))
+
+	assoc.lock.Lock()
+	_, _, _, _, _, err := assoc.processSelectiveAck(&chunkSelectiveAck{ //nolint:dogsled
+		cumulativeTSNAck: assoc.cumulativeTSNAckPoint,
+		gapAckBlocks:     []gapAckBlock{{start: 65535, end: 65535}},
+	})
+	assoc.lock.Unlock()
+
+	require.NoError(t, err, "gap block {65535,65535} should be processed without error")
+	got, ok := assoc.inflightQueue.get(tsnInGap)
+	require.True(t, ok, "chunk at tsnInGap should still be in inflightQueue (only marked acked)")
+	assert.True(t, got.acked, "chunk should be marked as acked after SACK gap-block processing")
+}
+
 func TestRTOClearsFastRecovery(t *testing.T) {
 	assoc := newRackTestAssoc(t)
 
