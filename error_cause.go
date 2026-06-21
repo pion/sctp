@@ -41,7 +41,13 @@ func buildErrorCause(raw []byte) (errorCause, error) {
 	case userInitiatedAbort:
 		errCause = &errorCauseUserInitiatedAbort{}
 	default:
-		return nil, fmt.Errorf("%w: %s", ErrBuildErrorCaseHandle, c.String())
+		// Unknown cause — treat as opaque TLV per RFC 9260 §3.2.1
+		e := &errorCauseHeader{}
+		if err := e.unmarshal(raw); err != nil {
+			return nil, err
+		}
+
+		return e, nil
 	}
 
 	if err := errCause.unmarshal(raw); err != nil {
