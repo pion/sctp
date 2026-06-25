@@ -2444,7 +2444,7 @@ func (a *Association) createStream(streamIdentifier uint16, accept bool) *Stream
 	stream := &Stream{
 		association:      a,
 		streamIdentifier: streamIdentifier,
-		reassemblyQueue:  newReassemblyQueue(streamIdentifier),
+		reassemblyQueue:  newReassemblyQueue(streamIdentifier, a.maxReceiveBufferSize),
 		log:              a.log,
 		name:             fmt.Sprintf("%d:%s", streamIdentifier, a.name),
 		writeDeadline:    deadline.New(),

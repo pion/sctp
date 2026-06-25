@@ -1122,12 +1122,14 @@ func TestAssociationIForwardTSNDuplicateEntriesUseLargestMID(t *testing.T) {
 }
 
 func TestAssociationInterleavingProtocolViolationMIDLimit(t *testing.T) {
-	assoc := createTestAssociation(t, Config{})
+	const limit = maxReassemblyQueueMIDEntries
+	// receive buffer sized so the derived MID cap is exactly limit
+	assoc := createTestAssociation(t, Config{MaxReceiveBufferSize: reassemblyMIDLimitBytesPerEntry * limit})
 	assoc.useInterleaving = true
 	assoc.payloadQueue.init(0)
 	assoc.setState(established)
 
-	for i := range maxReassemblyQueueMIDEntries {
+	for i := range limit {
 		packets := assoc.handleData(&chunkPayloadData{
 			iData:                  true,
 			messageIdentifier:      uint32(i), //nolint:gosec // bounded by maxReassemblyQueueMIDEntries
@@ -1143,10 +1145,10 @@ func TestAssociationInterleavingProtocolViolationMIDLimit(t *testing.T) {
 
 	packets := assoc.handleData(&chunkPayloadData{
 		iData:                  true,
-		messageIdentifier:      maxReassemblyQueueMIDEntries,
+		messageIdentifier:      limit,
 		fragmentSequenceNumber: 0,
 		beginningFragment:      true,
-		tsn:                    maxReassemblyQueueMIDEntries + 1,
+		tsn:                    limit + 1,
 		streamIdentifier:       1,
 		payloadType:            PayloadTypeWebRTCBinary,
 	})

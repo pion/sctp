@@ -197,15 +197,29 @@ type reassemblyQueue struct {
 	unorderedMIDMap map[uint32]*chunkSetMID
 	useInterleaving bool
 	nBytes          uint64
+	maxMIDEntries   int
 }
 
-var errTryAgain = errors.New("try again")
+var (
+	errTryAgain = errors.New("try again")
 
-const maxReassemblyQueueMIDEntries = 1024
+	errReassemblyQueueMIDLimitExceeded = errors.New("reassembly queue i-data message identifier limit exceeded")
+)
 
-var errReassemblyQueueMIDLimitExceeded = errors.New("reassembly queue i-data message identifier limit exceeded")
+const (
+	// reassemblyMIDLimitBytesPerEntry is the receive-buffer budget allotted per
+	// undelivered interleaved (i-data) message. The MID-entry cap is
+	// maxReceiveBufferSize/reassemblyMIDLimitBytesPerEntry, so reassembly memory
+	// scales with the configured buffer. the cap only bites pathological floods of tiny or
+	// header-only messages that a_rwnd cannot bound.
+	reassemblyMIDLimitBytesPerEntry = 64
 
-func newReassemblyQueue(si uint16) *reassemblyQueue {
+	maxReassemblyQueueMIDEntries = 1024
+)
+
+func newReassemblyQueue(si uint16, maxReceiveBufferSize uint32) *reassemblyQueue {
+	maxMIDEntries := max(int(maxReceiveBufferSize/reassemblyMIDLimitBytesPerEntry), maxReassemblyQueueMIDEntries)
+
 	// From RFC 4960 Sec 6.5:
 	//   The Stream Sequence Number in all the streams MUST start from 0 when
 	//   the association is established.  Also, when the Stream Sequence
@@ -221,6 +235,7 @@ func newReassemblyQueue(si uint16) *reassemblyQueue {
 		unorderedMID:    make([]*chunkSetMID, 0),
 		orderedMIDMap:   map[uint32]*chunkSetMID{},
 		unorderedMIDMap: map[uint32]*chunkSetMID{},
+		maxMIDEntries:   maxMIDEntries,
 	}
 }
 
@@ -324,7 +339,7 @@ func (r *reassemblyQueue) pushUnorderedIData(chunk *chunkPayloadData) (bool, err
 	}
 	cset := r.unorderedMIDMap[chunk.messageIdentifier]
 	if cset == nil {
-		if r.unorderedMIDEntryCount() >= maxReassemblyQueueMIDEntries {
+		if r.unorderedMIDEntryCount() >= r.maxMIDEntries {
 			return false, errReassemblyQueueMIDLimitExceeded
 		}
 		cset = newChunkSetMID(chunk.messageIdentifier, chunk.payloadType)
@@ -357,7 +372,7 @@ func (r *reassemblyQueue) pushOrderedIData(chunk *chunkPayloadData) (bool, error
 	}
 	cset := r.orderedMIDMap[chunk.messageIdentifier]
 	if cset == nil {
-		if len(r.orderedMIDMap) >= maxReassemblyQueueMIDEntries {
+		if len(r.orderedMIDMap) >= r.maxMIDEntries {
 			return false, errReassemblyQueueMIDLimitExceeded
 		}
 		cset = newChunkSetMID(chunk.messageIdentifier, chunk.payloadType)
