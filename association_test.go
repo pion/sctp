@@ -4135,17 +4135,37 @@ func TestAssocNumStreams(t *testing.T) {
 		metadata1, ok1 := a1.Metadata()
 		assert.True(t, ok1, "should be true")
 
-		assert.Equal(t, clientLocalInbound, metadata0.NumInboundStreams, "client inbound streams should clamp to its local limit")
-		assert.Equal(t, clientLocalOutbound, metadata0.NumOutboundStreams, "client outbound streams should clamp to its local limit")
-		assert.Equal(t, clientLocalOutbound, metadata1.NumInboundStreams, "server inbound streams should clamp to the peer outbound offer")
-		assert.Equal(t, clientLocalInbound, metadata1.NumOutboundStreams, "server outbound streams should clamp to the peer inbound offer")
+		assert.Equal(
+			t,
+			clientLocalInbound,
+			metadata0.NumInboundStreams,
+			"client inbound streams should clamp to its local limit",
+		)
+		assert.Equal(
+			t,
+			clientLocalOutbound,
+			metadata0.NumOutboundStreams,
+			"client outbound streams should clamp to its local limit",
+		)
+		assert.Equal(
+			t,
+			clientLocalOutbound,
+			metadata1.NumInboundStreams,
+			"server inbound streams should clamp to the peer outbound offer",
+		)
+		assert.Equal(
+			t,
+			clientLocalInbound,
+			metadata1.NumOutboundStreams,
+			"server outbound streams should clamp to the peer inbound offer",
+		)
 
 		assert.NoError(t, a0.Close())
 		assert.NoError(t, a1.Close())
 	})
 }
 
-func TestAssocInitStreamCountsOnWire(t *testing.T) {
+func TestAssocInitStreamCountsOnWire(t *testing.T) { //nolint:cyclop
 	type streamCounts struct {
 		outbound uint16
 		inbound  uint16
@@ -4238,18 +4258,38 @@ func TestAssocInitStreamCountsOnWire(t *testing.T) {
 
 	select {
 	case init := <-initCh:
-		assert.Equal(t, clientLocalOutbound, init.outbound, "INIT OS should advertise the sender's configured outbound streams per RFC 9260 section 5.1.1")
-		assert.Equal(t, clientLocalInbound, init.inbound, "INIT MIS should advertise the sender's configured inbound streams per RFC 9260 section 5.1.1")
+		assert.Equal(
+			t,
+			clientLocalOutbound,
+			init.outbound,
+			"INIT OS should advertise the sender's configured outbound streams per RFC 9260 section 5.1.1",
+		)
+		assert.Equal(
+			t,
+			clientLocalInbound,
+			init.inbound,
+			"INIT MIS should advertise the sender's configured inbound streams per RFC 9260 section 5.1.1",
+		)
 	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for INIT capture")
+		require.FailNow(t, "timed out waiting for INIT capture")
 	}
 
 	select {
 	case initAck := <-initAckCh:
-		assert.Equal(t, clientLocalInbound, initAck.outbound, "INIT ACK OS must not exceed the INIT MIS per RFC 9260 section 5.1.1")
-		assert.Equal(t, clientLocalOutbound, initAck.inbound, "INIT ACK MIS should clamp to the peer's requested outbound streams per RFC 9260 section 5.1.1")
+		assert.Equal(
+			t,
+			clientLocalInbound,
+			initAck.outbound,
+			"INIT ACK OS must not exceed the INIT MIS per RFC 9260 section 5.1.1",
+		)
+		assert.Equal(
+			t,
+			clientLocalOutbound,
+			initAck.inbound,
+			"INIT ACK MIS should clamp to the peer's requested outbound streams per RFC 9260 section 5.1.1",
+		)
 	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for INIT ACK capture")
+		require.FailNow(t, "timed out waiting for INIT ACK capture")
 	}
 }
 

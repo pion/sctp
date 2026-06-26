@@ -395,7 +395,8 @@ type Config struct {
 	// Step of congestion window increase at Congestion Avoidance
 	CwndCAStep uint32
 
-	// Number of streams to negotiate. The actual number of streams negotiated will be the min of the local and peer config.
+	// Number of streams to negotiate. The actual number of streams negotiated
+	// will be the min of the local and peer config.
 	NumInboundStreams  uint16
 	NumOutboundStreams uint16
 
