@@ -523,6 +523,7 @@ func (c *Config) applyDefaults() {
 	}
 	if c.NumOutboundStreams == 0 {
 		c.NumOutboundStreams = math.MaxUint16
+	}
 	if !c.enableInterleavingSet {
 		c.enableInterleaving = true
 	}
