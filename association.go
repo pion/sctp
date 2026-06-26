@@ -101,6 +101,12 @@ type AssociationMetadata struct {
 
 	// ZeroChecksumReceivingEnabled indicates whether incoming packets may use zero checksum.
 	ZeroChecksumReceivingEnabled bool `json:"zeroChecksumReceivingEnabled"`
+
+	// NumInboundStreams is the maximum number of inbound streams for this association.
+	NumInboundStreams uint16 `json:"numInboundStreams"`
+
+	// NumOutboundStreams is the maximum number of outbound streams for this association.
+	NumOutboundStreams uint16 `json:"numOutboundStreams"`
 }
 
 // association state enums.
@@ -1829,11 +1835,16 @@ func (a *Association) Metadata() (AssociationMetadata, bool) {
 		partialReliabilityMode = PartialReliabilityModeForwardTSN
 	}
 
+	numInboundStreams := min16(a.localInboundStreams, a.peerOutboundStreams)
+	numOutboundStreams := min16(a.localOutboundStreams, a.peerInboundStreams)
+
 	return AssociationMetadata{
 		MessageInterleavingEnabled:   a.useInterleaving,
 		PartialReliabilityMode:       partialReliabilityMode,
 		ZeroChecksumSendingEnabled:   a.sendZeroChecksum,
 		ZeroChecksumReceivingEnabled: a.recvZeroChecksum,
+		NumInboundStreams:            numInboundStreams,
+		NumOutboundStreams:           numOutboundStreams,
 	}, true
 }
 
@@ -4071,26 +4082,6 @@ func (a *Association) MaxMessageSize() uint32 {
 // SetMaxMessageSize sets the maximum message size you can send.
 func (a *Association) SetMaxMessageSize(maxMsgSize uint32) {
 	atomic.StoreUint32(&a.maxMessageSize, maxMsgSize)
-}
-
-// NumInboundStreams returns the maximum number of inbound streams for this association.
-// The number of inbound streams is determined by looking at the peer's INIT or INIT ACK chunk,
-// a proper value is not available until the handshake completes.
-func (a *Association) NumInboundStreams() uint16 {
-	a.lock.RLock()
-	defer a.lock.RUnlock()
-
-	return min16(a.localInboundStreams, a.peerOutboundStreams)
-}
-
-// NumOutboundStreams returns the maximum number of outbound streams for this association.
-// The number of outbound streams is determined by looking at the peer's INIT or INIT ACK chunk,
-// a proper value is not available until the handshake completes.
-func (a *Association) NumOutboundStreams() uint16 {
-	a.lock.RLock()
-	defer a.lock.RUnlock()
-
-	return min16(a.localOutboundStreams, a.peerInboundStreams)
 }
 
 // OnStreamResetComplete sets a handler invoked when a stream reset lifecycle

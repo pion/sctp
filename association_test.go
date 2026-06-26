@@ -935,6 +935,8 @@ func TestAssociationMetadataJSON(t *testing.T) {
 		PartialReliabilityMode:       PartialReliabilityModeIForwardTSN,
 		ZeroChecksumSendingEnabled:   true,
 		ZeroChecksumReceivingEnabled: true,
+		NumInboundStreams:            10,
+		NumOutboundStreams:           20,
 	}
 
 	raw, err := json.Marshal(metadata)
@@ -943,7 +945,9 @@ func TestAssociationMetadataJSON(t *testing.T) {
 		"messageInterleavingEnabled": true,
 		"partialReliabilityMode": 2,
 		"zeroChecksumSendingEnabled": true,
-		"zeroChecksumReceivingEnabled": true
+		"zeroChecksumReceivingEnabled": true,
+		"numInboundStreams": 10,
+		"numOutboundStreams": 20
 	}`, string(raw))
 }
 
@@ -3991,12 +3995,15 @@ func TestAssocHandleInit(t *testing.T) {
 		}
 		assert.NoError(t, err, "should succeed")
 		assert.Equal(t, init.initialTSN-1, assoc.peerLastTSN(), "should match")
-		assert.Equal(t, uint16(1001), assoc.NumInboundStreams(), "should match")
-		assert.Equal(t, uint16(1002), assoc.NumOutboundStreams(), "should match")
 		assert.Equal(t, uint32(5678), assoc.peerVerificationTag, "should match")
 		assert.Equal(t, pkt.sourcePort, assoc.destinationPort, "should match")
 		assert.Equal(t, pkt.destinationPort, assoc.sourcePort, "should match")
 		assert.True(t, assoc.useForwardTSN, "should be set to true")
+
+		metadata, ok := assoc.Metadata()
+		assert.True(t, ok, "should be true")
+		assert.Equal(t, uint16(1001), metadata.NumInboundStreams, "should match")
+		assert.Equal(t, uint16(1002), metadata.NumOutboundStreams, "should match")
 	}
 
 	t.Run("normal", func(t *testing.T) {
@@ -4079,18 +4086,6 @@ func TestAssocMaxMessageSize(t *testing.T) {
 }
 
 func TestAssocNumStreams(t *testing.T) {
-	loggerFactory := logging.NewDefaultLoggerFactory()
-
-	t.Run("before handshake", func(t *testing.T) {
-		assoc := createTestAssociation(t, Config{
-			LoggerFactory: loggerFactory,
-		})
-		assert.NotNil(t, assoc, "should succeed")
-		// Before handshake, should return 0
-		assert.Equal(t, uint16(0), assoc.NumInboundStreams(), "should be 0 before handshake")
-		assert.Equal(t, uint16(0), assoc.NumOutboundStreams(), "should be 0 before handshake")
-	})
-
 	t.Run("after handshake with negotiated values", func(t *testing.T) {
 		checkGoroutineLeaks(t)
 
@@ -4103,10 +4098,15 @@ func TestAssocNumStreams(t *testing.T) {
 		assert.NoError(t, err, "failed to create associations")
 
 		// After establishing, the stream numbers should be negotiated
-		assert.Greater(t, a0.NumInboundStreams(), uint16(0), "should have inbound streams after handshake")
-		assert.Greater(t, a0.NumOutboundStreams(), uint16(0), "should have outbound streams after handshake")
-		assert.Greater(t, a1.NumInboundStreams(), uint16(0), "should have inbound streams after handshake")
-		assert.Greater(t, a1.NumOutboundStreams(), uint16(0), "should have outbound streams after handshake")
+		metadata0, ok0 := a0.Metadata()
+		assert.True(t, ok0, "should be true")
+		metadata1, ok1 := a1.Metadata()
+		assert.True(t, ok1, "should be true")
+
+		assert.Greater(t, metadata0.NumInboundStreams, uint16(0), "should have inbound streams after handshake")
+		assert.Greater(t, metadata0.NumOutboundStreams, uint16(0), "should have outbound streams after handshake")
+		assert.Greater(t, metadata1.NumInboundStreams, uint16(0), "should have inbound streams after handshake")
+		assert.Greater(t, metadata1.NumOutboundStreams, uint16(0), "should have outbound streams after handshake")
 
 		closeAssociationPair(br, a0, a1)
 	})
@@ -4130,36 +4130,18 @@ func TestAssocNumStreams(t *testing.T) {
 			return
 		}
 
-		assert.Equal(t, clientLocalInbound, a0.NumInboundStreams(), "client inbound streams should clamp to its local limit")
-		assert.Equal(t, clientLocalOutbound, a0.NumOutboundStreams(), "client outbound streams should clamp to its local limit")
-		assert.Equal(t, clientLocalOutbound, a1.NumInboundStreams(), "server inbound streams should clamp to the peer outbound offer")
-		assert.Equal(t, clientLocalInbound, a1.NumOutboundStreams(), "server outbound streams should clamp to the peer inbound offer")
+		metadata0, ok0 := a0.Metadata()
+		assert.True(t, ok0, "should be true")
+		metadata1, ok1 := a1.Metadata()
+		assert.True(t, ok1, "should be true")
+
+		assert.Equal(t, clientLocalInbound, metadata0.NumInboundStreams, "client inbound streams should clamp to its local limit")
+		assert.Equal(t, clientLocalOutbound, metadata0.NumOutboundStreams, "client outbound streams should clamp to its local limit")
+		assert.Equal(t, clientLocalOutbound, metadata1.NumInboundStreams, "server inbound streams should clamp to the peer outbound offer")
+		assert.Equal(t, clientLocalInbound, metadata1.NumOutboundStreams, "server outbound streams should clamp to the peer inbound offer")
 
 		assert.NoError(t, a0.Close())
 		assert.NoError(t, a1.Close())
-	})
-
-	t.Run("thread-safe concurrent access", func(t *testing.T) {
-		assoc := createTestAssociation(t, Config{
-			LoggerFactory: loggerFactory,
-		})
-		assert.NotNil(t, assoc, "should succeed")
-
-		// Run concurrent reads to verify thread-safety
-		numGoroutines := 10
-		done := make(chan bool, numGoroutines)
-
-		for range numGoroutines {
-			go func() {
-				_ = assoc.NumInboundStreams()
-				_ = assoc.NumOutboundStreams()
-				done <- true
-			}()
-		}
-
-		for range numGoroutines {
-			<-done
-		}
 	})
 }
 
