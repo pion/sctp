@@ -10,9 +10,9 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
+func TestReassemblyQueue(t *testing.T) { //nolint:maintidx,cyclop
 	t.Run("ordered fragments", func(t *testing.T) {
-		rq := newReassemblyQueue(0, initialRecvBufSize)
+		rq := newReassemblyQueue(0, 0)
 
 		orgPpi := PayloadTypeWebRTCBinary
 
@@ -54,7 +54,7 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 	})
 
 	t.Run("ordered fragments", func(t *testing.T) {
-		rq := newReassemblyQueue(0, initialRecvBufSize)
+		rq := newReassemblyQueue(0, 0)
 
 		orgPpi := PayloadTypeWebRTCBinary
 
@@ -110,7 +110,7 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 	})
 
 	t.Run("ordered and unordered in the mix", func(t *testing.T) {
-		rq := newReassemblyQueue(0, initialRecvBufSize)
+		rq := newReassemblyQueue(0, 0)
 
 		orgPpi := PayloadTypeWebRTCBinary
 
@@ -168,7 +168,7 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 	})
 
 	t.Run("unordered complete skips incomplete", func(t *testing.T) {
-		rq := newReassemblyQueue(0, initialRecvBufSize)
+		rq := newReassemblyQueue(0, 0)
 
 		orgPpi := PayloadTypeWebRTCBinary
 
@@ -231,7 +231,7 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 	})
 
 	t.Run("ignores chunk with wrong SI", func(t *testing.T) {
-		rq := newReassemblyQueue(123, initialRecvBufSize)
+		rq := newReassemblyQueue(123, 0)
 
 		orgPpi := PayloadTypeWebRTCBinary
 
@@ -254,7 +254,7 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 	})
 
 	t.Run("ignores chunk with stale SSN", func(t *testing.T) {
-		rq := newReassemblyQueue(0, initialRecvBufSize)
+		rq := newReassemblyQueue(0, 0)
 		rq.nextSSN = 7 // forcibly set expected SSN to 7
 
 		orgPpi := PayloadTypeWebRTCBinary
@@ -277,7 +277,7 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 	})
 
 	t.Run("should fail to read incomplete chunk", func(t *testing.T) {
-		rq := newReassemblyQueue(0, initialRecvBufSize)
+		rq := newReassemblyQueue(0, 0)
 
 		orgPpi := PayloadTypeWebRTCBinary
 
@@ -303,7 +303,7 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 	})
 
 	t.Run("should fail to read if the next SSN is not ready", func(t *testing.T) {
-		rq := newReassemblyQueue(0, initialRecvBufSize)
+		rq := newReassemblyQueue(0, 0)
 
 		orgPpi := PayloadTypeWebRTCBinary
 
@@ -330,7 +330,7 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 	})
 
 	t.Run("detect buffer too short", func(t *testing.T) {
-		rq := newReassemblyQueue(0, initialRecvBufSize)
+		rq := newReassemblyQueue(0, 0)
 		orgPpi := PayloadTypeWebRTCBinary
 
 		for _, chunk := range []*chunkPayloadData{
@@ -374,7 +374,7 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 	})
 
 	t.Run("forwardTSN for ordered fragments", func(t *testing.T) {
-		rq := newReassemblyQueue(0, initialRecvBufSize)
+		rq := newReassemblyQueue(0, 0)
 
 		orgPpi := PayloadTypeWebRTCBinary
 
@@ -426,7 +426,7 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 	})
 
 	t.Run("forwardTSN for unordered fragments", func(t *testing.T) {
-		rq := newReassemblyQueue(0, initialRecvBufSize)
+		rq := newReassemblyQueue(0, 0)
 
 		orgPpi := PayloadTypeWebRTCBinary
 
@@ -483,7 +483,7 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 	})
 
 	t.Run("fragmented and unfragmented chunks with the same ssn", func(t *testing.T) {
-		rq := newReassemblyQueue(0, initialRecvBufSize)
+		rq := newReassemblyQueue(0, 0)
 
 		orgPpi := PayloadTypeWebRTCBinary
 
@@ -520,8 +520,189 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 		assert.Equal(t, 6, rq.getNumBytes(), "num bytes mismatch")
 	})
 
+	t.Run("ordered data has no descriptor limit by default", func(t *testing.T) {
+		const oldLimit = 3
+		rq := newReassemblyQueue(0, 0)
+
+		for i := range oldLimit + 1 {
+			complete, err := rq.pushWithError(&chunkPayloadData{
+				streamSequenceNumber: uint16(i), //nolint:gosec // bounded by oldLimit
+				beginningFragment:    true,
+				tsn:                  uint32(i + 1), //nolint:gosec // bounded by oldLimit
+				streamIdentifier:     0,
+				payloadType:          PayloadTypeWebRTCBinary,
+			})
+			assert.NoError(t, err)
+			assert.False(t, complete, "SSN should remain incomplete")
+		}
+
+		assert.Len(t, rq.ordered, oldLimit+1)
+	})
+
+	t.Run("ordered data rejects new entries after descriptor limit", func(t *testing.T) {
+		const limit = 3
+		rq := newReassemblyQueue(0, limit)
+
+		for i := range limit {
+			complete, err := rq.pushWithError(&chunkPayloadData{
+				streamSequenceNumber: uint16(i), //nolint:gosec // bounded by limit
+				beginningFragment:    true,
+				tsn:                  uint32(i*10 + 1), //nolint:gosec // bounded by limit
+				streamIdentifier:     0,
+				payloadType:          PayloadTypeWebRTCBinary,
+			})
+			assert.NoError(t, err)
+			assert.False(t, complete, "SSN should remain incomplete")
+		}
+
+		complete, err := rq.pushWithError(&chunkPayloadData{
+			streamSequenceNumber: 0,
+			beginningFragment:    true,
+			tsn:                  1,
+			streamIdentifier:     0,
+			payloadType:          PayloadTypeWebRTCBinary,
+		})
+		assert.NoError(t, err, "duplicate fragments should not be rejected at the limit")
+		assert.False(t, complete, "duplicate fragments should not complete")
+
+		complete, err = rq.pushWithError(&chunkPayloadData{
+			streamSequenceNumber: 0,
+			endingFragment:       true,
+			tsn:                  2,
+			streamIdentifier:     0,
+			payloadType:          PayloadTypeWebRTCBinary,
+		})
+		assert.ErrorIs(t, err, errReassemblyQueueLimitExceeded)
+		assert.False(t, complete, "new fragments for existing SSNs should be rejected at the limit")
+
+		complete, err = rq.pushWithError(&chunkPayloadData{
+			streamSequenceNumber: limit,
+			beginningFragment:    true,
+			tsn:                  limit*10 + 1,
+			streamIdentifier:     0,
+			payloadType:          PayloadTypeWebRTCBinary,
+		})
+		assert.ErrorIs(t, err, errReassemblyQueueLimitExceeded)
+		assert.False(t, complete, "new SSN should be rejected")
+		assert.Len(t, rq.ordered, limit)
+		assert.Equal(t, limit, rq.orderedDataEntryCount())
+	})
+
+	t.Run("unordered data has no descriptor limit by default", func(t *testing.T) {
+		const oldLimit = 3
+		rq := newReassemblyQueue(0, 0)
+
+		for i := range oldLimit + 1 {
+			complete, err := rq.pushWithError(&chunkPayloadData{
+				unordered:         true,
+				beginningFragment: true,
+				tsn:               uint32(i + 1), //nolint:gosec // bounded by oldLimit
+				streamIdentifier:  0,
+				payloadType:       PayloadTypeWebRTCBinary,
+			})
+			assert.NoError(t, err)
+			assert.False(t, complete, "unordered DATA should remain incomplete")
+		}
+
+		assert.Len(t, rq.unorderedChunks, oldLimit+1)
+		assert.Len(t, rq.unordered, 0)
+	})
+
+	t.Run("unordered data rejects new incomplete chunks after descriptor limit", func(t *testing.T) {
+		const limit = 3
+		rq := newReassemblyQueue(0, limit)
+
+		for i := range limit {
+			complete, err := rq.pushWithError(&chunkPayloadData{
+				unordered:         true,
+				beginningFragment: true,
+				tsn:               uint32(i + 1), //nolint:gosec // bounded by limit
+				streamIdentifier:  0,
+				payloadType:       PayloadTypeWebRTCBinary,
+			})
+			assert.NoError(t, err)
+			assert.False(t, complete, "unordered DATA should remain incomplete")
+		}
+
+		complete, err := rq.pushWithError(&chunkPayloadData{
+			unordered:         true,
+			beginningFragment: true,
+			tsn:               limit + 1,
+			streamIdentifier:  0,
+			payloadType:       PayloadTypeWebRTCBinary,
+		})
+		assert.ErrorIs(t, err, errReassemblyQueueLimitExceeded)
+		assert.False(t, complete, "new unordered DATA chunk should be rejected")
+		assert.Len(t, rq.unorderedChunks, limit)
+		assert.Len(t, rq.unordered, 0)
+	})
+
+	t.Run("unordered data counts complete queued sets against descriptor limit", func(t *testing.T) {
+		const limit = 3
+		rq := newReassemblyQueue(0, limit)
+
+		for i := range limit {
+			complete, err := rq.pushWithError(&chunkPayloadData{
+				unordered:         true,
+				beginningFragment: true,
+				endingFragment:    true,
+				tsn:               uint32(i + 1), //nolint:gosec // bounded by limit
+				streamIdentifier:  0,
+				payloadType:       PayloadTypeWebRTCBinary,
+			})
+			assert.NoError(t, err)
+			assert.True(t, complete, "unordered DATA should complete")
+		}
+
+		complete, err := rq.pushWithError(&chunkPayloadData{
+			unordered:         true,
+			beginningFragment: true,
+			endingFragment:    true,
+			tsn:               limit + 1,
+			streamIdentifier:  0,
+			payloadType:       PayloadTypeWebRTCBinary,
+		})
+		assert.ErrorIs(t, err, errReassemblyQueueLimitExceeded)
+		assert.False(t, complete, "new unordered DATA set should be rejected")
+		assert.Len(t, rq.unorderedChunks, 0)
+		assert.Len(t, rq.unordered, limit)
+		assert.Equal(t, limit, rq.unorderedDataEntryCount())
+	})
+
+	t.Run("unordered data counts complete queued set fragments against descriptor limit", func(t *testing.T) {
+		const limit = 3
+		rq := newReassemblyQueue(0, limit)
+
+		for i := range limit {
+			complete, err := rq.pushWithError(&chunkPayloadData{
+				unordered:         true,
+				beginningFragment: i == 0,
+				endingFragment:    i == limit-1,
+				tsn:               uint32(i + 1), //nolint:gosec // bounded by limit
+				streamIdentifier:  0,
+				payloadType:       PayloadTypeWebRTCBinary,
+			})
+			assert.NoError(t, err)
+			assert.Equal(t, i == limit-1, complete)
+		}
+
+		complete, err := rq.pushWithError(&chunkPayloadData{
+			unordered:         true,
+			beginningFragment: true,
+			endingFragment:    true,
+			tsn:               limit + 1,
+			streamIdentifier:  0,
+			payloadType:       PayloadTypeWebRTCBinary,
+		})
+		assert.ErrorIs(t, err, errReassemblyQueueLimitExceeded)
+		assert.False(t, complete, "new unordered DATA set should be rejected")
+		assert.Len(t, rq.unorderedChunks, 0)
+		assert.Len(t, rq.unordered, 1)
+		assert.Equal(t, limit, rq.unorderedDataEntryCount())
+	})
+
 	t.Run("i-data ordered fragments by fsn", func(t *testing.T) {
-		rq := newReassemblyQueue(0, initialRecvBufSize)
+		rq := newReassemblyQueue(0, 0)
 		orgPpi := PayloadTypeWebRTCBinary
 
 		chunk1 := &chunkPayloadData{
@@ -560,7 +741,7 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 	})
 
 	t.Run("ordered i-data ignores duplicate fsn with different tsn", func(t *testing.T) {
-		rq := newReassemblyQueue(0, initialRecvBufSize)
+		rq := newReassemblyQueue(0, 0)
 		orgPpi := PayloadTypeWebRTCBinary
 
 		complete := rq.push(&chunkPayloadData{
@@ -611,7 +792,7 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 	})
 
 	t.Run("ordered i-data ignores stale incomplete mid after read advances nextMID", func(t *testing.T) {
-		rq := newReassemblyQueue(0, initialRecvBufSize)
+		rq := newReassemblyQueue(0, 0)
 		orgPpi := PayloadTypeWebRTCBinary
 
 		complete, err := rq.pushWithError(&chunkPayloadData{
@@ -676,7 +857,7 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 	})
 
 	t.Run("ordered i-data ignores stale complete mid after read advances nextMID", func(t *testing.T) {
-		rq := newReassemblyQueue(0, initialRecvBufSize)
+		rq := newReassemblyQueue(0, 0)
 		orgPpi := PayloadTypeWebRTCBinary
 
 		complete, err := rq.pushWithError(&chunkPayloadData{
@@ -720,7 +901,7 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 	})
 
 	t.Run("unordered i-data ignores duplicate fsn with different tsn", func(t *testing.T) {
-		rq := newReassemblyQueue(0, initialRecvBufSize)
+		rq := newReassemblyQueue(0, 0)
 		orgPpi := PayloadTypeWebRTCBinary
 
 		complete := rq.push(&chunkPayloadData{
@@ -788,7 +969,7 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 	})
 
 	t.Run("forwardTSN for ordered i-data drops incomplete mids and advances nextMID", func(t *testing.T) {
-		rq := newReassemblyQueue(0, initialRecvBufSize)
+		rq := newReassemblyQueue(0, 0)
 		orgPpi := PayloadTypeWebRTCBinary
 
 		complete := rq.push(&chunkPayloadData{
@@ -839,7 +1020,7 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 	})
 
 	t.Run("ordered i-data ignores stale mids after forwardTSN advances nextMID", func(t *testing.T) {
-		rq := newReassemblyQueue(0, initialRecvBufSize)
+		rq := newReassemblyQueue(0, 0)
 		orgPpi := PayloadTypeWebRTCBinary
 
 		rq.forwardTSNForOrderedMID(1)
@@ -902,7 +1083,7 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 	})
 
 	t.Run("forwardTSN for unordered i-data keeps complete mids and drops old incomplete mids", func(t *testing.T) {
-		rq := newReassemblyQueue(0, initialRecvBufSize)
+		rq := newReassemblyQueue(0, 0)
 		orgPpi := PayloadTypeWebRTCBinary
 
 		complete := rq.push(&chunkPayloadData{
@@ -989,9 +1170,54 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 		assert.False(t, rq.isReadable(), "only an incomplete MID should remain")
 	})
 
+	t.Run("ordered i-data has no descriptor limit by default", func(t *testing.T) {
+		const oldLimit = 3
+		rq := newReassemblyQueue(0, 0)
+
+		for i := range oldLimit + 1 {
+			complete, err := rq.pushWithError(&chunkPayloadData{
+				iData:                  true,
+				messageIdentifier:      uint32(i), //nolint:gosec // bounded by oldLimit
+				fragmentSequenceNumber: 0,
+				beginningFragment:      true,
+				tsn:                    uint32(i + 1), //nolint:gosec // bounded by oldLimit
+				streamIdentifier:       0,
+				payloadType:            PayloadTypeWebRTCBinary,
+			})
+			assert.NoError(t, err)
+			assert.False(t, complete, "MID should remain incomplete")
+		}
+
+		assert.Len(t, rq.orderedMIDMap, oldLimit+1)
+		assert.Len(t, rq.orderedMID, oldLimit+1)
+	})
+
+	t.Run("unordered i-data has no descriptor limit by default", func(t *testing.T) {
+		const oldLimit = 3
+		rq := newReassemblyQueue(0, 0)
+
+		for i := range oldLimit + 1 {
+			complete, err := rq.pushWithError(&chunkPayloadData{
+				iData:                  true,
+				unordered:              true,
+				messageIdentifier:      uint32(i), //nolint:gosec // bounded by oldLimit
+				fragmentSequenceNumber: 0,
+				beginningFragment:      true,
+				tsn:                    uint32(i + 1), //nolint:gosec // bounded by oldLimit
+				streamIdentifier:       0,
+				payloadType:            PayloadTypeWebRTCBinary,
+			})
+			assert.NoError(t, err)
+			assert.False(t, complete, "MID should remain incomplete")
+		}
+
+		assert.Len(t, rq.unorderedMIDMap, oldLimit+1)
+		assert.Len(t, rq.unorderedMID, 0)
+	})
+
 	t.Run("ordered i-data rejects new mids after descriptor limit", func(t *testing.T) {
-		const limit = maxReassemblyQueueMIDEntries
-		rq := newReassemblyQueue(0, reassemblyMIDLimitBytesPerEntry*limit) // cap = limit
+		const limit = 3
+		rq := newReassemblyQueue(0, limit)
 
 		for i := range limit {
 			complete, err := rq.pushWithError(&chunkPayloadData{
@@ -1036,7 +1262,7 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 	})
 
 	t.Run("ordered i-data inserts new mids in order", func(t *testing.T) {
-		rq := newReassemblyQueue(0, initialRecvBufSize)
+		rq := newReassemblyQueue(0, 0)
 
 		for i, mid := range []uint32{3, 1, 2} {
 			complete, err := rq.pushWithError(&chunkPayloadData{
@@ -1061,8 +1287,8 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 	})
 
 	t.Run("unordered i-data rejects new incomplete mids after descriptor limit", func(t *testing.T) {
-		const limit = maxReassemblyQueueMIDEntries
-		rq := newReassemblyQueue(0, reassemblyMIDLimitBytesPerEntry*limit) // cap = limit
+		const limit = 3
+		rq := newReassemblyQueue(0, limit)
 
 		for i := range limit {
 			complete, err := rq.pushWithError(&chunkPayloadData{
@@ -1097,8 +1323,8 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx
 	})
 
 	t.Run("unordered i-data counts complete queued mids against descriptor limit", func(t *testing.T) {
-		const limit = maxReassemblyQueueMIDEntries
-		rq := newReassemblyQueue(0, reassemblyMIDLimitBytesPerEntry*limit) // cap = limit
+		const limit = 3
+		rq := newReassemblyQueue(0, limit)
 
 		for i := range limit {
 			complete, err := rq.pushWithError(&chunkPayloadData{

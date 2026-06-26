@@ -270,17 +270,18 @@ type Association struct {
 	recvZeroChecksum        bool
 
 	// Congestion control parameters
-	maxReceiveBufferSize uint32
-	maxMessageSize       uint32
-	cwnd                 uint32 // my congestion window size
-	rwnd                 uint32 // calculated peer's receiver windows size
-	ssthresh             uint32 // slow start threshold
-	partialBytesAcked    uint32
-	inFastRecovery       bool
-	fastRecoverExitPoint uint32
-	minCwnd              uint32 // Minimum congestion window
-	fastRtxWnd           uint32 // Send window for fast retransmit
-	cwndCAStep           uint32 // Step of congestion window increase at Congestion Avoidance
+	maxReceiveBufferSize      uint32
+	maxMessageSize            uint32
+	maxReassemblyQueueEntries uint32
+	cwnd                      uint32 // my congestion window size
+	rwnd                      uint32 // calculated peer's receiver windows size
+	ssthresh                  uint32 // slow start threshold
+	partialBytesAcked         uint32
+	inFastRecovery            bool
+	fastRecoverExitPoint      uint32
+	minCwnd                   uint32 // Minimum congestion window
+	fastRtxWnd                uint32 // Send window for fast retransmit
+	cwndCAStep                uint32 // Step of congestion window increase at Congestion Avoidance
 
 	// RTX & Ack timer
 	rtoMgr     *rtoManager
@@ -389,6 +390,9 @@ type Config struct {
 
 	// User message interleaving config options
 	interleaving *interleavingSettings
+
+	// Reassembly queue config options
+	maxReassemblyQueueEntries uint32
 
 	// SNAP/sctp-init
 	snapConfig *snapConfig
@@ -558,6 +562,9 @@ func (c Config) applyServer(cfg *Config) error { //nolint:dupl,cyclop
 	if c.MaxMessageSize != 0 {
 		cfg.MaxMessageSize = c.MaxMessageSize
 	}
+	if c.maxReassemblyQueueEntries != 0 {
+		cfg.maxReassemblyQueueEntries = c.maxReassemblyQueueEntries
+	}
 	if c.RTOMax != 0 {
 		cfg.RTOMax = c.RTOMax
 	}
@@ -671,6 +678,9 @@ func (c Config) applyClient(cfg *Config) error { //nolint:dupl,cyclop
 	if c.MaxMessageSize != 0 {
 		cfg.MaxMessageSize = c.MaxMessageSize
 	}
+	if c.maxReassemblyQueueEntries != 0 {
+		cfg.maxReassemblyQueueEntries = c.maxReassemblyQueueEntries
+	}
 	if c.RTOMax != 0 {
 		cfg.RTOMax = c.RTOMax
 	}
@@ -748,12 +758,13 @@ func createAssociationFromConfigWithTsn(cfg *Config, tsn uint32) *Association {
 	}
 
 	assoc := &Association{
-		netConn:              cfg.NetConn,
-		maxReceiveBufferSize: maxReceiveBufferSize,
-		maxMessageSize:       maxMessageSize,
-		minCwnd:              cfg.MinCwnd,
-		fastRtxWnd:           cfg.FastRtxWnd,
-		cwndCAStep:           cfg.CwndCAStep,
+		netConn:                   cfg.NetConn,
+		maxReceiveBufferSize:      maxReceiveBufferSize,
+		maxMessageSize:            maxMessageSize,
+		maxReassemblyQueueEntries: cfg.maxReassemblyQueueEntries,
+		minCwnd:                   cfg.MinCwnd,
+		fastRtxWnd:                cfg.FastRtxWnd,
+		cwndCAStep:                cfg.CwndCAStep,
 
 		myMaxNumOutboundStreams: math.MaxUint16,
 		myMaxNumInboundStreams:  math.MaxUint16,
@@ -2444,10 +2455,13 @@ func (a *Association) createStream(streamIdentifier uint16, accept bool) *Stream
 	stream := &Stream{
 		association:      a,
 		streamIdentifier: streamIdentifier,
-		reassemblyQueue:  newReassemblyQueue(streamIdentifier, a.maxReceiveBufferSize),
-		log:              a.log,
-		name:             fmt.Sprintf("%d:%s", streamIdentifier, a.name),
-		writeDeadline:    deadline.New(),
+		reassemblyQueue: newReassemblyQueue(
+			streamIdentifier,
+			a.maxReassemblyQueueEntries,
+		),
+		log:           a.log,
+		name:          fmt.Sprintf("%d:%s", streamIdentifier, a.name),
+		writeDeadline: deadline.New(),
 	}
 
 	stream.readNotifier = sync.NewCond(&stream.lock)

@@ -1122,9 +1122,8 @@ func TestAssociationIForwardTSNDuplicateEntriesUseLargestMID(t *testing.T) {
 }
 
 func TestAssociationInterleavingProtocolViolationMIDLimit(t *testing.T) {
-	const limit = maxReassemblyQueueMIDEntries
-	// receive buffer sized so the derived MID cap is exactly limit
-	assoc := createTestAssociation(t, Config{MaxReceiveBufferSize: reassemblyMIDLimitBytesPerEntry * limit})
+	const limit = 3
+	assoc := createTestAssociationWithOptions(t, Config{}, WithMaxReassemblyQueueEntries(limit))
 	assoc.useInterleaving = true
 	assoc.payloadQueue.init(0)
 	assoc.setState(established)
@@ -1132,10 +1131,10 @@ func TestAssociationInterleavingProtocolViolationMIDLimit(t *testing.T) {
 	for i := range limit {
 		packets := assoc.handleData(&chunkPayloadData{
 			iData:                  true,
-			messageIdentifier:      uint32(i), //nolint:gosec // bounded by maxReassemblyQueueMIDEntries
+			messageIdentifier:      uint32(i), //nolint:gosec // bounded by limit
 			fragmentSequenceNumber: 0,
 			beginningFragment:      true,
-			tsn:                    uint32(i + 1), //nolint:gosec // bounded by maxReassemblyQueueMIDEntries
+			tsn:                    uint32(i + 1), //nolint:gosec // bounded by limit
 			streamIdentifier:       1,
 			payloadType:            PayloadTypeWebRTCBinary,
 		})
@@ -1158,6 +1157,61 @@ func TestAssociationInterleavingProtocolViolationMIDLimit(t *testing.T) {
 	cause, ok := assoc.willSendAbortCause.(*errorCauseProtocolViolation)
 	require.True(t, ok, "abort cause should be a protocol violation")
 	assert.Equal(t, errReassemblyQueueMIDLimitExceeded.Error(), string(cause.additionalInformation))
+}
+
+func TestAssociationInterleavingMIDLimitDisabledByDefault(t *testing.T) {
+	const oldLimit = 3
+	assoc := createTestAssociation(t, Config{})
+	assoc.useInterleaving = true
+	assoc.payloadQueue.init(0)
+	assoc.setState(established)
+
+	for i := range oldLimit + 1 {
+		packets := assoc.handleData(&chunkPayloadData{
+			iData:                  true,
+			messageIdentifier:      uint32(i), //nolint:gosec // bounded by oldLimit
+			fragmentSequenceNumber: 0,
+			beginningFragment:      true,
+			tsn:                    uint32(i + 1), //nolint:gosec // bounded by oldLimit
+			streamIdentifier:       1,
+			payloadType:            PayloadTypeWebRTCBinary,
+		})
+		require.Nil(t, packets)
+		require.False(t, assoc.willSendAbort, "association should not abort when the MID limit is disabled")
+	}
+}
+
+func TestAssociationDataReassemblyLimitProtocolViolation(t *testing.T) {
+	const limit = 3
+	assoc := createTestAssociationWithOptions(t, Config{}, WithMaxReassemblyQueueEntries(limit))
+	assoc.payloadQueue.init(0)
+	assoc.setState(established)
+
+	for i := range limit {
+		packets := assoc.handleData(&chunkPayloadData{
+			streamSequenceNumber: uint16(i), //nolint:gosec // bounded by limit
+			beginningFragment:    true,
+			tsn:                  uint32(i + 1), //nolint:gosec // bounded by limit
+			streamIdentifier:     1,
+			payloadType:          PayloadTypeWebRTCBinary,
+		})
+		require.Nil(t, packets)
+		require.False(t, assoc.willSendAbort, "association should remain open below the DATA limit")
+	}
+
+	packets := assoc.handleData(&chunkPayloadData{
+		streamSequenceNumber: limit,
+		beginningFragment:    true,
+		tsn:                  limit + 1,
+		streamIdentifier:     1,
+		payloadType:          PayloadTypeWebRTCBinary,
+	})
+	require.Nil(t, packets)
+	require.True(t, assoc.willSendAbort, "association should abort on a new DATA entry over the limit")
+
+	cause, ok := assoc.willSendAbortCause.(*errorCauseProtocolViolation)
+	require.True(t, ok, "abort cause should be a protocol violation")
+	assert.Equal(t, errReassemblyQueueLimitExceeded.Error(), string(cause.additionalInformation))
 }
 
 func TestAssocReliable(t *testing.T) { //nolint:maintidx
@@ -1983,6 +2037,12 @@ loop1:
 func createTestAssociation(t *testing.T, cfg Config) *Association {
 	t.Helper()
 
+	return createTestAssociationWithOptions(t, cfg)
+}
+
+func createTestAssociationWithOptions(t *testing.T, cfg Config, opts ...AssociationOption) *Association {
+	t.Helper()
+
 	if cfg.NetConn == nil {
 		cfg.NetConn = &dumbConn{}
 	}
@@ -1990,7 +2050,13 @@ func createTestAssociation(t *testing.T, cfg Config) *Association {
 		cfg.LoggerFactory = logging.NewDefaultLoggerFactory()
 	}
 
-	a, err := createServerAssociation(cfg)
+	serverOpts := make([]ServerOption, 0, len(opts)+1)
+	serverOpts = append(serverOpts, cfg)
+	for _, opt := range opts {
+		serverOpts = append(serverOpts, opt)
+	}
+
+	a, err := createServerAssociation(serverOpts...)
 	require.NoError(t, err)
 
 	return a

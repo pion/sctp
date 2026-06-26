@@ -136,6 +136,16 @@ func WithMaxMessageSize(size uint32) AssociationOption {
 	})
 }
 
+// WithMaxReassemblyQueueEntries caps the number of DATA entries and I-DATA MIDs queued per stream.
+// A value of 0 disables the cap. By default this cap is disabled.
+func WithMaxReassemblyQueueEntries(maxEntries uint32) AssociationOption {
+	return sharedOption(func(c *Config) error {
+		c.maxReassemblyQueueEntries = maxEntries
+
+		return nil
+	})
+}
+
 // WithRTOMax sets the max retransmission timeout in ms for the association.
 func WithRTOMax(rtoMax float64) AssociationOption {
 	return sharedOption(func(c *Config) error {

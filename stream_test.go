@@ -15,7 +15,7 @@ func newTestStream(t *testing.T) *Stream {
 	t.Helper()
 
 	s := &Stream{
-		reassemblyQueue: newReassemblyQueue(0, initialRecvBufSize),
+		reassemblyQueue: newReassemblyQueue(0, 0),
 		log:             logging.NewDefaultLoggerFactory().NewLogger("sctp-test"),
 	}
 	s.readNotifier = sync.NewCond(&s.lock)

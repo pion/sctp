@@ -57,12 +57,14 @@ func newChunkSet(ssn uint16, ppi PayloadProtocolIdentifier) *chunkSet {
 
 func (set *chunkSet) push(chunk *chunkPayloadData) bool {
 	// check if dup
-	for _, c := range set.chunks {
-		if c.tsn == chunk.tsn {
-			return false
-		}
+	if set.hasTSN(chunk.tsn) {
+		return false
 	}
 
+	return set.pushNoDuplicate(chunk)
+}
+
+func (set *chunkSet) pushNoDuplicate(chunk *chunkPayloadData) bool {
 	// append and sort
 	set.chunks = append(set.chunks, chunk)
 	sortChunksByTSN(set.chunks)
@@ -71,6 +73,16 @@ func (set *chunkSet) push(chunk *chunkPayloadData) bool {
 	complete := set.isComplete()
 
 	return complete
+}
+
+func (set *chunkSet) hasTSN(tsn uint32) bool {
+	for _, c := range set.chunks {
+		if c.tsn == tsn {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (set *chunkSet) isComplete() bool {
@@ -197,29 +209,18 @@ type reassemblyQueue struct {
 	unorderedMIDMap map[uint32]*chunkSetMID
 	useInterleaving bool
 	nBytes          uint64
-	maxMIDEntries   int
+	maxEntries      uint32
 }
 
 var (
 	errTryAgain = errors.New("try again")
 
+	errReassemblyQueueLimitExceeded = errors.New("reassembly queue data limit exceeded")
+
 	errReassemblyQueueMIDLimitExceeded = errors.New("reassembly queue i-data message identifier limit exceeded")
 )
 
-const (
-	// reassemblyMIDLimitBytesPerEntry is the receive-buffer budget allotted per
-	// undelivered interleaved (i-data) message. The MID-entry cap is
-	// maxReceiveBufferSize/reassemblyMIDLimitBytesPerEntry, so reassembly memory
-	// scales with the configured buffer. the cap only bites pathological floods of tiny or
-	// header-only messages that a_rwnd cannot bound.
-	reassemblyMIDLimitBytesPerEntry = 64
-
-	maxReassemblyQueueMIDEntries = 1024
-)
-
-func newReassemblyQueue(si uint16, maxReceiveBufferSize uint32) *reassemblyQueue {
-	maxMIDEntries := max(int(maxReceiveBufferSize/reassemblyMIDLimitBytesPerEntry), maxReassemblyQueueMIDEntries)
-
+func newReassemblyQueue(si uint16, maxEntries uint32) *reassemblyQueue {
 	// From RFC 4960 Sec 6.5:
 	//   The Stream Sequence Number in all the streams MUST start from 0 when
 	//   the association is established.  Also, when the Stream Sequence
@@ -235,8 +236,42 @@ func newReassemblyQueue(si uint16, maxReceiveBufferSize uint32) *reassemblyQueue
 		unorderedMID:    make([]*chunkSetMID, 0),
 		orderedMIDMap:   map[uint32]*chunkSetMID{},
 		unorderedMIDMap: map[uint32]*chunkSetMID{},
-		maxMIDEntries:   maxMIDEntries,
+		maxEntries:      maxEntries,
 	}
+}
+
+func isReassemblyQueueLimitReached(maxEntries uint32, nEntries int) bool {
+	return maxEntries > 0 && int64(nEntries) >= int64(maxEntries)
+}
+
+func (r *reassemblyQueue) isDataLimitReached(nEntries int) bool {
+	return isReassemblyQueueLimitReached(r.maxEntries, nEntries)
+}
+
+func (r *reassemblyQueue) hasDataLimit() bool {
+	return r.maxEntries > 0
+}
+
+func (r *reassemblyQueue) isMIDLimitReached(nEntries int) bool {
+	return isReassemblyQueueLimitReached(r.maxEntries, nEntries)
+}
+
+func (r *reassemblyQueue) orderedDataEntryCount() int {
+	nEntries := 0
+	for _, set := range r.ordered {
+		nEntries += len(set.chunks)
+	}
+
+	return nEntries
+}
+
+func (r *reassemblyQueue) unorderedDataEntryCount() int {
+	nEntries := len(r.unorderedChunks)
+	for _, set := range r.unordered {
+		nEntries += len(set.chunks)
+	}
+
+	return nEntries
 }
 
 func (r *reassemblyQueue) push(chunk *chunkPayloadData) bool {
@@ -259,6 +294,10 @@ func (r *reassemblyQueue) pushWithError(chunk *chunkPayloadData) (bool, error) {
 	}
 
 	if chunk.unordered {
+		if r.hasDataLimit() && r.isDataLimitReached(r.unorderedDataEntryCount()) {
+			return false, errReassemblyQueueLimitExceeded
+		}
+
 		// First, insert into unorderedChunks array
 		r.unorderedChunks = append(r.unorderedChunks, chunk)
 		atomic.AddUint64(&r.nBytes, uint64(len(chunk.userData)))
@@ -303,7 +342,13 @@ func (r *reassemblyQueue) pushWithError(chunk *chunkPayloadData) (bool, error) {
 		}
 	}
 
-	// If not found, create a new chunkSet
+	// Reject a new queued DATA entry once the descriptor cap is reached.
+	if cset != nil && cset.hasTSN(chunk.tsn) {
+		return false, nil
+	}
+	if r.hasDataLimit() && r.isDataLimitReached(r.orderedDataEntryCount()) {
+		return false, errReassemblyQueueLimitExceeded
+	}
 	if cset == nil {
 		cset = newChunkSet(chunk.streamSequenceNumber, chunk.payloadType)
 		r.ordered = append(r.ordered, cset)
@@ -314,7 +359,7 @@ func (r *reassemblyQueue) pushWithError(chunk *chunkPayloadData) (bool, error) {
 
 	atomic.AddUint64(&r.nBytes, uint64(len(chunk.userData)))
 
-	return cset.push(chunk), nil
+	return cset.pushNoDuplicate(chunk), nil
 }
 
 func (r *reassemblyQueue) pushIData(chunk *chunkPayloadData) (bool, error) {
@@ -339,7 +384,7 @@ func (r *reassemblyQueue) pushUnorderedIData(chunk *chunkPayloadData) (bool, err
 	}
 	cset := r.unorderedMIDMap[chunk.messageIdentifier]
 	if cset == nil {
-		if r.unorderedMIDEntryCount() >= r.maxMIDEntries {
+		if r.isMIDLimitReached(r.unorderedMIDEntryCount()) {
 			return false, errReassemblyQueueMIDLimitExceeded
 		}
 		cset = newChunkSetMID(chunk.messageIdentifier, chunk.payloadType)
@@ -372,7 +417,7 @@ func (r *reassemblyQueue) pushOrderedIData(chunk *chunkPayloadData) (bool, error
 	}
 	cset := r.orderedMIDMap[chunk.messageIdentifier]
 	if cset == nil {
-		if len(r.orderedMIDMap) >= r.maxMIDEntries {
+		if r.isMIDLimitReached(len(r.orderedMIDMap)) {
 			return false, errReassemblyQueueMIDLimitExceeded
 		}
 		cset = newChunkSetMID(chunk.messageIdentifier, chunk.payloadType)
