@@ -146,6 +146,46 @@ func TestReceivePayloadQueue(t *testing.T) {
 	assert.NotEmpty(t, payloadQueue.getGapAckBlocksString())
 }
 
+func TestReceivePayloadQueueAdvanceCumulativeTSN(t *testing.T) {
+	payloadQueue := newReceivePayloadQueue(512)
+	initTSN := uint32(math.MaxUint32 - 10)
+	payloadQueue.init(initTSN)
+
+	assert.True(t, payloadQueue.push(initTSN+3))
+	assert.True(t, payloadQueue.push(initTSN+5))
+	assert.True(t, payloadQueue.push(initTSN+20))
+
+	payloadQueue.advanceCumulativeTSN(initTSN + 5)
+
+	assert.Equal(t, initTSN+5, payloadQueue.getcumulativeTSN())
+	assert.Equal(t, 1, payloadQueue.size())
+	assert.False(t, payloadQueue.hasChunk(initTSN+3))
+	assert.False(t, payloadQueue.hasChunk(initTSN+5))
+	assert.True(t, payloadQueue.hasChunk(initTSN+20))
+	assert.EqualValues(t, []gapAckBlock{{start: 15, end: 15}}, payloadQueue.getGapAckBlocks())
+
+	payloadQueue.advanceCumulativeTSN(initTSN + 4)
+
+	assert.Equal(t, initTSN+5, payloadQueue.getcumulativeTSN())
+	assert.Equal(t, 1, payloadQueue.size())
+	assert.True(t, payloadQueue.hasChunk(initTSN+20))
+
+	newCumulativeTSN := initTSN + (1<<31 - 1)
+	payloadQueue.advanceCumulativeTSN(newCumulativeTSN)
+
+	assert.Equal(t, newCumulativeTSN, payloadQueue.getcumulativeTSN())
+	assert.Zero(t, payloadQueue.size())
+	_, ok := payloadQueue.getLastTSNReceived()
+	assert.False(t, ok)
+	assert.Empty(t, payloadQueue.getGapAckBlocks())
+
+	ambiguousPayloadQueue := newReceivePayloadQueue(512)
+	ambiguousPayloadQueue.init(initTSN)
+	ambiguousPayloadQueue.advanceCumulativeTSN(initTSN + (1 << 31))
+
+	assert.Equal(t, initTSN, ambiguousPayloadQueue.getcumulativeTSN())
+}
+
 func TestBitfunc(t *testing.T) {
 	idx, ok := getFirstNonZeroBit(0xf, 0, 20)
 	assert.True(t, ok)

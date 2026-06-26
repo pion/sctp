@@ -20,16 +20,44 @@ func udpPiper(t *testing.T) (net.Conn, net.Conn) {
 }
 
 func TestAssociationOptions_ApplyBothSides(t *testing.T) {
-	opt := WithName("x")
+	opts := []AssociationOption{
+		WithName("x"),
+		WithMaxReassemblyQueueEntries(13),
+	}
 
 	var sCfg Config
 	var cCfg Config
 
-	assert.NoError(t, opt.applyServer(&sCfg))
-	assert.NoError(t, opt.applyClient(&cCfg))
+	for _, opt := range opts {
+		assert.NoError(t, opt.applyServer(&sCfg))
+		assert.NoError(t, opt.applyClient(&cCfg))
+	}
 
 	assert.Equal(t, "x", sCfg.Name)
 	assert.Equal(t, "x", cCfg.Name)
+	assert.Equal(t, uint32(13), sCfg.maxReassemblyQueueEntries)
+	assert.Equal(t, uint32(13), cCfg.maxReassemblyQueueEntries)
+}
+
+func TestConfigComparable(t *testing.T) {
+	_ = map[Config]struct{}{}
+}
+
+func TestAssociationOptions_Interleaving(t *testing.T) {
+	ca, cb := udpPiper(t)
+	defer func() {
+		_ = ca.Close()
+		_ = cb.Close()
+	}()
+
+	defaultCfg, err := buildClientConfig(WithNetConn(ca))
+	assert.NoError(t, err)
+	assert.True(t, defaultCfg.enableInterleaving)
+
+	disabledCfg, err := buildServerConfig(WithNetConn(cb), WithEnableInterleaving(false))
+	assert.NoError(t, err)
+	assert.False(t, disabledCfg.enableInterleaving)
+	assert.True(t, disabledCfg.enableInterleavingSet)
 }
 
 func TestAssociationOptions_Validation(t *testing.T) {
@@ -75,6 +103,20 @@ func TestAssociationOptions_Validation(t *testing.T) {
 		assert.ErrorIs(t, err, errInvalidSnapToken)
 		err = WithSNAP([]byte{}, []byte{}).applyServer(&cfg)
 		assert.ErrorIs(t, err, errInvalidSnapToken)
+	})
+
+	t.Run("nil stream scheduler", func(t *testing.T) {
+		var cfg Config
+		err := WithInterleavingOptions(WithInterleavingStreamSchedulerFactory(nil)).applyServer(&cfg)
+		assert.ErrorIs(t, err, errNilStreamScheduler)
+	})
+
+	t.Run("invalid stream scheduler weight", func(t *testing.T) {
+		var cfg Config
+		err := WithInterleavingOptions(
+			WithInterleavingWeightedFairQueueingWeight(1, 0),
+		).applyServer(&cfg)
+		assert.ErrorIs(t, err, errInvalidStreamSchedulerWeight)
 	})
 }
 
@@ -129,12 +171,14 @@ func TestAssociationOptions_ClientAndServer(t *testing.T) {
 		WithMTU(1200),
 		WithMaxReceiveBufferSize(7777),
 		WithMaxMessageSize(30000),
+		WithMaxReassemblyQueueEntries(13),
 		WithRTOMax(1000),
 		WithMinCwnd(5000),
 		WithFastRtxWnd(6000),
 		WithCwndCAStep(7000),
 		WithBlockWrite(true),
 		WithEnableZeroChecksum(true),
+		WithEnableInterleaving(false),
 	)
 	assert.NoError(t, err)
 	defer func() {
@@ -155,6 +199,9 @@ func TestAssociationOptions_ClientAndServer(t *testing.T) {
 
 	assert.Equal(t, uint32(30000), aClient.MaxMessageSize())
 	assert.Equal(t, uint32(30000), aServer.MaxMessageSize())
+
+	assert.Equal(t, uint32(13), aClient.maxReassemblyQueueEntries)
+	assert.Equal(t, uint32(13), aServer.maxReassemblyQueueEntries)
 
 	assert.Equal(t, uint32(5000), aClient.minCwnd)
 	assert.Equal(t, uint32(6000), aClient.fastRtxWnd)
