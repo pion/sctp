@@ -184,6 +184,78 @@ func association( //nolint:cyclop
 	return client, server, nil
 }
 
+func associationWithClientServerOptions( //nolint:cyclop
+	t *testing.T,
+	piper piperFunc,
+	clientExtra []ClientOption,
+	serverExtra []ServerOption,
+) (*Association, *Association, error) {
+	t.Helper()
+
+	ca, cb := piper(t)
+
+	loggerFactory := logging.NewDefaultLoggerFactory()
+	clientOpts := make([]ClientOption, 0, len(clientExtra)+2)
+	serverOpts := make([]ServerOption, 0, len(serverExtra)+2)
+
+	clientOpts = append(clientOpts, WithNetConn(ca), WithLoggerFactory(loggerFactory))
+	serverOpts = append(serverOpts, WithNetConn(cb), WithLoggerFactory(loggerFactory))
+	clientOpts = append(clientOpts, clientExtra...)
+	serverOpts = append(serverOpts, serverExtra...)
+
+	type result struct {
+		side string
+		a    *Association
+		err  error
+	}
+
+	ch := make(chan result, 2)
+
+	go func() {
+		a, err := ClientWithOptions(clientOpts...)
+		ch <- result{side: "client", a: a, err: err}
+	}()
+
+	go func() {
+		a, err := ServerWithOptions(serverOpts...)
+		ch <- result{side: "server", a: a, err: err}
+	}()
+
+	timeout := 5 * time.Second
+	if dl, ok := t.Deadline(); ok {
+		if rem := time.Until(dl); rem > 0 && rem < timeout {
+			timeout = rem
+		}
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	var client, server *Association
+	for client == nil || server == nil {
+		select {
+		case res := <-ch:
+			if res.err != nil {
+				_ = ca.Close()
+				_ = cb.Close()
+
+				return nil, nil, res.err
+			}
+			if res.side == "client" {
+				client = res.a
+			} else {
+				server = res.a
+			}
+		case <-timer.C:
+			_ = ca.Close()
+			_ = cb.Close()
+
+			return nil, nil, fmt.Errorf("timeout establishing association") //nolint:err113
+		}
+	}
+
+	return client, server, nil
+}
+
 type piperFunc func(t *testing.T) (net.Conn, net.Conn)
 
 func pipeDump(t *testing.T) (net.Conn, net.Conn) {
@@ -863,6 +935,8 @@ func TestAssociationMetadataJSON(t *testing.T) {
 		PartialReliabilityMode:       PartialReliabilityModeIForwardTSN,
 		ZeroChecksumSendingEnabled:   true,
 		ZeroChecksumReceivingEnabled: true,
+		NumInboundStreams:            10,
+		NumOutboundStreams:           20,
 	}
 
 	raw, err := json.Marshal(metadata)
@@ -871,7 +945,9 @@ func TestAssociationMetadataJSON(t *testing.T) {
 		"messageInterleavingEnabled": true,
 		"partialReliabilityMode": 2,
 		"zeroChecksumSendingEnabled": true,
-		"zeroChecksumReceivingEnabled": true
+		"zeroChecksumReceivingEnabled": true,
+		"numInboundStreams": 10,
+		"numOutboundStreams": 20
 	}`, string(raw))
 }
 
@@ -3919,12 +3995,15 @@ func TestAssocHandleInit(t *testing.T) {
 		}
 		assert.NoError(t, err, "should succeed")
 		assert.Equal(t, init.initialTSN-1, assoc.peerLastTSN(), "should match")
-		assert.Equal(t, uint16(1001), assoc.myMaxNumOutboundStreams, "should match")
-		assert.Equal(t, uint16(1002), assoc.myMaxNumInboundStreams, "should match")
 		assert.Equal(t, uint32(5678), assoc.peerVerificationTag, "should match")
 		assert.Equal(t, pkt.sourcePort, assoc.destinationPort, "should match")
 		assert.Equal(t, pkt.destinationPort, assoc.sourcePort, "should match")
 		assert.True(t, assoc.useForwardTSN, "should be set to true")
+
+		metadata, ok := assoc.Metadata()
+		assert.True(t, ok, "should be true")
+		assert.Equal(t, uint16(1001), metadata.NumInboundStreams, "should match")
+		assert.Equal(t, uint16(1002), metadata.NumOutboundStreams, "should match")
 	}
 
 	t.Run("normal", func(t *testing.T) {
@@ -4004,6 +4083,367 @@ func TestAssocMaxMessageSize(t *testing.T) {
 		a.SetMaxMessageSize(20000)
 		assert.Equal(t, uint32(20000), a.MaxMessageSize(), "should match")
 	})
+}
+
+func TestAssocNumStreams(t *testing.T) {
+	t.Run("after handshake with negotiated values", func(t *testing.T) {
+		checkGoroutineLeaks(t)
+
+		lim := test.TimeOut(time.Second * 10)
+		defer lim.Stop()
+
+		br := test.NewBridge()
+
+		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, 0)
+		assert.NoError(t, err, "failed to create associations")
+
+		// After establishing, the stream numbers should be negotiated
+		metadata0, ok0 := a0.Metadata()
+		assert.True(t, ok0, "should be true")
+		metadata1, ok1 := a1.Metadata()
+		assert.True(t, ok1, "should be true")
+
+		assert.Greater(t, metadata0.NumInboundStreams, uint16(0), "should have inbound streams after handshake")
+		assert.Greater(t, metadata0.NumOutboundStreams, uint16(0), "should have outbound streams after handshake")
+		assert.Greater(t, metadata1.NumInboundStreams, uint16(0), "should have inbound streams after handshake")
+		assert.Greater(t, metadata1.NumOutboundStreams, uint16(0), "should have outbound streams after handshake")
+
+		closeAssociationPair(br, a0, a1)
+	})
+
+	t.Run("after handshake with local limits smaller than peer", func(t *testing.T) {
+		checkGoroutineLeaks(t)
+
+		clientLocalInbound := uint16(3)
+		clientLocalOutbound := uint16(4)
+		serverLocalInbound := uint16(11)
+		serverLocalOutbound := uint16(12)
+
+		a0, a1, err := associationWithClientServerOptions(
+			t,
+			pipeDump,
+			[]ClientOption{WithNumStreams(clientLocalInbound, clientLocalOutbound)},
+			[]ServerOption{WithNumStreams(serverLocalInbound, serverLocalOutbound)},
+		)
+		assert.NoError(t, err, "failed to create associations")
+		if err != nil {
+			return
+		}
+
+		metadata0, ok0 := a0.Metadata()
+		assert.True(t, ok0, "should be true")
+		metadata1, ok1 := a1.Metadata()
+		assert.True(t, ok1, "should be true")
+
+		assert.Equal(
+			t,
+			clientLocalInbound,
+			metadata0.NumInboundStreams,
+			"client inbound streams should clamp to its local limit",
+		)
+		assert.Equal(
+			t,
+			clientLocalOutbound,
+			metadata0.NumOutboundStreams,
+			"client outbound streams should clamp to its local limit",
+		)
+		assert.Equal(
+			t,
+			clientLocalOutbound,
+			metadata1.NumInboundStreams,
+			"server inbound streams should clamp to the peer outbound offer",
+		)
+		assert.Equal(
+			t,
+			clientLocalInbound,
+			metadata1.NumOutboundStreams,
+			"server outbound streams should clamp to the peer inbound offer",
+		)
+
+		assert.NoError(t, a0.Close())
+		assert.NoError(t, a1.Close())
+	})
+}
+
+func TestAssocInitStreamCountsOnWire(t *testing.T) { //nolint:cyclop
+	type streamCounts struct {
+		outbound uint16
+		inbound  uint16
+	}
+
+	clientLocalInbound := uint16(3)
+	clientLocalOutbound := uint16(4)
+	serverLocalInbound := uint16(11)
+	serverLocalOutbound := uint16(12)
+
+	conn1, conn2 := createUDPConnPair()
+	dbConn1, ok := conn1.(*dumbConn2)
+	require.True(t, ok)
+	dbConn2, ok := conn2.(*dumbConn2)
+	require.True(t, ok)
+
+	initCh := make(chan streamCounts, 1)
+	initAckCh := make(chan streamCounts, 1)
+	unmarshalErrCh := make(chan error, 2)
+
+	dbConn1.setRemoteHandler(func(buf []byte) {
+		p := &packet{}
+		if err := p.unmarshal(true, buf); err != nil {
+			select {
+			case unmarshalErrCh <- err:
+			default:
+			}
+			dbConn2.inboundHandler(buf)
+
+			return
+		}
+
+		if len(p.chunks) == 1 {
+			if init, ok := p.chunks[0].(*chunkInit); ok {
+				select {
+				case initCh <- streamCounts{outbound: init.numOutboundStreams, inbound: init.numInboundStreams}:
+				default:
+				}
+			}
+		}
+
+		dbConn2.inboundHandler(buf)
+	})
+
+	dbConn2.setRemoteHandler(func(buf []byte) {
+		p := &packet{}
+		if err := p.unmarshal(true, buf); err != nil {
+			select {
+			case unmarshalErrCh <- err:
+			default:
+			}
+			dbConn1.inboundHandler(buf)
+
+			return
+		}
+
+		if len(p.chunks) == 1 {
+			if initAck, ok := p.chunks[0].(*chunkInitAck); ok {
+				select {
+				case initAckCh <- streamCounts{outbound: initAck.numOutboundStreams, inbound: initAck.numInboundStreams}:
+				default:
+				}
+			}
+		}
+
+		dbConn1.inboundHandler(buf)
+	})
+
+	piper := func(t *testing.T) (net.Conn, net.Conn) {
+		t.Helper()
+
+		return conn1, conn2
+	}
+
+	a0, a1, err := associationWithClientServerOptions(
+		t,
+		piper,
+		[]ClientOption{WithNumStreams(clientLocalInbound, clientLocalOutbound)},
+		[]ServerOption{WithNumStreams(serverLocalInbound, serverLocalOutbound)},
+	)
+	require.NoError(t, err)
+	defer noErrorClose(t, a0.Close)
+	defer noErrorClose(t, a1.Close)
+
+	select {
+	case err := <-unmarshalErrCh:
+		require.NoError(t, err)
+	default:
+	}
+
+	select {
+	case init := <-initCh:
+		assert.Equal(
+			t,
+			clientLocalOutbound,
+			init.outbound,
+			"INIT OS should advertise the sender's configured outbound streams per RFC 9260 section 5.1.1",
+		)
+		assert.Equal(
+			t,
+			clientLocalInbound,
+			init.inbound,
+			"INIT MIS should advertise the sender's configured inbound streams per RFC 9260 section 5.1.1",
+		)
+	case <-time.After(time.Second):
+		require.FailNow(t, "timed out waiting for INIT capture")
+	}
+
+	select {
+	case initAck := <-initAckCh:
+		assert.Equal(
+			t,
+			clientLocalInbound,
+			initAck.outbound,
+			"INIT ACK OS must not exceed the INIT MIS per RFC 9260 section 5.1.1",
+		)
+		assert.Equal(
+			t,
+			clientLocalOutbound,
+			initAck.inbound,
+			"INIT ACK MIS should clamp to the peer's requested outbound streams per RFC 9260 section 5.1.1",
+		)
+	case <-time.After(time.Second):
+		require.FailNow(t, "timed out waiting for INIT ACK capture")
+	}
+}
+
+func TestAssocOnStreamResetCompleteSetAndThreadSafe(t *testing.T) {
+	loggerFactory := logging.NewDefaultLoggerFactory()
+	assoc := createTestAssociation(t, Config{
+		LoggerFactory: loggerFactory,
+	})
+	assert.NotNil(t, assoc, "should succeed")
+
+	// Test that handler can be set without panic
+	handlerCalled := make(chan uint16, 1)
+	assoc.OnStreamResetComplete(func(streamID uint16) {
+		handlerCalled <- streamID
+	})
+
+	// Test concurrent calls to OnStreamResetComplete are safe
+	done := make(chan bool, 5)
+	for range 5 {
+		go func() {
+			assoc.OnStreamResetComplete(func(streamID uint16) {
+				// handler
+			})
+			done <- true
+		}()
+	}
+
+	for range 5 {
+		<-done
+	}
+}
+
+func TestAssocOnStreamResetCompleteCanBeUpdated(t *testing.T) {
+	loggerFactory := logging.NewDefaultLoggerFactory()
+	assoc := createTestAssociation(t, Config{
+		LoggerFactory: loggerFactory,
+	})
+	assert.NotNil(t, assoc, "should succeed")
+
+	// Set initial handler
+	assoc.OnStreamResetComplete(func(streamID uint16) {
+		// first handler
+	})
+
+	// Update to second handler - should not panic
+	assoc.OnStreamResetComplete(func(streamID uint16) {
+		// second handler
+	})
+
+	// Update to nil handler
+	assoc.OnStreamResetComplete(nil)
+}
+
+func TestAssocOnStreamResetCompleteTriggeredOnStreamReset(t *testing.T) {
+	checkGoroutineLeaks(t)
+
+	lim := test.TimeOut(time.Second * 10)
+	defer lim.Stop()
+
+	const si uint16 = 5
+	br := test.NewBridge()
+
+	a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, 0)
+	assert.NoError(t, err, "failed to create associations")
+
+	s0, _, err := establishSessionPair(br, a0, a1, si)
+	assert.NoError(t, err, "failed to establish session pair")
+
+	// Set handler on a1 (the receiving side that will process the reset)
+	resetNotification := make(chan uint16, 1)
+	a1.OnStreamResetComplete(func(streamID uint16) {
+		resetNotification <- streamID
+	})
+
+	err = s0.Close()
+	assert.NoError(t, err, "failed to close stream s0")
+
+	timeout := time.Now().Add(5 * time.Second)
+	for time.Now().Before(timeout) {
+		br.Process()
+
+		select {
+		case streamID := <-resetNotification:
+			assert.Equal(t, si, streamID, "handler should be called with correct stream ID")
+			closeAssociationPair(br, a0, a1)
+
+			return
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+
+	require.Fail(t, "timeout waiting for OnStreamResetComplete handler to be triggered")
+}
+
+func TestAssocOnStreamResetCompleteTriggeredForEachResetStream(t *testing.T) {
+	checkGoroutineLeaks(t)
+
+	lim := test.TimeOut(time.Second * 10)
+	defer lim.Stop()
+
+	br := test.NewBridge()
+
+	a0, a1, aerr := createNewAssociationPair(br, ackModeNoDelay, 0)
+	assert.NoError(t, aerr, "failed to create associations")
+
+	const numStreams = 3
+	streams := make([][2]*Stream, numStreams)
+	for i := range numStreams {
+		si := uint16(i)
+		s0, s1, err := establishSessionPair(br, a0, a1, si)
+		assert.NoError(t, err, "failed to establish session pair")
+		streams[i] = [2]*Stream{s0, s1}
+	}
+
+	resetNotifications := make(chan uint16, numStreams)
+	a1.OnStreamResetComplete(func(streamID uint16) {
+		resetNotifications <- streamID
+	})
+
+	for i := range numStreams {
+		err := streams[i][0].Close()
+		assert.NoError(t, err, "failed to close stream")
+	}
+
+	seenStreamIDs := make(map[uint16]bool)
+	timeout := time.Now().Add(5 * time.Second)
+	for time.Now().Before(timeout) && len(seenStreamIDs) < numStreams {
+		br.Process()
+
+		select {
+		case streamID := <-resetNotifications:
+			seenStreamIDs[streamID] = true
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+
+	for i := range numStreams {
+		assert.True(t, seenStreamIDs[uint16(i)], "should receive reset notification for stream %d", i)
+	}
+
+	closeAssociationPair(br, a0, a1)
+}
+
+func TestAssocOnStreamResetCompleteNilByDefault(t *testing.T) {
+	loggerFactory := logging.NewDefaultLoggerFactory()
+	assoc := createTestAssociation(t, Config{
+		LoggerFactory: loggerFactory,
+	})
+	assert.NotNil(t, assoc, "should succeed")
+
+	// Setting nil handler should work without panic
+	assoc.OnStreamResetComplete(nil)
 }
 
 type dumbConnInboundHandler func([]byte)
