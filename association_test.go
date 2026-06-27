@@ -4964,8 +4964,8 @@ func TestAssociation_Abort(t *testing.T) {
 	assert.Error(t, err, "User Initiated Abort: 1234", "expected abort reason")
 }
 
-// TestAssociation_createClientWithContext tests that the client is closed when the context is canceled.
-func TestAssociation_createClientWithContext(t *testing.T) {
+// TestClientWithOptionsContext tests that the client is closed when the context is canceled.
+func TestClientWithOptionsContext(t *testing.T) {
 	// Limit runtime in case of deadlocks
 	lim := test.TimeOut(time.Second * 5)
 	defer lim.Stop()
@@ -4982,10 +4982,7 @@ func TestAssociation_createClientWithContext(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 
 	go func() {
-		_, err2 := createClientWithContext(ctx, Config{
-			NetConn:       udp1,
-			LoggerFactory: loggerFactory,
-		})
+		_, err2 := ClientWithOptionsContext(ctx, WithNetConn(udp1), WithLoggerFactory(loggerFactory))
 		if err2 != nil {
 			errCh1 <- err2
 		} else {
@@ -4994,10 +4991,7 @@ func TestAssociation_createClientWithContext(t *testing.T) {
 	}()
 
 	go func() {
-		_, err2 := createClientWithContext(ctx, Config{
-			NetConn:       udp2,
-			LoggerFactory: loggerFactory,
-		})
+		_, err2 := ClientWithOptionsContext(ctx, WithNetConn(udp2), WithLoggerFactory(loggerFactory))
 		if err2 != nil {
 			errCh2 <- err2
 		} else {
