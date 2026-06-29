@@ -437,11 +437,11 @@ func Client(config Config) (*Association, error) {
 
 // ClientWithOptions opens a SCTP stream over a conn.
 func ClientWithOptions(opts ...ClientOption) (*Association, error) {
-	return createClientWithOptionsWithContext(context.Background(), opts...)
+	return ClientContext(context.Background(), opts...)
 }
 
 func createClientWithContext(ctx context.Context, config Config) (*Association, error) {
-	return createClientWithOptionsWithContext(ctx, config)
+	return ClientContext(ctx, config)
 }
 
 func createSNAPAssociation(config *Config) (*Association, error) {
@@ -464,7 +464,10 @@ func createSNAPAssociation(config *Config) (*Association, error) {
 	return assoc, nil
 }
 
-func createClientWithOptionsWithContext(ctx context.Context, opts ...ClientOption) (*Association, error) {
+// ClientContext opens a SCTP stream over a conn.
+// If ctx is canceled before the SCTP handshake completes, the association is
+// closed and ctx.Err() is returned.
+func ClientContext(ctx context.Context, opts ...ClientOption) (*Association, error) {
 	config, err := buildClientConfig(opts...)
 	if err != nil {
 		return nil, err
