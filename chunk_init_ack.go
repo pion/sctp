@@ -20,7 +20,8 @@ See chunkInitCommon for the fixed headers
 	IPv6 IP (Note 1)               		Optional    6
 	Unrecognized Parameter              Optional    8
 	Reserved for ECN Capable (Note 2)   Optional    32768 (0x8000)
-	Host Name IP (Note 3)          		Optional    11<Paste>
+	Host Name IP (Note 3)          		Optional    11
+	Zero Checksum Acceptable (RFC 9653) Optional    32769 (0x8001)
 */
 type chunkInitAck struct {
 	chunkHeader
