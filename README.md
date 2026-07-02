@@ -21,7 +21,13 @@
 - [RFC 3758](https://www.rfc-editor.org/rfc/rfc3758.html) — Stream Control Transmission Protocol (SCTP) Partial Reliability Extension
 - [RFC 5061](https://www.rfc-editor.org/rfc/rfc5061.html) — Stream Control Transmission Protocol (SCTP) Dynamic Address Reconfiguration
 - [RFC 4895](https://www.rfc-editor.org/rfc/rfc4895.html) — Authenticated Chunks for the Stream Control Transmission Protocol (SCTP)
+- [RFC 8260](https://www.rfc-editor.org/rfc/rfc8260.html) — Stream Schedulers and User Message Interleaving for the Stream Control Transmission Protocol (SCTP)
 - [RFC 1982](https://www.rfc-editor.org/rfc/rfc1982.html) — Serial Number Arithmetic
+
+### Non-RFC / Draft RFC Implemented
+- [RACK (Tail Loss Probing)](https://duepublico2.uni-due.de/servlets/MCRFileNodeServlet/duepublico_derivate_00073893/Diss_Weinrank.pdf#page=97)
+- [Adaptive Burst Mitigation](https://duepublico2.uni-due.de/servlets/MCRFileNodeServlet/duepublico_derivate_00073893/Diss_Weinrank.pdf#page=115)
+- [SNAP](https://www.ietf.org/archive/id/draft-hancke-tsvwg-snap-00.html)
 
 ### Partial implementations
 Pion only implements the subset of RFC 4960 that is required for WebRTC.
@@ -36,10 +42,7 @@ Ideally, we would like to add the following features as part of a [v2 refresh](h
 
 Feature | Reference | Progress
 --- | --- | ---
-RACK (tail loss probing) | [Paper](https://icnp20.cs.ucr.edu/proceedings/nipaa/RACK%20for%20SCTP.pdf), [Comment](https://github.com/pion/sctp/issues/206#issuecomment-968265853)| [Implemented](https://github.com/pion/sctp/pull/390)
-Adaptive burst mitigation | [Paper, see section 5A](https://icnp20.cs.ucr.edu/proceedings/nipaa/RACK%20for%20SCTP.pdf)| [Implemented](https://github.com/pion/sctp/pull/394)
 Update to RFC 9260 | [Parent issue](https://github.com/pion/sctp/issues/402) | [In progress](https://github.com/pion/sctp/issues/402)
-Implement RFC 8260 | [Issue](https://github.com/pion/sctp/issues/435) | [Implemented](https://github.com/pion/sctp/pull/443)
 Blocking writes | [1](https://github.com/pion/sctp/issues/77), [2](https://github.com/pion/sctp/issues/357) | [Potentially in progress](https://github.com/pion/sctp/issues/357#issuecomment-3382050767)
 association.listener (and better docs) | [1](https://github.com/pion/sctp/issues/74), [2](https://github.com/pion/sctp/issues/173) | Not started, [blocked by above](https://github.com/pion/sctp/issues/74#issuecomment-545550714)
 
