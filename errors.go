@@ -8,8 +8,10 @@ import (
 )
 
 var (
-	errNilNetConn       = errors.New("netConn must not be nil")
-	errNilLoggerFactory = errors.New("loggerFactory must not be nil")
+	errNilNetConn                  = errors.New("netConn must not be nil")
+	errNilLoggerFactory            = errors.New("loggerFactory must not be nil")
+	ErrOutboundStreamLimitExceeded = errors.New("outbound stream limit exceeded")
+	errInboundMessageLimitExceeded = errors.New("inbound message reassembly limit exceeded")
 
 	// errZeroMTUOption indicates that the MTU option was set to zero.
 	errZeroMTUOption = errors.New("MTU option cannot be set to zero")
