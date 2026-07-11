@@ -2332,16 +2332,19 @@ func (a *Association) acceptPayloadData(chunkPayload *chunkPayloadData) bool {
 		a.abortProtocolViolation("inbound stream limit exceeded")
 		return false
 	}
-	if a.maxRetainedPayloadChunks > 0 && a.retainedPayloadChunks.Load() >= a.maxRetainedPayloadChunks {
-		a.abortProtocolViolation("association retained payload chunk limit exceeded")
-		return false
-	}
 	stream := a.getOrCreateStream(chunkPayload.streamIdentifier, true, PayloadTypeUnknown)
 	if stream == nil {
 		// silently discard the data. (sender will retry on T3-rtx timeout)
 		// see pion/sctp#30
 		a.log.Debugf("[%s] discard %d", a.name, chunkPayload.streamSequenceNumber)
 
+		return false
+	}
+	if stream.isDuplicate(chunkPayload) {
+		return true
+	}
+	if a.maxRetainedPayloadChunks > 0 && a.retainedPayloadChunks.Load() >= a.maxRetainedPayloadChunks {
+		a.abortProtocolViolation("association retained payload chunk limit exceeded")
 		return false
 	}
 
@@ -2371,14 +2374,17 @@ func (a *Association) acceptPayloadData(chunkPayload *chunkPayloadData) bool {
 
 // The caller should hold the lock.
 func (a *Association) pushPayloadDataToStream(stream *Stream, chunkPayload *chunkPayloadData) bool {
-	a.retainedPayloadChunks.Add(1)
-	a.payloadQueue.push(chunkPayload.tsn)
-	if err := stream.handleData(chunkPayload); err != nil {
-		a.retainedPayloadChunks.Add(^uint32(0))
+	accepted, err := stream.handleData(chunkPayload)
+	if err != nil {
 		a.abortProtocolViolation(err.Error())
 
 		return false
 	}
+	if !accepted {
+		return true
+	}
+	a.retainedPayloadChunks.Add(1)
+	a.payloadQueue.push(chunkPayload.tsn)
 
 	return true
 }

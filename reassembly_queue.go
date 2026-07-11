@@ -283,6 +283,9 @@ func (r *reassemblyQueue) push(chunk *chunkPayloadData) bool {
 }
 
 func (r *reassemblyQueue) pushWithError(chunk *chunkPayloadData) (bool, error) { //nolint:cyclop
+	if r.isDuplicate(chunk) {
+		return false, nil
+	}
 	if r.maxMessageBytes > 0 && uint64(r.queuedMessageBytes(chunk))+uint64(len(chunk.userData)) > uint64(r.maxMessageBytes) {
 		return false, errInboundMessageLimitExceeded
 	}
@@ -365,6 +368,36 @@ func (r *reassemblyQueue) pushWithError(chunk *chunkPayloadData) (bool, error) {
 	atomic.AddUint64(&r.nBytes, uint64(len(chunk.userData)))
 
 	return cset.pushNoDuplicate(chunk), nil
+}
+
+func (r *reassemblyQueue) isDuplicate(chunk *chunkPayloadData) bool {
+	if chunk.isIData() {
+		sets := []*chunkSetMID{r.orderedMIDMap[chunk.messageIdentifier], r.unorderedMIDMap[chunk.messageIdentifier]}
+		for _, set := range sets {
+			if set == nil {
+				continue
+			}
+			for _, c := range set.chunks {
+				if c.fragmentSequenceNumber == chunk.fragmentSequenceNumber {
+					return true
+				}
+			}
+		}
+		return r.hasQueuedUnorderedMID(chunk.messageIdentifier)
+	}
+	for _, sets := range [][]*chunkSet{r.ordered, r.unordered} {
+		for _, set := range sets {
+			if set.ssn == chunk.streamSequenceNumber && set.hasTSN(chunk.tsn) {
+				return true
+			}
+		}
+	}
+	for _, c := range r.unorderedChunks {
+		if c.tsn == chunk.tsn {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *reassemblyQueue) queuedMessageBytes(chunk *chunkPayloadData) int {
