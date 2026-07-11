@@ -1239,7 +1239,6 @@ func (a *Association) unregisterStream(s *Stream, err error) {
 	s.lock.Lock()
 	defer s.lock.Unlock()
 
-	s.reassemblyQueue.releaseAll()
 	delete(a.streams, s.streamIdentifier)
 	s.readErr = err
 	s.readNotifier.Broadcast()
@@ -3380,10 +3379,7 @@ func (a *Association) resetStreamsIfAny(resetRequest *paramOutgoingResetRequest)
 			s.onInboundStreamReset()
 			a.lock.Lock()
 			a.log.Debugf("[%s] deleting stream %d", a.name, id)
-			s.lock.Lock()
-			s.reassemblyQueue.releaseAll()
 			delete(a.streams, s.streamIdentifier)
-			s.lock.Unlock()
 		}
 		delete(a.reconfigRequests, resetRequest.reconfigRequestSequenceNumber)
 	} else {

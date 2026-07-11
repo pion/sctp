@@ -771,50 +771,6 @@ func (r *reassemblyQueue) release(n uint32) {
 	}
 }
 
-func (r *reassemblyQueue) releaseAll() {
-	seen := map[uint32]struct{}{}
-	visit := func(c *chunkPayloadData) { seen[c.tsn] = struct{}{} }
-	for _, set := range r.ordered {
-		for _, c := range set.chunks {
-			visit(c)
-		}
-	}
-	for _, set := range r.unordered {
-		for _, c := range set.chunks {
-			visit(c)
-		}
-	}
-	for _, c := range r.unorderedChunks {
-		visit(c)
-	}
-	for _, set := range r.orderedMID {
-		for _, c := range set.chunks {
-			visit(c)
-		}
-	}
-	for _, set := range r.unorderedMID {
-		for _, c := range set.chunks {
-			visit(c)
-		}
-	}
-	for _, set := range r.orderedMIDMap {
-		for _, c := range set.chunks {
-			visit(c)
-		}
-	}
-	for _, set := range r.unorderedMIDMap {
-		for _, c := range set.chunks {
-			visit(c)
-		}
-	}
-	r.release(uint32(len(seen)))
-	r.ordered, r.unordered, r.unorderedChunks = nil, nil, nil
-	r.orderedMID, r.unorderedMID = nil, nil
-	r.orderedMIDMap = map[uint32]*chunkSetMID{}
-	r.unorderedMIDMap = map[uint32]*chunkSetMID{}
-	atomic.StoreUint64(&r.nBytes, 0)
-}
-
 func (r *reassemblyQueue) subtractNumBytes(nBytes int) {
 	cur := atomic.LoadUint64(&r.nBytes)
 	if int(cur) >= nBytes { //nolint:gosec // G115
