@@ -847,6 +847,23 @@ func TestAssociationInterleavingNegotiationPayloadChunkType(t *testing.T) {
 	}
 }
 
+func TestAssociationInterleavingUpdatesMaxPayloadSize(t *testing.T) {
+	assoc := createTestAssociation(t, Config{MTU: initialMTU})
+
+	require.False(t, assoc.useInterleaving)
+	require.Equal(t, maxPayloadSizeForMTU(initialMTU, false), assoc.maxPayloadSize)
+
+	assoc.peerInterleaving = true
+	require.NoError(t, assoc.updateInterleavingState())
+	require.True(t, assoc.useInterleaving)
+	require.Equal(t, maxPayloadSizeForMTU(initialMTU, true), assoc.maxPayloadSize)
+
+	assoc.peerInterleaving = false
+	require.NoError(t, assoc.updateInterleavingState())
+	require.False(t, assoc.useInterleaving)
+	require.Equal(t, maxPayloadSizeForMTU(initialMTU, false), assoc.maxPayloadSize)
+}
+
 func TestAssociationMetadataNotReadyBeforeHandshake(t *testing.T) {
 	assoc := createTestAssociation(t, Config{
 		NetConn: &dumbConn{},
@@ -5750,7 +5767,7 @@ func shutdownTLRAssociationForTest(a *Association, peer net.Conn) {
 func pushPendingFullPacketChunks(t *testing.T, a *Association, n int) {
 	t.Helper()
 
-	userLen := int(a.MTU()) - int(commonHeaderSize+dataChunkHeaderSize)
+	userLen := int(maxPayloadSizeForMTU(a.MTU(), false))
 	assert.True(t, userLen > 0)
 
 	for range n {
@@ -5766,7 +5783,7 @@ func pushPendingFullPacketChunks(t *testing.T, a *Association, n int) {
 func pushInflightRetransmitFullPacketChunks(t *testing.T, a *Association, startTSN uint32, n int) {
 	t.Helper()
 
-	userLen := int(a.MTU()) - int(commonHeaderSize+dataChunkHeaderSize)
+	userLen := int(maxPayloadSizeForMTU(a.MTU(), false))
 	assert.True(t, userLen > 0)
 
 	for i := range n {

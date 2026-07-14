@@ -70,3 +70,63 @@ func TestChunkIDataMarshalUnmarshal(t *testing.T) {
 		assert.False(t, parsed.endingFragment)
 	})
 }
+
+func TestPayloadDataHeaderSizeAccounting(t *testing.T) {
+	t.Run("header constants match marshaled chunks", func(t *testing.T) {
+		data := &chunkPayloadData{
+			beginningFragment: true,
+			endingFragment:    true,
+		}
+		dataRaw, err := data.marshal()
+		assert.NoError(t, err)
+		assert.Equal(t, int(dataChunkHeaderSize), len(dataRaw))
+		assert.Equal(t, int(dataChunkHeaderSize), data.chunkSize())
+
+		iData := &chunkPayloadData{
+			iData:             true,
+			beginningFragment: true,
+			endingFragment:    true,
+		}
+		iDataRaw, err := iData.marshal()
+		assert.NoError(t, err)
+		assert.Equal(t, int(iDataChunkHeaderSize), len(iDataRaw))
+		assert.Equal(t, int(iDataChunkHeaderSize), iData.chunkSize())
+	})
+
+	t.Run("default MTU payload limits include padding", func(t *testing.T) {
+		testCases := []struct {
+			name            string
+			useInterleaving bool
+			expectedPayload uint32
+		}{
+			{
+				name:            "DATA",
+				useInterleaving: false,
+				expectedPayload: 1160,
+			},
+			{
+				name:            "I-DATA",
+				useInterleaving: true,
+				expectedPayload: 1156,
+			},
+		}
+
+		for _, tc := range testCases {
+			t.Run(tc.name, func(t *testing.T) {
+				payloadSize := maxPayloadSizeForMTU(initialMTU, tc.useInterleaving)
+				assert.Equal(t, tc.expectedPayload, payloadSize)
+
+				chunkPayload := &chunkPayloadData{
+					iData:             tc.useInterleaving,
+					beginningFragment: true,
+					endingFragment:    true,
+					userData:          make([]byte, payloadSize),
+				}
+				p := &packet{chunks: []chunk{chunkPayload}}
+				raw, err := p.marshal(false)
+				assert.NoError(t, err)
+				assert.LessOrEqual(t, len(raw), int(initialMTU))
+			})
+		}
+	})
+}

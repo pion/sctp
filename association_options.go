@@ -96,11 +96,11 @@ func WithEnableInterleaving(b bool) AssociationOption {
 }
 
 // WithMTU sets the MTU size for the association.
-// By default this is 1228.
+// By default this is 1191.
 func WithMTU(size uint32) AssociationOption {
 	return sharedOption(func(c *Config) error {
-		if size == 0 {
-			return errZeroMTUOption
+		if err := validateMTU(size); err != nil {
+			return err
 		}
 		c.MTU = size
 

@@ -70,13 +70,43 @@ var (
 
 const (
 	receiveMTU            uint32 = 8192 // MTU for inbound packet (from DTLS)
-	initialMTU            uint32 = 1228 // initial MTU for outgoing packets (to DTLS)
+	initialMTU            uint32 = 1191 // initial MTU for outgoing packets (to DTLS)
 	initialRecvBufSize    uint32 = 1024 * 1024
-	commonHeaderSize      uint32 = 12
-	dataChunkHeaderSize   uint32 = 16
-	iDataChunkHeaderSize  uint32 = 20
+	commonHeaderSize      uint32 = packetHeaderSize
+	dataChunkHeaderSize   uint32 = chunkHeaderSize + payloadDataHeaderSize
+	iDataChunkHeaderSize  uint32 = chunkHeaderSize + iDataHeaderSize
 	defaultMaxMessageSize uint32 = 65536
 )
+
+func payloadDataChunkHeaderSize(useInterleaving bool) uint32 {
+	if useInterleaving {
+		return iDataChunkHeaderSize
+	}
+
+	return dataChunkHeaderSize
+}
+
+func maxPayloadSizeForMTU(mtu uint32, useInterleaving bool) uint32 {
+	headerSize := commonHeaderSize + payloadDataChunkHeaderSize(useInterleaving)
+	if mtu <= headerSize {
+		return 0
+	}
+
+	payloadSize := mtu - headerSize
+
+	return payloadSize - payloadSize%paddingMultiple
+}
+
+func validateMTU(mtu uint32) error {
+	if mtu == 0 {
+		return errZeroMTUOption
+	}
+	if maxPayloadSizeForMTU(mtu, true) == 0 {
+		return errMTUTooSmallOption
+	}
+
+	return nil
+}
 
 // PartialReliabilityMode indicates the negotiated partial reliability mode.
 type PartialReliabilityMode int
@@ -554,6 +584,9 @@ func (c Config) applyServer(cfg *Config) error { //nolint:dupl,cyclop
 	cfg.EnableZeroChecksum = c.EnableZeroChecksum
 
 	if c.MTU != 0 {
+		if err := validateMTU(c.MTU); err != nil {
+			return err
+		}
 		cfg.MTU = c.MTU
 	}
 	if c.MaxReceiveBufferSize != 0 {
@@ -670,6 +703,9 @@ func (c Config) applyClient(cfg *Config) error { //nolint:dupl,cyclop
 	cfg.EnableZeroChecksum = c.EnableZeroChecksum
 
 	if c.MTU != 0 {
+		if err := validateMTU(c.MTU); err != nil {
+			return err
+		}
 		cfg.MTU = c.MTU
 	}
 	if c.MaxReceiveBufferSize != 0 {
@@ -729,6 +765,12 @@ func buildClientConfig(opts ...ClientOption) (*Config, error) {
 }
 
 func createAssociationFromConfig(cfg *Config) (*Association, error) {
+	if cfg.MTU != 0 {
+		if err := validateMTU(cfg.MTU); err != nil {
+			return nil, err
+		}
+	}
+
 	tsn := globalMathRandomGenerator.Uint32()
 
 	return createAssociationFromConfigWithTsn(cfg, tsn), nil
@@ -774,7 +816,7 @@ func createAssociationFromConfigWithTsn(cfg *Config, tsn uint32) *Association {
 		pendingQueue:            newPendingQueue(interleaving.newStreamScheduler),
 		controlQueue:            newControlQueue(),
 		mtu:                     mtu,
-		maxPayloadSize:          mtu - (commonHeaderSize + dataChunkHeaderSize),
+		maxPayloadSize:          maxPayloadSizeForMTU(mtu, false),
 		myVerificationTag:       generateInitiateTag(),
 		initialTSN:              tsn,
 		myNextTSN:               tsn,
@@ -1891,11 +1933,7 @@ func (a *Association) updateInterleavingState() error {
 		}
 
 		a.useInterleaving = useInterleaving
-		if useInterleaving {
-			a.maxPayloadSize = a.mtu - (commonHeaderSize + iDataChunkHeaderSize)
-		} else {
-			a.maxPayloadSize = a.mtu - (commonHeaderSize + dataChunkHeaderSize)
-		}
+		a.maxPayloadSize = maxPayloadSizeForMTU(a.mtu, useInterleaving)
 	}
 
 	if useInterleaving {
