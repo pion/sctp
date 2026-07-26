@@ -5819,6 +5819,157 @@ func TestProcessSelectiveAck_GapBlockUint16Max(t *testing.T) {
 	assert.True(t, got.acked, "chunk should be marked as acked after SACK gap-block processing")
 }
 
+func TestProcessSelectiveAck_ValidationDoesNotMutateInflightQueue(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		inflightTSN []uint32
+		sack        chunkSelectiveAck
+		expectedErr error
+	}{
+		{
+			name:        "missing first cumulative TSN",
+			inflightTSN: []uint32{101},
+			sack:        chunkSelectiveAck{cumulativeTSNAck: 100},
+			expectedErr: ErrInflightQueueTSNPop,
+		},
+		{
+			name:        "missing last cumulative TSN",
+			inflightTSN: []uint32{100},
+			sack:        chunkSelectiveAck{cumulativeTSNAck: 101},
+			expectedErr: ErrInflightQueueTSNPop,
+		},
+		{
+			name:        "missing gap start",
+			inflightTSN: []uint32{100, 101},
+			sack: chunkSelectiveAck{
+				cumulativeTSNAck: 100,
+				gapAckBlocks:     []gapAckBlock{{start: 2, end: 2}},
+			},
+			expectedErr: ErrTSNRequestNotExist,
+		},
+		{
+			name:        "missing gap end",
+			inflightTSN: []uint32{100, 101},
+			sack: chunkSelectiveAck{
+				cumulativeTSNAck: 100,
+				gapAckBlocks:     []gapAckBlock{{start: 1, end: 2}},
+			},
+			expectedErr: ErrTSNRequestNotExist,
+		},
+		{
+			name:        "zero gap offset",
+			inflightTSN: []uint32{100, 101},
+			sack: chunkSelectiveAck{
+				cumulativeTSNAck: 100,
+				gapAckBlocks:     []gapAckBlock{{start: 0, end: 0}},
+			},
+			expectedErr: ErrTSNRequestNotExist,
+		},
+		{
+			name:        "reversed gap",
+			inflightTSN: []uint32{100, 101},
+			sack: chunkSelectiveAck{
+				cumulativeTSNAck: 99,
+				gapAckBlocks:     []gapAckBlock{{start: 2, end: 1}},
+			},
+			expectedErr: ErrTSNRequestNotExist,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			assoc := newRackTestAssoc(t)
+			chunks := make([]*chunkPayloadData, 0, len(test.inflightTSN))
+			for _, tsn := range test.inflightTSN {
+				chunk := mkChunk(tsn, time.Now())
+				chunks = append(chunks, chunk)
+				assoc.inflightQueue.pushNoCheck(chunk)
+			}
+
+			assoc.lock.Lock()
+			_, _, _, _, _, err := assoc.processSelectiveAck(&test.sack) //nolint:dogsled
+			assoc.lock.Unlock()
+
+			if test.expectedErr == nil {
+				require.NoError(t, err)
+			} else {
+				require.ErrorIs(t, err, test.expectedErr)
+			}
+			for i, tsn := range test.inflightTSN {
+				got, ok := assoc.inflightQueue.get(tsn)
+				require.Truef(t, ok, "TSN %d was removed", tsn)
+				assert.Same(t, chunks[i], got)
+			}
+		})
+	}
+}
+
+func TestHandleSack_ReversedGapDoesNotPartiallyProcess(t *testing.T) {
+	assoc := newRackTestAssoc(t)
+	first := mkChunk(100, time.Now())
+	second := mkChunk(101, time.Now())
+	assoc.inflightQueue.pushNoCheck(first)
+	assoc.inflightQueue.pushNoCheck(second)
+
+	const initialRWND = 1234
+	assoc.setRWND(initialRWND)
+	assoc.inFastRecovery = true
+	assoc.fastRecoverExitPoint = 101
+	require.False(t, assoc.t3RTX.isRunning())
+	defer assoc.t3RTX.stop()
+
+	sack := &chunkSelectiveAck{
+		cumulativeTSNAck:               100,
+		advertisedReceiverWindowCredit: 4096,
+		gapAckBlocks:                   []gapAckBlock{{start: 4, end: 3}},
+	}
+
+	assoc.lock.Lock()
+	err := assoc.handleSack(sack)
+	assoc.lock.Unlock()
+
+	require.ErrorIs(t, err, ErrTSNRequestNotExist)
+	assert.Equal(t, uint32(99), assoc.cumulativeTSNAckPoint)
+	assert.Equal(t, uint32(initialRWND), assoc.RWND())
+	assert.Equal(t, 2, assoc.inflightQueue.size())
+	assert.Equal(t, 2, assoc.inflightQueue.getNumBytes())
+
+	got, ok := assoc.inflightQueue.get(100)
+	require.True(t, ok)
+	assert.Same(t, first, got)
+	assert.False(t, got.acked)
+	assert.False(t, got.retransmit)
+	assert.Zero(t, got.missIndicator)
+
+	got, ok = assoc.inflightQueue.get(101)
+	require.True(t, ok)
+	assert.Same(t, second, got)
+	assert.False(t, got.acked)
+	assert.False(t, got.retransmit)
+	assert.Zero(t, got.missIndicator)
+
+	assert.True(t, assoc.inFastRecovery)
+	assert.Equal(t, uint32(101), assoc.fastRecoverExitPoint)
+	assert.False(t, assoc.willRetransmitFast)
+	assert.False(t, assoc.t3RTX.isRunning())
+}
+
+func TestProcessSelectiveAck_CumulativeTSNWrap(t *testing.T) {
+	assoc := newRackTestAssoc(t)
+	assoc.cumulativeTSNAckPoint = math.MaxUint32 - 1
+
+	for _, tsn := range []uint32{math.MaxUint32, 0, 1} {
+		assoc.inflightQueue.pushNoCheck(mkChunk(tsn, time.Now()))
+	}
+
+	assoc.lock.Lock()
+	_, _, _, _, _, err := assoc.processSelectiveAck(&chunkSelectiveAck{ //nolint:dogsled
+		cumulativeTSNAck: 1,
+	})
+	assoc.lock.Unlock()
+
+	require.NoError(t, err)
+	assert.Zero(t, assoc.inflightQueue.size())
+}
+
 func TestRTOClearsFastRecovery(t *testing.T) {
 	assoc := newRackTestAssoc(t)
 

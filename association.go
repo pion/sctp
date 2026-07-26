@@ -2571,6 +2571,42 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 	bytesAckedPerStream = map[uint16]int{}
 	now := time.Now() // capture the time for this SACK
 
+	// Validate that full range exists in the inflight queue to prevent partial pops
+	// left over from an invalid SACK that causes the cumulativeTSNAckPoint to be updated
+	// incorrectly and causes weird state and race conditions.
+	if sna32LT(a.cumulativeTSNAckPoint, selectiveAckChunk.cumulativeTSNAck) {
+		firstTSN := a.cumulativeTSNAckPoint + 1
+		if _, ok := a.inflightQueue.get(firstTSN); !ok {
+			return nil, 0, time.Time{}, 0, false, fmt.Errorf("%w: %v", ErrInflightQueueTSNPop, firstTSN)
+		}
+		if _, ok := a.inflightQueue.get(selectiveAckChunk.cumulativeTSNAck); !ok {
+			return nil, 0, time.Time{}, 0, false,
+				fmt.Errorf("%w: %v", ErrInflightQueueTSNPop, selectiveAckChunk.cumulativeTSNAck)
+		}
+	}
+	for _, gap := range selectiveAckChunk.gapAckBlocks {
+		if gap.start == 0 {
+			return nil, 0, time.Time{}, 0, false,
+				fmt.Errorf("%w: %v", ErrTSNRequestNotExist, selectiveAckChunk.cumulativeTSNAck)
+		}
+		if gap.start > gap.end {
+			return nil, 0, time.Time{}, 0, false,
+				fmt.Errorf("%w: invalid Gap Ack Block %d-%d", ErrTSNRequestNotExist, gap.start, gap.end)
+		}
+
+		firstTSN := selectiveAckChunk.cumulativeTSNAck + uint32(gap.start)
+		if _, ok := a.inflightQueue.get(firstTSN); !ok {
+			return nil, 0, time.Time{}, 0, false, fmt.Errorf("%w: %v", ErrTSNRequestNotExist, firstTSN)
+		}
+		lastTSN := selectiveAckChunk.cumulativeTSNAck + uint32(gap.end)
+		if lastTSN != firstTSN {
+			if _, ok := a.inflightQueue.get(lastTSN); !ok {
+				return nil, 0, time.Time{}, 0, false,
+					fmt.Errorf("%w: %v", ErrTSNRequestNotExist, lastTSN)
+			}
+		}
+	}
+
 	// New ack point, so pop all ACKed packets from inflightQueue
 	// We add 1 because the "currentAckPoint" has already been popped from the inflight queue
 	// For the first SACK we take care of this by setting the ackpoint to cumAck - 1
