@@ -3768,12 +3768,13 @@ func TestAssocAbort(t *testing.T) {
 }
 
 type fakeEchoConn struct {
-	echo     chan []byte
-	done     chan struct{}
-	closed   chan struct{}
-	once     sync.Once
-	errClose error
-	mu       sync.Mutex
+	echo      chan []byte
+	done      chan struct{}
+	closed    chan struct{}
+	once      sync.Once
+	closeOnce sync.Once
+	errClose  error
+	mu        sync.Mutex
 
 	bytesSent     uint64
 	bytesReceived uint64
@@ -3827,10 +3828,13 @@ func (c *fakeEchoConn) Write(b []byte) (int, error) {
 }
 
 func (c *fakeEchoConn) Close() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	close(c.echo)
-	close(c.closed)
+	c.closeOnce.Do(func() {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+
+		close(c.echo)
+		close(c.closed)
+	})
 
 	return c.errClose
 }
