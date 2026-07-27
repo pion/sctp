@@ -1004,6 +1004,53 @@ func TestAssociationDataIgnoredBeforeEstablished(t *testing.T) {
 	require.Zero(t, assoc.stats.getNumDATAs())
 }
 
+func TestAssociationDataAcknowledgedInShutdownSent(t *testing.T) {
+	assoc := createTestAssociation(t, Config{})
+	assoc.payloadQueue.init(0)
+	assoc.cumulativeTSNAckPoint = 100
+	assoc.setState(shutdownSent)
+	require.True(t, assoc.t2Shutdown.start(1000))
+	t.Cleanup(assoc.t2Shutdown.close)
+
+	packets := assoc.handleData(&chunkPayloadData{
+		beginningFragment: true,
+		endingFragment:    true,
+		tsn:               1,
+		streamIdentifier:  1,
+		payloadType:       PayloadTypeWebRTCBinary,
+		userData:          []byte("in flight during shutdown"),
+	})
+
+	require.Nil(t, packets)
+	assert.Equal(t, uint32(1), assoc.peerLastTSN())
+	assert.True(t, assoc.immediateAckTriggered)
+	assert.True(t, assoc.willSendShutdown)
+	assert.False(t, assoc.t2Shutdown.isRunning())
+
+	assoc.handleChunksEnd()
+	rawPackets, ok := assoc.gatherOutbound()
+	require.True(t, ok)
+	require.Len(t, rawPackets, 2)
+	assert.True(t, assoc.t2Shutdown.isRunning())
+
+	var sackFound, shutdownFound bool
+	for _, raw := range rawPackets {
+		packet := &packet{}
+		require.NoError(t, packet.unmarshal(false, raw))
+		require.Len(t, packet.chunks, 1)
+		switch c := packet.chunks[0].(type) {
+		case *chunkSelectiveAck:
+			sackFound = true
+			assert.Equal(t, uint32(1), c.cumulativeTSNAck)
+		case *chunkShutdown:
+			shutdownFound = true
+			assert.Equal(t, uint32(1), c.cumulativeTSNAck)
+		}
+	}
+	assert.True(t, sackFound)
+	assert.True(t, shutdownFound)
+}
+
 func TestAssociationInterleavingProtocolViolationWrongForwardTSNChunkType(t *testing.T) {
 	tests := []struct {
 		name                string

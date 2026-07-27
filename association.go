@@ -1599,7 +1599,7 @@ func (a *Association) gatherOutboundShutdownPackets(rawPackets [][]byte) ([][]by
 		a.willSendShutdown = false
 
 		shutdown := &chunkShutdown{
-			cumulativeTSNAck: a.cumulativeTSNAckPoint,
+			cumulativeTSNAck: a.peerLastTSN(),
 		}
 
 		raw, err := a.marshalPacket(a.createPacket([]chunk{shutdown}))
@@ -2320,10 +2320,14 @@ func (a *Association) handleCookieAck() {
 	a.completeHandshake(nil)
 }
 
+func isDataReceiveState(state uint32) bool {
+	return state == established || state == shutdownPending || state == shutdownSent
+}
+
 // The caller should hold the lock.
 func (a *Association) handleData(chunkPayload *chunkPayloadData) []*packet {
 	state := a.getState()
-	if state != established && state != shutdownPending && state != shutdownReceived {
+	if !isDataReceiveState(state) {
 		return nil
 	}
 
@@ -2341,9 +2345,21 @@ func (a *Association) handleData(chunkPayload *chunkPayloadData) []*packet {
 		a.name, chunkPayload.tsn, chunkPayload.immediateSack, len(chunkPayload.userData))
 	a.stats.incDATAs()
 
+	if state == shutdownSent {
+		// RFC 9260 Sections 6 and 9.2 require DATA received in
+		// SHUTDOWN-SENT to be acknowledged without delay and answered with a
+		// SHUTDOWN. Restart T2 when that SHUTDOWN is sent.
+		a.willSendShutdown = true
+		a.t2Shutdown.stop()
+	}
+
 	canPush := a.payloadQueue.canPush(chunkPayload.tsn)
 	if canPush {
 		if !a.acceptPayloadData(chunkPayload) {
+			if state == shutdownSent {
+				return a.handlePeerLastTSNAndAcknowledgement(true)
+			}
+
 			return nil
 		}
 	}
@@ -2358,6 +2374,9 @@ func (a *Association) handleData(chunkPayload *chunkPayloadData) []*packet {
 	gapDetected := sna32GT(chunkPayload.tsn, expectedTSN)
 
 	sackNow := chunkPayload.immediateSack || gapDetected
+	if state == shutdownSent {
+		sackNow = true
+	}
 
 	return a.handlePeerLastTSNAndAcknowledgement(sackNow)
 }
