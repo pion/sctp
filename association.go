@@ -2891,21 +2891,20 @@ func (a *Association) processFastRetransmission( //nolint:gocognit
 	return nil
 }
 
+type acknowledgementResult struct {
+	htna                    uint32
+	newestDeliveredSendTime time.Time
+	newestDeliveredOrigTSN  uint32
+	processed               bool
+	cumTSNAckPointAdvanced  bool
+	deliveredFound          bool
+}
+
+// processAcknowledgement applies the fields shared by SACK and SHUTDOWN.
 // The caller should hold the lock.
-//
-//nolint:cyclop
-func (a *Association) handleSack(selectiveAckChunk *chunkSelectiveAck) error {
-	a.log.Tracef(
-		"[%s] SACK: cumTSN=%d a_rwnd=%d",
-		a.name, selectiveAckChunk.cumulativeTSNAck, selectiveAckChunk.advertisedReceiverWindowCredit,
-	)
-	state := a.getState()
-	if state != established && state != shutdownPending && state != shutdownReceived {
-		return nil
-	}
-
-	a.stats.incSACKsReceived()
-
+func (a *Association) processAcknowledgement(
+	selectiveAckChunk *chunkSelectiveAck,
+) (acknowledgementResult, error) {
 	if sna32GT(a.cumulativeTSNAckPoint, selectiveAckChunk.cumulativeTSNAck) {
 		// RFC 4960 sec 6.2.1.  Processing a Received SACK
 		// D)
@@ -2920,7 +2919,7 @@ func (a *Association) handleSack(selectiveAckChunk *chunkSelectiveAck) error {
 			selectiveAckChunk.cumulativeTSNAck,
 			a.cumulativeTSNAckPoint)
 
-		return nil
+		return acknowledgementResult{}, nil
 	}
 
 	// Process selective ack
@@ -2928,7 +2927,7 @@ func (a *Association) handleSack(selectiveAckChunk *chunkSelectiveAck) error {
 		newestDeliveredSendTime, newestDeliveredOrigTSN,
 		deliveredFound, err := a.processSelectiveAck(selectiveAckChunk)
 	if err != nil {
-		return err
+		return acknowledgementResult{}, err
 	}
 
 	var totalBytesAcked int
@@ -2956,23 +2955,28 @@ func (a *Association) handleSack(selectiveAckChunk *chunkSelectiveAck) error {
 		}
 	}
 
-	// New rwnd value
-	// RFC 4960 sec 6.2.1.  Processing a Received SACK
-	// D)
-	//   ii) Set rwnd equal to the newly received a_rwnd minus the number
-	//       of bytes still outstanding after processing the Cumulative
-	//       TSN Ack and the Gap Ack Blocks.
+	return acknowledgementResult{
+		htna:                    htna,
+		newestDeliveredSendTime: newestDeliveredSendTime,
+		newestDeliveredOrigTSN:  newestDeliveredOrigTSN,
+		processed:               true,
+		cumTSNAckPointAdvanced:  cumTSNAckPointAdvanced,
+		deliveredFound:          deliveredFound,
+	}, nil
+}
 
-	// bytes acked were already subtracted by markAsAcked() method
-	bytesOutstanding := uint32(a.inflightQueue.getNumBytes()) //nolint:gosec // G115
-	if bytesOutstanding >= selectiveAckChunk.advertisedReceiverWindowCredit {
-		a.setRWND(0)
-	} else {
-		a.setRWND(selectiveAckChunk.advertisedReceiverWindowCredit - bytesOutstanding)
-	}
-
-	err = a.processFastRetransmission(
-		selectiveAckChunk.cumulativeTSNAck, selectiveAckChunk.gapAckBlocks, htna, cumTSNAckPointAdvanced,
+// finishAcknowledgement applies acknowledgement processing that does not
+// depend on SACK-only fields.
+// The caller should hold the lock.
+func (a *Association) finishAcknowledgement(
+	selectiveAckChunk *chunkSelectiveAck,
+	result acknowledgementResult,
+) error {
+	err := a.processFastRetransmission(
+		selectiveAckChunk.cumulativeTSNAck,
+		selectiveAckChunk.gapAckBlocks,
+		result.htna,
+		result.cumTSNAckPointAdvanced,
 	)
 	if err != nil {
 		return err
@@ -3003,13 +3007,60 @@ func (a *Association) handleSack(selectiveAckChunk *chunkSelectiveAck) error {
 		a.awakeWriteLoop()
 	}
 
-	a.postprocessSack(state, cumTSNAckPointAdvanced)
+	return nil
+}
+
+// The caller should hold the lock.
+//
+//nolint:cyclop
+func (a *Association) handleSack(selectiveAckChunk *chunkSelectiveAck) error {
+	a.log.Tracef(
+		"[%s] SACK: cumTSN=%d a_rwnd=%d",
+		a.name, selectiveAckChunk.cumulativeTSNAck, selectiveAckChunk.advertisedReceiverWindowCredit,
+	)
+	state := a.getState()
+	if state != established && state != shutdownPending && state != shutdownReceived {
+		return nil
+	}
+
+	a.stats.incSACKsReceived()
+
+	result, err := a.processAcknowledgement(selectiveAckChunk)
+	if err != nil || !result.processed {
+		return err
+	}
+
+	// New rwnd value
+	// RFC 4960 sec 6.2.1.  Processing a Received SACK
+	// D)
+	//   ii) Set rwnd equal to the newly received a_rwnd minus the number
+	//       of bytes still outstanding after processing the Cumulative
+	//       TSN Ack and the Gap Ack Blocks.
+
+	// bytes acked were already subtracted by markAsAcked() method
+	bytesOutstanding := uint32(a.inflightQueue.getNumBytes()) //nolint:gosec // G115
+	if bytesOutstanding >= selectiveAckChunk.advertisedReceiverWindowCredit {
+		a.setRWND(0)
+	} else {
+		a.setRWND(selectiveAckChunk.advertisedReceiverWindowCredit - bytesOutstanding)
+	}
+
+	if err = a.finishAcknowledgement(selectiveAckChunk, result); err != nil {
+		return err
+	}
+
+	a.postprocessSack(state, result.cumTSNAckPointAdvanced)
 
 	// RACK
-	a.onRackAfterSACK(deliveredFound, newestDeliveredSendTime, newestDeliveredOrigTSN, selectiveAckChunk)
+	a.onRackAfterSACK(
+		result.deliveredFound,
+		result.newestDeliveredSendTime,
+		result.newestDeliveredOrigTSN,
+		selectiveAckChunk,
+	)
 
 	// adaptive burst mitigation
-	ackProgress := cumTSNAckPointAdvanced || deliveredFound
+	ackProgress := result.cumTSNAckPointAdvanced || result.deliveredFound
 	a.tlrMaybeFinishLocked(ackProgress)
 
 	return nil
@@ -3040,12 +3091,76 @@ func (a *Association) postprocessSack(state uint32, shouldAwakeWriteLoop bool) {
 	}
 }
 
+// processShutdownAcknowledgement processes the Cumulative TSN Ack carried by
+// a SHUTDOWN without applying SACK-only fields such as a_rwnd.
 // The caller should hold the lock.
-func (a *Association) handleShutdown(_ *chunkShutdown) {
+func (a *Association) processShutdownAcknowledgement(c *chunkShutdown) error {
+	// RFC 9260 Section 9.2 permits SHUTDOWN to cumulatively acknowledge
+	// contiguous DATA without a separate SACK.
+	ack := &chunkSelectiveAck{cumulativeTSNAck: c.cumulativeTSNAck}
+	result, err := a.processAcknowledgement(ack)
+	if err != nil {
+		return err
+	}
+	if result.processed {
+		if err = a.finishAcknowledgement(ack, result); err != nil {
+			return err
+		}
+
+		a.onRackAfterSACK(
+			result.deliveredFound,
+			result.newestDeliveredSendTime,
+			result.newestDeliveredOrigTSN,
+			ack,
+		)
+		a.tlrMaybeFinishLocked(result.cumTSNAckPointAdvanced || result.deliveredFound)
+	}
+
+	return nil
+}
+
+// The caller should hold the lock.
+func (a *Association) handleShutdown(chunk *chunkShutdown) error {
 	state := a.getState()
+	if state != established && state != shutdownReceived && state != shutdownSent {
+		return nil
+	}
+
+	if state == shutdownSent {
+		// RFC 9260 Section 9.2 requires an immediate SHUTDOWN ACK for a
+		// crossed shutdown. Since SHUTDOWN-SENT is entered only after all
+		// outbound DATA has been acknowledged, the peer's cumulative TSN ACK
+		// cannot release any additional DATA and must not delay the response.
+		a.t2Shutdown.stop()
+		a.willSendShutdown = false
+		a.willSendShutdownAck = true
+		a.setState(shutdownAckSent)
+
+		a.awakeWriteLoop()
+
+		return nil
+	}
+
+	if state == established {
+		// Reject new user DATA before acknowledgement processing can release
+		// a.lock and invoke a stream's OnBufferedAmountLow callback.
+		a.setState(shutdownReceived)
+	}
+
+	previousCumulativeTSNAckPoint := a.cumulativeTSNAckPoint
+	if err := a.processShutdownAcknowledgement(chunk); err != nil {
+		// Invalid acknowledgement fields are rejected before the transmit
+		// acknowledgement point advances. Restore the pre-SHUTDOWN state so a
+		// malformed chunk cannot strand the association in SHUTDOWN-RECEIVED.
+		if a.cumulativeTSNAckPoint == previousCumulativeTSNAckPoint {
+			a.setState(state)
+		}
+
+		return err
+	}
 
 	switch state {
-	case established:
+	case established, shutdownReceived:
 		if a.inflightQueue.size() > 0 {
 			a.setState(shutdownReceived)
 		} else {
@@ -3055,14 +3170,9 @@ func (a *Association) handleShutdown(_ *chunkShutdown) {
 
 			a.awakeWriteLoop()
 		}
-
-		// a.cumulativeTSNAckPoint = c.cumulativeTSNAck
-	case shutdownSent:
-		a.willSendShutdownAck = true
-		a.setState(shutdownAckSent)
-
-		a.awakeWriteLoop()
 	}
+
+	return nil
 }
 
 // The caller should hold the lock.
@@ -3941,7 +4051,7 @@ func (a *Association) handleChunk(receivedPacket *packet, receivedChunk chunk) e
 		packets = a.handleIForwardTSN(receivedChunk)
 
 	case *chunkShutdown:
-		a.handleShutdown(receivedChunk)
+		err = a.handleShutdown(receivedChunk)
 	case *chunkShutdownAck:
 		a.handleShutdownAck(receivedChunk)
 	case *chunkShutdownComplete:
