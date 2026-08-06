@@ -185,6 +185,62 @@ func association( //nolint:cyclop
 	return client, server, nil
 }
 
+func associationWithClientServerOptions( //nolint:cyclop
+	t *testing.T,
+	piper piperFunc,
+	clientExtra []ClientOption,
+	serverExtra []ServerOption,
+) (*Association, *Association, error) {
+	t.Helper()
+
+	ca, cb := piper(t)
+	loggerFactory := logging.NewDefaultLoggerFactory()
+	clientOpts := append([]ClientOption{WithNetConn(ca), WithLoggerFactory(loggerFactory)}, clientExtra...)
+	serverOpts := append([]ServerOption{WithNetConn(cb), WithLoggerFactory(loggerFactory)}, serverExtra...)
+
+	type result struct {
+		side  bool
+		assoc *Association
+		err   error
+	}
+	results := make(chan result, 2)
+	go func() {
+		assoc, err := ClientWithOptions(clientOpts...)
+		results <- result{side: true, assoc: assoc, err: err}
+	}()
+	go func() {
+		assoc, err := ServerWithOptions(serverOpts...)
+		results <- result{assoc: assoc, err: err}
+	}()
+
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	var client, server *Association
+	for client == nil || server == nil {
+		select {
+		case res := <-results:
+			if res.err != nil {
+				_ = ca.Close()
+				_ = cb.Close()
+
+				return nil, nil, res.err
+			}
+			if res.side {
+				client = res.assoc
+			} else {
+				server = res.assoc
+			}
+		case <-timer.C:
+			_ = ca.Close()
+			_ = cb.Close()
+
+			return nil, nil, fmt.Errorf("timeout establishing association") //nolint:err113
+		}
+	}
+
+	return client, server, nil
+}
+
 type piperFunc func(t *testing.T) (net.Conn, net.Conn)
 
 func pipeDump(t *testing.T) (net.Conn, net.Conn) {
@@ -881,6 +937,8 @@ func TestAssociationMetadataJSON(t *testing.T) {
 		PartialReliabilityMode:       PartialReliabilityModeIForwardTSN,
 		ZeroChecksumSendingEnabled:   true,
 		ZeroChecksumReceivingEnabled: true,
+		NumInboundStreams:            10,
+		NumOutboundStreams:           20,
 	}
 
 	raw, err := json.Marshal(metadata)
@@ -889,7 +947,9 @@ func TestAssociationMetadataJSON(t *testing.T) {
 		"messageInterleavingEnabled": true,
 		"partialReliabilityMode": 2,
 		"zeroChecksumSendingEnabled": true,
-		"zeroChecksumReceivingEnabled": true
+		"zeroChecksumReceivingEnabled": true,
+		"numInboundStreams": 10,
+		"numOutboundStreams": 20
 	}`, string(raw))
 }
 
@@ -4677,8 +4737,8 @@ func TestAssocHandleInit(t *testing.T) {
 		}
 		assert.NoError(t, err, "should succeed")
 		assert.Equal(t, init.initialTSN-1, assoc.peerLastTSN(), "should match")
-		assert.Equal(t, uint16(1001), assoc.myMaxNumOutboundStreams, "should match")
-		assert.Equal(t, uint16(1002), assoc.myMaxNumInboundStreams, "should match")
+		assert.Equal(t, uint16(1001), assoc.peerOutboundStreams, "should match")
+		assert.Equal(t, uint16(1002), assoc.peerInboundStreams, "should match")
 		assert.Equal(t, uint32(5678), assoc.peerVerificationTag, "should match")
 		assert.Equal(t, pkt.sourcePort, assoc.destinationPort, "should match")
 		assert.Equal(t, pkt.destinationPort, assoc.sourcePort, "should match")
@@ -4841,6 +4901,154 @@ func TestAssocMaxMessageSize(t *testing.T) {
 		a.SetMaxMessageSize(20000)
 		assert.Equal(t, uint32(20000), a.MaxMessageSize(), "should match")
 	})
+}
+
+func TestAssociationMetadataReportsNegotiatedStreamLimits(t *testing.T) {
+	const (
+		clientInbound  = uint16(3)
+		clientOutbound = uint16(4)
+		serverInbound  = uint16(11)
+		serverOutbound = uint16(12)
+	)
+
+	client, server, err := associationWithClientServerOptions(
+		t,
+		pipeDump,
+		[]ClientOption{WithNumStreams(clientInbound, clientOutbound)},
+		[]ServerOption{WithNumStreams(serverInbound, serverOutbound)},
+	)
+	require.NoError(t, err)
+	defer noErrorClose(t, client.Close)
+	defer noErrorClose(t, server.Close)
+
+	clientMetadata, ok := client.Metadata()
+	require.True(t, ok)
+	require.Equal(t, clientInbound, clientMetadata.NumInboundStreams)
+	require.Equal(t, clientOutbound, clientMetadata.NumOutboundStreams)
+
+	serverMetadata, ok := server.Metadata()
+	require.True(t, ok)
+	require.Equal(t, clientOutbound, serverMetadata.NumInboundStreams)
+	require.Equal(t, clientInbound, serverMetadata.NumOutboundStreams)
+}
+
+func TestStreamResetCompleteWaitsForRemovalAndFiresOnce(t *testing.T) {
+	const streamID = uint16(7)
+	assoc := createTestAssociation(t, Config{})
+	assoc.setState(established)
+	assoc.payloadQueue.init(100)
+	stream := assoc.createStream(streamID, false)
+	require.NotNil(t, stream)
+
+	completed := make(chan uint16, 2)
+	assoc.OnStreamResetComplete(func(id uint16) {
+		assoc.lock.RLock()
+		_, present := assoc.streams[id]
+		assoc.lock.RUnlock()
+		require.False(t, present)
+		completed <- id
+	})
+
+	request := &paramOutgoingResetRequest{
+		reconfigRequestSequenceNumber: 1,
+		senderLastTSN:                 101,
+		streamIdentifiers:             []uint16{streamID},
+	}
+
+	assoc.lock.Lock()
+	response := assoc.resetStreamsIfAny(request)
+	assoc.lock.Unlock()
+	require.Equal(t, reconfigResultInProgress, resetResponseResult(t, response))
+	select {
+	case id := <-completed:
+		t.Fatalf("reset completion fired early for stream %d", id)
+	default:
+	}
+
+	assoc.payloadQueue.init(101)
+	assoc.lock.Lock()
+	response = assoc.resetStreamsIfAny(request)
+	assoc.lock.Unlock()
+	require.Equal(t, reconfigResultSuccessPerformed, resetResponseResult(t, response))
+	require.Equal(t, streamID, <-completed)
+
+	assoc.lock.Lock()
+	response = assoc.resetStreamsIfAny(request)
+	assoc.lock.Unlock()
+	require.Equal(t, reconfigResultSuccessPerformed, resetResponseResult(t, response))
+	select {
+	case id := <-completed:
+		t.Fatalf("reset completion fired twice for stream %d", id)
+	default:
+	}
+}
+
+type streamResetEvent struct {
+	id      uint16
+	present bool
+}
+
+func TestStreamResetCompleteNotifiesBothAssociations(t *testing.T) {
+	const streamID = uint16(5)
+	bridge := test.NewBridge()
+	client, server, err := createNewAssociationPair(bridge, ackModeNoDelay, 0)
+	require.NoError(t, err)
+	clientStream, serverStream, err := establishSessionPair(bridge, client, server, streamID)
+	require.NoError(t, err)
+
+	clientCompleted := make(chan streamResetEvent, 1)
+	serverCompleted := make(chan streamResetEvent, 1)
+	client.OnStreamResetComplete(func(id uint16) {
+		client.lock.RLock()
+		_, present := client.streams[id]
+		client.lock.RUnlock()
+		clientCompleted <- streamResetEvent{id: id, present: present}
+	})
+	server.OnStreamResetComplete(func(id uint16) {
+		server.lock.RLock()
+		_, present := server.streams[id]
+		server.lock.RUnlock()
+		serverCompleted <- streamResetEvent{id: id, present: present}
+	})
+
+	require.NoError(t, clientStream.Close())
+	serverEvent := waitForResetEvent(t, bridge, serverCompleted)
+	require.Equal(t, streamResetEvent{id: streamID}, serverEvent)
+
+	require.NoError(t, serverStream.Close())
+	clientEvent := waitForResetEvent(t, bridge, clientCompleted)
+	require.Equal(t, streamResetEvent{id: streamID}, clientEvent)
+
+	closeAssociationPair(bridge, client, server)
+}
+
+func resetResponseResult(t *testing.T, packet *packet) reconfigResult { //nolint:thelper
+	t.Helper()
+	require.NotNil(t, packet)
+	require.Len(t, packet.chunks, 1)
+	reconfig, ok := packet.chunks[0].(*chunkReconfig)
+	require.True(t, ok)
+	response, ok := reconfig.paramA.(*paramReconfigResponse)
+	require.True(t, ok)
+
+	return response.result
+}
+
+func waitForResetEvent(t *testing.T, bridge *test.Bridge, events <-chan streamResetEvent) streamResetEvent {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		bridge.Process()
+		select {
+		case event := <-events:
+			return event
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	t.Fatal("timed out waiting for stream reset completion")
+
+	return streamResetEvent{}
 }
 
 type dumbConnInboundHandler func([]byte)
