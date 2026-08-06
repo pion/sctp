@@ -2688,14 +2688,14 @@ func (a *Association) getOrCreateStream(
 //
 //nolint:gocognit,cyclop
 func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) (
-	bytesAckedPerStream map[uint16]int,
+	bytesAckedPerStream map[*Stream]int,
 	htna uint32,
 	newestDeliveredSendTime time.Time,
 	newestDeliveredOrigTSN uint32,
 	deliveredFound bool,
 	err error,
 ) {
-	bytesAckedPerStream = map[uint16]int{}
+	bytesAckedPerStream = map[*Stream]int{}
 	now := time.Now() // capture the time for this SACK
 
 	// Validate that full range exists in the inflight queue to prevent partial pops
@@ -2759,11 +2759,11 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 
 			nBytesAcked := len(chunkPayload.userData)
 
-			// Sum the number of bytes acknowledged per stream
-			if amount, ok := bytesAckedPerStream[chunkPayload.streamIdentifier]; ok {
-				bytesAckedPerStream[chunkPayload.streamIdentifier] = amount + nBytesAcked
-			} else {
-				bytesAckedPerStream[chunkPayload.streamIdentifier] = nBytesAcked
+			// Sum acknowledged bytes against the stream generation that sent
+			// the chunk. A reset can remove that stream and allow the same ID to
+			// name a new stream before a delayed SACK arrives.
+			if stream := a.streamForAcknowledgedChunk(chunkPayload); stream != nil {
+				bytesAckedPerStream[stream] += nBytesAcked
 			}
 
 			// RFC 4960 sec 6.3.1.  RTO Calculation
@@ -2825,11 +2825,10 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 			if !chunkPayload.acked { //nolint:nestif
 				nBytesAcked := a.inflightQueue.markAsAcked(tsn)
 
-				// Sum the number of bytes acknowledged per stream
-				if amount, ok := bytesAckedPerStream[chunkPayload.streamIdentifier]; ok {
-					bytesAckedPerStream[chunkPayload.streamIdentifier] = amount + nBytesAcked
-				} else {
-					bytesAckedPerStream[chunkPayload.streamIdentifier] = nBytesAcked
+				// Sum acknowledged bytes against the stream generation that sent
+				// the chunk, not a later stream that reused its identifier.
+				if stream := a.streamForAcknowledgedChunk(chunkPayload); stream != nil {
+					bytesAckedPerStream[stream] += nBytesAcked
 				}
 
 				a.log.Tracef("[%s] tsn=%d has been sacked", a.name, chunkPayload.tsn)
@@ -2864,6 +2863,15 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 	}
 
 	return bytesAckedPerStream, htna, newestDeliveredSendTime, newestDeliveredOrigTSN, deliveredFound, nil
+}
+
+// The caller should hold the association lock.
+func (a *Association) streamForAcknowledgedChunk(chunk *chunkPayloadData) *Stream {
+	if chunk.stream != nil {
+		return chunk.stream
+	}
+
+	return a.streams[chunk.streamIdentifier]
 }
 
 // The caller should hold the lock.
@@ -3055,12 +3063,10 @@ func (a *Association) processAcknowledgement(
 		a.onCumulativeTSNAckPointAdvanced(totalBytesAcked)
 	}
 
-	for si, nBytesAcked := range bytesAckedPerStream {
-		if s, ok := a.streams[si]; ok {
-			a.lock.Unlock()
-			s.onBufferReleased(nBytesAcked)
-			a.lock.Lock()
-		}
+	for stream, nBytesAcked := range bytesAckedPerStream {
+		a.lock.Unlock()
+		stream.onBufferReleased(nBytesAcked)
+		a.lock.Lock()
 	}
 
 	return acknowledgementResult{
