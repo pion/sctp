@@ -4970,12 +4970,35 @@ func TestStreamResetCompleteWaitsForRemovalAndFiresOnce(t *testing.T) {
 	response = assoc.resetStreamsIfAny(request)
 	assoc.lock.Unlock()
 	require.Equal(t, reconfigResultSuccessPerformed, resetResponseResult(t, response))
+	select {
+	case id := <-completed:
+		t.Fatalf("reset completion fired before outgoing reset for stream %d", id)
+	default:
+	}
+
+	const outgoingSequence = uint32(2)
+	assoc.reconfigs[outgoingSequence] = &chunkReconfig{
+		paramA: &paramOutgoingResetRequest{
+			reconfigRequestSequenceNumber: outgoingSequence,
+			streamIdentifiers:             []uint16{streamID},
+		},
+	}
+	assoc.lock.Lock()
+	_, err := assoc.handleReconfigParam(&paramReconfigResponse{
+		reconfigResponseSequenceNumber: outgoingSequence,
+		result:                         reconfigResultSuccessPerformed,
+	})
+	assoc.lock.Unlock()
+	require.NoError(t, err)
 	require.Equal(t, streamID, <-completed)
 
 	assoc.lock.Lock()
-	response = assoc.resetStreamsIfAny(request)
+	_, err = assoc.handleReconfigParam(&paramReconfigResponse{
+		reconfigResponseSequenceNumber: outgoingSequence,
+		result:                         reconfigResultSuccessPerformed,
+	})
 	assoc.lock.Unlock()
-	require.Equal(t, reconfigResultSuccessPerformed, resetResponseResult(t, response))
+	require.NoError(t, err)
 	select {
 	case id := <-completed:
 		t.Fatalf("reset completion fired twice for stream %d", id)
@@ -5012,10 +5035,9 @@ func TestStreamResetCompleteNotifiesBothAssociations(t *testing.T) {
 	})
 
 	require.NoError(t, clientStream.Close())
+	require.NoError(t, serverStream.Close())
 	serverEvent := waitForResetEvent(t, bridge, serverCompleted)
 	require.Equal(t, streamResetEvent{id: streamID}, serverEvent)
-
-	require.NoError(t, serverStream.Close())
 	clientEvent := waitForResetEvent(t, bridge, clientCompleted)
 	require.Equal(t, streamResetEvent{id: streamID}, clientEvent)
 
