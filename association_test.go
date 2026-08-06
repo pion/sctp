@@ -6975,6 +6975,34 @@ func TestHandleSack_ReversedGapDoesNotPartiallyProcess(t *testing.T) {
 	assert.False(t, assoc.t3RTX.isRunning())
 }
 
+func TestHandleSackCreditsOriginalStreamAfterIDReuse(t *testing.T) {
+	assoc := newRackTestAssoc(t)
+	t.Cleanup(assoc.closeAllTimers)
+	assoc.setRWND(1024)
+
+	const streamID = 1
+	oldStream := assoc.createStream(streamID, false)
+	oldStream.bufferedAmount = 1
+	chunk := mkChunk(100, time.Now())
+	chunk.stream = oldStream
+	assoc.inflightQueue.pushNoCheck(chunk)
+
+	delete(assoc.streams, streamID)
+	newStream := assoc.createStream(streamID, false)
+	newStream.bufferedAmount = 7
+
+	assoc.lock.Lock()
+	err := assoc.handleSack(&chunkSelectiveAck{
+		cumulativeTSNAck:               100,
+		advertisedReceiverWindowCredit: 1024,
+	})
+	assoc.lock.Unlock()
+
+	require.NoError(t, err)
+	assert.Zero(t, oldStream.BufferedAmount())
+	assert.Equal(t, uint64(7), newStream.BufferedAmount())
+}
+
 func TestProcessSelectiveAck_CumulativeTSNWrap(t *testing.T) {
 	assoc := newRackTestAssoc(t)
 	assoc.cumulativeTSNAckPoint = math.MaxUint32 - 1
