@@ -27,6 +27,19 @@ func TestParamZeroChecksum(t *testing.T) {
 				edmid: 1,
 			},
 		},
+		{
+			// Arbitrary EDMID should round-trip too (future methods allowed).
+			binary: []byte{0x80, 0x01, 0x00, 0x08, 0x01, 0x02, 0x03, 0x04},
+			parsed: &paramZeroChecksumAcceptable{
+				paramHeader: paramHeader{
+					typ:                zeroChecksumAcceptable,
+					unrecognizedAction: paramHeaderUnrecognizedActionSkip,
+					len:                8,
+					raw:                []byte{0x01, 0x02, 0x03, 0x04},
+				},
+				edmid: 0x01020304,
+			},
+		},
 	}
 
 	for i, tc := range tt {
@@ -40,4 +53,15 @@ func TestParamZeroChecksum(t *testing.T) {
 			assert.Equal(t, tc.binary, b)
 		})
 	}
+
+	t.Run("invalid length field (must be 8)", func(t *testing.T) {
+		// Length field set to 12 (0x000C); include 4 extra bytes to match.
+		bad := []byte{
+			0x80, 0x01, 0x00, 0x0C, // type=0x8001, len=12
+			0x00, 0x00, 0x00, 0x01, // EDMID=1
+			0x00, 0x00, 0x00, 0x00, // extra value bytes
+		}
+		_, err := (&paramZeroChecksumAcceptable{}).unmarshal(bad)
+		assert.ErrorIs(t, err, ErrZeroChecksumParamInvalidLength)
+	})
 }
