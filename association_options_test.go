@@ -253,3 +253,25 @@ func TestAssociationOptions_ClientAndServer(t *testing.T) {
 
 	time.Sleep(10 * time.Millisecond)
 }
+
+func TestAssociationConfigCopiesStreamLimits(t *testing.T) {
+	const (
+		numInbound  = uint16(7)
+		numOutbound = uint16(9)
+	)
+	config := Config{
+		NetConn:            &dumbConn{},
+		NumInboundStreams:  numInbound,
+		NumOutboundStreams: numOutbound,
+	}
+
+	serverConfig, err := buildServerConfig(config)
+	assert.NoError(t, err)
+	assert.Equal(t, numInbound, serverConfig.NumInboundStreams)
+	assert.Equal(t, numOutbound, serverConfig.NumOutboundStreams)
+
+	clientConfig, err := buildClientConfig(config)
+	assert.NoError(t, err)
+	assert.Equal(t, numInbound, clientConfig.NumInboundStreams)
+	assert.Equal(t, numOutbound, clientConfig.NumOutboundStreams)
+}

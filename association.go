@@ -280,8 +280,10 @@ type Association struct {
 
 	// Reconfig
 	myNextRSN                    uint32
+	peerNextRSN                  uint32
 	reconfigs                    map[uint32]*chunkReconfig
 	reconfigRequests             map[uint32]*paramOutgoingResetRequest
+	lastReconfigResponse         *packet
 	onStreamResetCompleteHandler func(streamID uint16)
 	streamResetStates            map[uint16]streamResetState
 
@@ -633,6 +635,12 @@ func (c Config) applyServer(cfg *Config) error { //nolint:dupl,cyclop
 	if c.CwndCAStep != 0 {
 		cfg.CwndCAStep = c.CwndCAStep
 	}
+	if c.NumInboundStreams != 0 {
+		cfg.NumInboundStreams = c.NumInboundStreams
+	}
+	if c.NumOutboundStreams != 0 {
+		cfg.NumOutboundStreams = c.NumOutboundStreams
+	}
 
 	cfg.rack = c.rack
 	cfg.interleaving = cloneInterleavingSettings(c.interleaving)
@@ -751,6 +759,12 @@ func (c Config) applyClient(cfg *Config) error { //nolint:dupl,cyclop
 	}
 	if c.CwndCAStep != 0 {
 		cfg.CwndCAStep = c.CwndCAStep
+	}
+	if c.NumInboundStreams != 0 {
+		cfg.NumInboundStreams = c.NumInboundStreams
+	}
+	if c.NumOutboundStreams != 0 {
+		cfg.NumOutboundStreams = c.NumOutboundStreams
 	}
 
 	cfg.rack = c.rack
@@ -921,6 +935,7 @@ func (a *Association) initWithOutOfBandTokens(localInit *chunkInit, remoteInit *
 	a.localOutboundStreams = localInit.numOutboundStreams
 	a.peerInboundStreams = remoteInit.numInboundStreams
 	a.peerOutboundStreams = remoteInit.numOutboundStreams
+	a.peerNextRSN = remoteInit.initialTSN
 	a.setRWND(remoteInit.advertisedReceiverWindowCredit)
 	a.peerVerificationTag = remoteInit.initiateTag
 	a.sourcePort = defaultSCTPSrcDstPort
@@ -2108,6 +2123,8 @@ func (a *Association) handleInit(pkt *packet, initChunk *chunkInit) ([]*packet, 
 	//  https://www.rfc-editor.org/rfc/rfc9260#sec_handle_stream_parameters
 	a.peerInboundStreams = initChunk.numInboundStreams
 	a.peerOutboundStreams = initChunk.numOutboundStreams
+	a.peerNextRSN = initChunk.initialTSN
+	a.lastReconfigResponse = nil
 	a.peerVerificationTag = initChunk.initiateTag
 	a.sourcePort = pkt.destinationPort
 	a.destinationPort = pkt.sourcePort
@@ -2204,6 +2221,8 @@ func (a *Association) handleInitAck(pkt *packet, initChunkAck *chunkInitAck) err
 
 	a.peerInboundStreams = initChunkAck.numInboundStreams
 	a.peerOutboundStreams = initChunkAck.numOutboundStreams
+	a.peerNextRSN = initChunkAck.initialTSN
+	a.lastReconfigResponse = nil
 	a.peerVerificationTag = initChunkAck.initiateTag
 	a.payloadQueue.init(initChunkAck.initialTSN - 1)
 	if a.sourcePort != pkt.destinationPort ||
@@ -3659,6 +3678,16 @@ func (a *Association) handleReconfigParam(raw param) (*packet, error) {
 	switch par := raw.(type) {
 	case *paramOutgoingResetRequest:
 		a.log.Tracef("[%s] handleReconfigParam (OutgoingResetRequest)", a.name)
+		if par.reconfigRequestSequenceNumber != a.peerNextRSN {
+			if par.reconfigRequestSequenceNumber == a.peerNextRSN-1 && a.lastReconfigResponse != nil {
+				return a.lastReconfigResponse, nil
+			}
+
+			return a.createReconfigResponse(
+				par.reconfigRequestSequenceNumber,
+				reconfigResultErrorBadSequenceNumber,
+			), nil
+		}
 		if a.peerLastTSN() < par.senderLastTSN && len(a.reconfigRequests) >= maxReconfigRequests {
 			// We have too many reconfig requests outstanding. Drop the request and let
 			// the peer retransmit. A well behaved peer should only have 1 outstanding
@@ -3672,6 +3701,7 @@ func (a *Association) handleReconfigParam(raw param) (*packet, error) {
 			// https://chromium.googlesource.com/external/webrtc/+/refs/heads/main/net/dcsctp/socket/stream_reset_handler.cc#271
 			return nil, fmt.Errorf("%w: %d", ErrTooManyReconfigRequests, len(a.reconfigRequests))
 		}
+		a.peerNextRSN++
 		a.reconfigRequests[par.reconfigRequestSequenceNumber] = par
 		resp := a.resetStreamsIfAny(par)
 		if resp != nil {
@@ -3752,9 +3782,17 @@ func (a *Association) resetStreamsIfAny(resetRequest *paramOutgoingResetRequest)
 		result = reconfigResultInProgress
 	}
 
+	response := a.createReconfigResponse(resetRequest.reconfigRequestSequenceNumber, result)
+	a.lastReconfigResponse = response
+
+	return response
+}
+
+// The caller should hold the association lock.
+func (a *Association) createReconfigResponse(sequenceNumber uint32, result reconfigResult) *packet {
 	return a.createPacket([]chunk{&chunkReconfig{
 		paramA: &paramReconfigResponse{
-			reconfigResponseSequenceNumber: resetRequest.reconfigRequestSequenceNumber,
+			reconfigResponseSequenceNumber: sequenceNumber,
 			result:                         result,
 		},
 	}})
