@@ -127,6 +127,9 @@ func TestAssociationOptions_Validation(t *testing.T) {
 		var cfg Config
 		err := WithRTOMax(0).applyServer(&cfg)
 		assert.ErrorIs(t, err, errInvalidRTOMax)
+
+		err = WithHandshakeRTOMax(0).applyServer(&cfg)
+		assert.ErrorIs(t, err, errInvalidRTOMax)
 	})
 
 	t.Run("snap nil arguments", func(t *testing.T) {
@@ -205,6 +208,7 @@ func TestAssociationOptions_ClientAndServer(t *testing.T) {
 		WithMaxMessageSize(30000),
 		WithMaxReassemblyQueueEntries(13),
 		WithRTOMax(1000),
+		WithHandshakeRTOMax(150),
 		WithMinCwnd(5000),
 		WithFastRtxWnd(6000),
 		WithCwndCAStep(7000),
@@ -234,6 +238,12 @@ func TestAssociationOptions_ClientAndServer(t *testing.T) {
 
 	assert.Equal(t, uint32(13), aClient.maxReassemblyQueueEntries)
 	assert.Equal(t, uint32(13), aServer.maxReassemblyQueueEntries)
+	assert.Equal(t, float64(150), aClient.t1Init.rtoMax)
+	assert.Equal(t, float64(150), aClient.t1Cookie.rtoMax)
+	assert.Equal(t, float64(1000), aClient.t3RTX.rtoMax)
+	assert.Equal(t, float64(150), aServer.t1Init.rtoMax)
+	assert.Equal(t, float64(150), aServer.t1Cookie.rtoMax)
+	assert.Equal(t, float64(1000), aServer.t3RTX.rtoMax)
 
 	assert.Equal(t, uint32(5000), aClient.minCwnd)
 	assert.Equal(t, uint32(6000), aClient.fastRtxWnd)
@@ -252,4 +262,24 @@ func TestAssociationOptions_ClientAndServer(t *testing.T) {
 	assert.Equal(t, "opt-pair", aServer.name)
 
 	time.Sleep(10 * time.Millisecond)
+}
+
+// The setting survives being carried in a Config that is itself passed as an
+// option, the deprecated configuration path.
+func TestAssociationConfigCopiesHandshakeRTOMax(t *testing.T) {
+	const handshakeRTOMax = 150.0
+
+	var built Config
+	assert.NoError(t, WithHandshakeRTOMax(handshakeRTOMax).applyServer(&built))
+
+	var server, client Config
+	assert.NoError(t, built.applyServer(&server))
+	assert.NoError(t, built.applyClient(&client))
+	assert.Equal(t, handshakeRTOMax, server.HandshakeRTOMax)
+	assert.Equal(t, handshakeRTOMax, client.HandshakeRTOMax)
+}
+
+func TestAssociationRTOMaxStillIncludesHandshakeByDefault(t *testing.T) {
+	assert.Equal(t, float64(250), effectiveHandshakeRTOMax(250, 0))
+	assert.Equal(t, float64(150), effectiveHandshakeRTOMax(1000, 150))
 }
