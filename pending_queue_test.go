@@ -425,6 +425,21 @@ func TestWeightedFairQueueingPendingQueuePolicy(t *testing.T) {
 		assert.NoError(t, pq.Pop(chunkPayload))
 	})
 
+	t.Run("releases inactive stream state", func(t *testing.T) {
+		pq := newWeightedFairQueueingPendingQueuePolicy(nil)
+
+		for streamID := range uint16(10000) {
+			pq.Push(makeStreamDataChunk(uint32(streamID), streamID))
+			chunkPayload := pq.Peek()
+			assert.NotNil(t, chunkPayload)
+			assert.NoError(t, pq.Pop(chunkPayload))
+		}
+
+		assert.Empty(t, pq.streamQueues)
+		assert.Empty(t, pq.streamFinish)
+		assert.Empty(t, pq.chunkFinish)
+	})
+
 	t.Run("pop errors", func(t *testing.T) {
 		t.Run("requires selection", func(t *testing.T) {
 			pq := newWeightedFairQueueingPendingQueuePolicy(nil)
