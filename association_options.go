@@ -158,6 +158,20 @@ func WithRTOMax(rtoMax float64) AssociationOption {
 	})
 }
 
+// WithHandshakeRTOMax sets the max retransmission timeout in ms for the
+// T1-init and T1-cookie handshake timers. Other association timers retain the
+// value configured by WithRTOMax or the default.
+func WithHandshakeRTOMax(rtoMax float64) AssociationOption {
+	return sharedOption(func(c *Config) error {
+		if rtoMax <= 0 {
+			return errInvalidRTOMax
+		}
+		c.HandshakeRTOMax = rtoMax
+
+		return nil
+	})
+}
+
 // WithMinCwnd sets the minimum congestion window for the association.
 func WithMinCwnd(minCwnd uint32) AssociationOption {
 	return sharedOption(func(c *Config) error {
@@ -180,6 +194,17 @@ func WithFastRtxWnd(fastRtxWnd uint32) AssociationOption {
 func WithCwndCAStep(cwndCAStep uint32) AssociationOption {
 	return sharedOption(func(c *Config) error {
 		c.CwndCAStep = cwndCAStep
+
+		return nil
+	})
+}
+
+// WithNumStreams sets the maximum inbound and outbound stream counts to negotiate.
+// A zero value retains the default maximum for that direction.
+func WithNumStreams(numInbound, numOutbound uint16) AssociationOption {
+	return sharedOption(func(c *Config) error {
+		c.NumInboundStreams = numInbound
+		c.NumOutboundStreams = numOutbound
 
 		return nil
 	})

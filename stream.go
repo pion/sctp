@@ -403,6 +403,7 @@ func (s *Stream) packetize(raw []byte, ppi PayloadProtocolIdentifier) ([]*chunkP
 		copy(userData, raw[offset:offset+fragmentSize])
 
 		chunk := &chunkPayloadData{
+			stream:                 s,
 			streamIdentifier:       s.streamIdentifier,
 			userData:               userData,
 			unordered:              unordered,

@@ -131,6 +131,12 @@ type AssociationMetadata struct {
 
 	// ZeroChecksumReceivingEnabled indicates whether incoming packets may use zero checksum.
 	ZeroChecksumReceivingEnabled bool `json:"zeroChecksumReceivingEnabled"`
+
+	// NumInboundStreams is the negotiated maximum number of inbound streams.
+	NumInboundStreams uint16 `json:"numInboundStreams"`
+
+	// NumOutboundStreams is the negotiated maximum number of outbound streams.
+	NumOutboundStreams uint16 `json:"numOutboundStreams"`
 }
 
 // association state enums.
@@ -273,15 +279,21 @@ type Association struct {
 	abortSentCh        chan struct{}
 
 	// Reconfig
-	myNextRSN        uint32
-	reconfigs        map[uint32]*chunkReconfig
-	reconfigRequests map[uint32]*paramOutgoingResetRequest
+	myNextRSN                    uint32
+	peerNextRSN                  uint32
+	reconfigs                    map[uint32]*chunkReconfig
+	reconfigRequests             map[uint32]*paramOutgoingResetRequest
+	lastReconfigResponse         *packet
+	onStreamResetCompleteHandler func(streamID uint16)
+	streamResetStates            map[uint16]streamResetState
 
 	// Non-RFC internal data
 	sourcePort              uint16
 	destinationPort         uint16
-	myMaxNumInboundStreams  uint16
-	myMaxNumOutboundStreams uint16
+	localInboundStreams     uint16
+	localOutboundStreams    uint16
+	peerInboundStreams      uint16
+	peerOutboundStreams     uint16
 	myCookie                *paramStateCookie
 	payloadQueue            *receivePayloadQueue
 	inflightQueue           *payloadQueue
@@ -411,12 +423,19 @@ type Config struct {
 	MaxMessageSize       uint32
 	// RTOMax is the maximum retransmission timeout in milliseconds
 	RTOMax float64
+	// HandshakeRTOMax is the maximum retransmission timeout in milliseconds for
+	// T1-init and T1-cookie. Zero inherits RTOMax.
+	HandshakeRTOMax float64
 	// Minimum congestion window
 	MinCwnd uint32
 	// Send window for fast retransmit
 	FastRtxWnd uint32
 	// Step of congestion window increase at Congestion Avoidance
 	CwndCAStep uint32
+	// NumInboundStreams is the maximum number of inbound streams to negotiate.
+	NumInboundStreams uint16
+	// NumOutboundStreams is the maximum number of outbound streams to negotiate.
+	NumOutboundStreams uint16
 
 	// RACK config options
 	rack rackSettings
@@ -543,6 +562,12 @@ func (c *Config) applyDefaults() {
 	if c.MTU == 0 {
 		c.MTU = initialMTU
 	}
+	if c.NumInboundStreams == 0 {
+		c.NumInboundStreams = math.MaxUint16
+	}
+	if c.NumOutboundStreams == 0 {
+		c.NumOutboundStreams = math.MaxUint16
+	}
 	if !c.enableInterleavingSet {
 		c.enableInterleaving = true
 	}
@@ -604,6 +629,9 @@ func (c Config) applyServer(cfg *Config) error { //nolint:dupl,cyclop
 	if c.RTOMax != 0 {
 		cfg.RTOMax = c.RTOMax
 	}
+	if c.HandshakeRTOMax != 0 {
+		cfg.HandshakeRTOMax = c.HandshakeRTOMax
+	}
 	if c.MinCwnd != 0 {
 		cfg.MinCwnd = c.MinCwnd
 	}
@@ -612,6 +640,12 @@ func (c Config) applyServer(cfg *Config) error { //nolint:dupl,cyclop
 	}
 	if c.CwndCAStep != 0 {
 		cfg.CwndCAStep = c.CwndCAStep
+	}
+	if c.NumInboundStreams != 0 {
+		cfg.NumInboundStreams = c.NumInboundStreams
+	}
+	if c.NumOutboundStreams != 0 {
+		cfg.NumOutboundStreams = c.NumOutboundStreams
 	}
 
 	cfg.rack = c.rack
@@ -664,8 +698,8 @@ func (a *Association) initClient() {
 
 	init := &chunkInit{}
 	init.initialTSN = a.myNextTSN
-	init.numOutboundStreams = a.myMaxNumOutboundStreams
-	init.numInboundStreams = a.myMaxNumInboundStreams
+	init.numOutboundStreams = a.localOutboundStreams
+	init.numInboundStreams = a.localInboundStreams
 	init.initiateTag = a.myVerificationTag
 	init.advertisedReceiverWindowCredit = a.maxReceiveBufferSize
 	setSupportedExtensions(&init.chunkInitCommon, a.localInterleaving)
@@ -723,6 +757,9 @@ func (c Config) applyClient(cfg *Config) error { //nolint:dupl,cyclop
 	if c.RTOMax != 0 {
 		cfg.RTOMax = c.RTOMax
 	}
+	if c.HandshakeRTOMax != 0 {
+		cfg.HandshakeRTOMax = c.HandshakeRTOMax
+	}
 	if c.MinCwnd != 0 {
 		cfg.MinCwnd = c.MinCwnd
 	}
@@ -731,6 +768,12 @@ func (c Config) applyClient(cfg *Config) error { //nolint:dupl,cyclop
 	}
 	if c.CwndCAStep != 0 {
 		cfg.CwndCAStep = c.CwndCAStep
+	}
+	if c.NumInboundStreams != 0 {
+		cfg.NumInboundStreams = c.NumInboundStreams
+	}
+	if c.NumOutboundStreams != 0 {
+		cfg.NumOutboundStreams = c.NumOutboundStreams
 	}
 
 	cfg.rack = c.rack
@@ -796,6 +839,7 @@ func createAssociationFromConfigWithTsn(cfg *Config, tsn uint32) *Association {
 	}
 
 	rtoMax := cfg.RTOMax
+	handshakeRTOMax := effectiveHandshakeRTOMax(rtoMax, cfg.HandshakeRTOMax)
 	interleaving := cfg.interleaving
 	if interleaving == nil {
 		interleaving = &interleavingSettings{}
@@ -811,8 +855,8 @@ func createAssociationFromConfigWithTsn(cfg *Config, tsn uint32) *Association {
 		fastRtxWnd:                cfg.FastRtxWnd,
 		cwndCAStep:                cfg.CwndCAStep,
 
-		myMaxNumOutboundStreams: math.MaxUint16,
-		myMaxNumInboundStreams:  math.MaxUint16,
+		localInboundStreams:  cfg.NumInboundStreams,
+		localOutboundStreams: cfg.NumOutboundStreams,
 
 		payloadQueue:            newReceivePayloadQueue(getMaxTSNOffset(maxReceiveBufferSize)),
 		inflightQueue:           newPayloadQueue(),
@@ -830,6 +874,7 @@ func createAssociationFromConfigWithTsn(cfg *Config, tsn uint32) *Association {
 		streams:                 map[uint16]*Stream{},
 		reconfigs:               map[uint32]*chunkReconfig{},
 		reconfigRequests:        map[uint32]*paramOutgoingResetRequest{},
+		streamResetStates:       map[uint16]streamResetState{},
 		acceptCh:                make(chan *Stream, acceptChSize),
 		readLoopCloseCh:         make(chan struct{}),
 		awakeWriteLoopCh:        make(chan struct{}, 1),
@@ -878,14 +923,22 @@ func createAssociationFromConfigWithTsn(cfg *Config, tsn uint32) *Association {
 		assoc.name, assoc.CWND(), assoc.ssthresh, assoc.inflightQueue.getNumBytes())
 
 	assoc.srtt.Store(float64(0))
-	assoc.t1Init = newRTXTimer(timerT1Init, assoc, maxInitRetrans, rtoMax)
-	assoc.t1Cookie = newRTXTimer(timerT1Cookie, assoc, maxInitRetrans, rtoMax)
+	assoc.t1Init = newRTXTimer(timerT1Init, assoc, maxInitRetrans, handshakeRTOMax)
+	assoc.t1Cookie = newRTXTimer(timerT1Cookie, assoc, maxInitRetrans, handshakeRTOMax)
 	assoc.t2Shutdown = newRTXTimer(timerT2Shutdown, assoc, noMaxRetrans, rtoMax)
 	assoc.t3RTX = newRTXTimer(timerT3RTX, assoc, noMaxRetrans, rtoMax)
 	assoc.tReconfig = newRTXTimer(timerReconfig, assoc, noMaxRetrans, rtoMax)
 	assoc.ackTimer = newAckTimer(assoc)
 
 	return assoc
+}
+
+func effectiveHandshakeRTOMax(rtoMax, handshakeRTOMax float64) float64 {
+	if handshakeRTOMax == 0 {
+		return rtoMax
+	}
+
+	return handshakeRTOMax
 }
 
 func (a *Association) initWithOutOfBandTokens(localInit *chunkInit, remoteInit *chunkInit) error {
@@ -896,8 +949,11 @@ func (a *Association) initWithOutOfBandTokens(localInit *chunkInit, remoteInit *
 	go a.writeLoop()
 
 	a.payloadQueue.init(remoteInit.initialTSN - 1)
-	a.myMaxNumInboundStreams = min16(localInit.numInboundStreams, remoteInit.numInboundStreams)
-	a.myMaxNumOutboundStreams = min16(localInit.numOutboundStreams, remoteInit.numOutboundStreams)
+	a.localInboundStreams = localInit.numInboundStreams
+	a.localOutboundStreams = localInit.numOutboundStreams
+	a.peerInboundStreams = remoteInit.numInboundStreams
+	a.peerOutboundStreams = remoteInit.numOutboundStreams
+	a.peerNextRSN = remoteInit.initialTSN
 	a.setRWND(remoteInit.advertisedReceiverWindowCredit)
 	a.peerVerificationTag = remoteInit.initiateTag
 	a.sourcePort = defaultSCTPSrcDstPort
@@ -1925,12 +1981,16 @@ func (a *Association) Metadata() (AssociationMetadata, bool) {
 	case a.useForwardTSN:
 		partialReliabilityMode = PartialReliabilityModeForwardTSN
 	}
+	numInboundStreams := min16(a.localInboundStreams, a.peerOutboundStreams)
+	numOutboundStreams := min16(a.localOutboundStreams, a.peerInboundStreams)
 
 	return AssociationMetadata{
 		MessageInterleavingEnabled:   a.useInterleaving,
 		PartialReliabilityMode:       partialReliabilityMode,
 		ZeroChecksumSendingEnabled:   a.sendZeroChecksum,
 		ZeroChecksumReceivingEnabled: a.recvZeroChecksum,
+		NumInboundStreams:            numInboundStreams,
+		NumOutboundStreams:           numOutboundStreams,
 	}, true
 }
 
@@ -2069,6 +2129,18 @@ func (a *Association) handleInit(pkt *packet, initChunk *chunkInit) ([]*packet, 
 	// responding, the endpoint MUST send the INIT ACK back to the same
 	// address that the original INIT (sent by this endpoint) was sent.
 
+	if state == established &&
+		a.sourcePort == pkt.destinationPort &&
+		a.destinationPort == pkt.sourcePort &&
+		a.peerVerificationTag == initChunk.initiateTag {
+		// An INIT retransmitted by the peer can arrive after its COOKIE ECHO
+		// established this association. It belongs to the current handshake,
+		// so it must not tear down or mutate the live TCB.
+		a.log.Debugf("[%s] ignoring duplicate INIT for established association", a.name)
+
+		return nil, nil
+	}
+
 	if state != closed && state != cookieWait && state != cookieEchoed {
 		// 5.2.2.  Unexpected INIT in States Other than CLOSED, COOKIE-ECHOED,
 		//        COOKIE-WAIT, and SHUTDOWN-ACK-SENT
@@ -2079,8 +2151,10 @@ func (a *Association) handleInit(pkt *packet, initChunk *chunkInit) ([]*packet, 
 	// our cookie is not compliant with https://www.rfc-editor.org/rfc/rfc9260#section-5.1-2.2.3.
 	// It makes us more vulnerable to resource attacks, albeit minimally so.
 	//  https://www.rfc-editor.org/rfc/rfc9260#sec_handle_stream_parameters
-	a.myMaxNumInboundStreams = min16(initChunk.numInboundStreams, a.myMaxNumInboundStreams)
-	a.myMaxNumOutboundStreams = min16(initChunk.numOutboundStreams, a.myMaxNumOutboundStreams)
+	a.peerInboundStreams = initChunk.numInboundStreams
+	a.peerOutboundStreams = initChunk.numOutboundStreams
+	a.peerNextRSN = initChunk.initialTSN
+	a.lastReconfigResponse = nil
 	a.peerVerificationTag = initChunk.initiateTag
 	a.sourcePort = pkt.destinationPort
 	a.destinationPort = pkt.sourcePort
@@ -2133,8 +2207,8 @@ func (a *Association) handleInit(pkt *packet, initChunk *chunkInit) ([]*packet, 
 	a.log.Debug("sending INIT ACK")
 
 	initAck.initialTSN = a.myNextTSN
-	initAck.numOutboundStreams = a.myMaxNumOutboundStreams
-	initAck.numInboundStreams = a.myMaxNumInboundStreams
+	initAck.numOutboundStreams = min16(a.localOutboundStreams, a.peerInboundStreams)
+	initAck.numInboundStreams = min16(a.localInboundStreams, a.peerOutboundStreams)
 	initAck.initiateTag = a.myVerificationTag
 	initAck.advertisedReceiverWindowCredit = a.maxReceiveBufferSize
 
@@ -2175,8 +2249,10 @@ func (a *Association) handleInitAck(pkt *packet, initChunkAck *chunkInitAck) err
 		return nil
 	}
 
-	a.myMaxNumInboundStreams = min16(initChunkAck.numInboundStreams, a.myMaxNumInboundStreams)
-	a.myMaxNumOutboundStreams = min16(initChunkAck.numOutboundStreams, a.myMaxNumOutboundStreams)
+	a.peerInboundStreams = initChunkAck.numInboundStreams
+	a.peerOutboundStreams = initChunkAck.numOutboundStreams
+	a.peerNextRSN = initChunkAck.initialTSN
+	a.lastReconfigResponse = nil
 	a.peerVerificationTag = initChunkAck.initiateTag
 	a.payloadQueue.init(initChunkAck.initialTSN - 1)
 	if a.sourcePort != pkt.destinationPort ||
@@ -2663,14 +2739,14 @@ func (a *Association) getOrCreateStream(
 //
 //nolint:gocognit,cyclop
 func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) (
-	bytesAckedPerStream map[uint16]int,
+	bytesAckedPerStream map[*Stream]int,
 	htna uint32,
 	newestDeliveredSendTime time.Time,
 	newestDeliveredOrigTSN uint32,
 	deliveredFound bool,
 	err error,
 ) {
-	bytesAckedPerStream = map[uint16]int{}
+	bytesAckedPerStream = map[*Stream]int{}
 	now := time.Now() // capture the time for this SACK
 
 	// Validate that full range exists in the inflight queue to prevent partial pops
@@ -2734,11 +2810,11 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 
 			nBytesAcked := len(chunkPayload.userData)
 
-			// Sum the number of bytes acknowledged per stream
-			if amount, ok := bytesAckedPerStream[chunkPayload.streamIdentifier]; ok {
-				bytesAckedPerStream[chunkPayload.streamIdentifier] = amount + nBytesAcked
-			} else {
-				bytesAckedPerStream[chunkPayload.streamIdentifier] = nBytesAcked
+			// Sum acknowledged bytes against the stream generation that sent
+			// the chunk. A reset can remove that stream and allow the same ID to
+			// name a new stream before a delayed SACK arrives.
+			if stream := a.streamForAcknowledgedChunk(chunkPayload); stream != nil {
+				bytesAckedPerStream[stream] += nBytesAcked
 			}
 
 			// RFC 4960 sec 6.3.1.  RTO Calculation
@@ -2800,11 +2876,10 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 			if !chunkPayload.acked { //nolint:nestif
 				nBytesAcked := a.inflightQueue.markAsAcked(tsn)
 
-				// Sum the number of bytes acknowledged per stream
-				if amount, ok := bytesAckedPerStream[chunkPayload.streamIdentifier]; ok {
-					bytesAckedPerStream[chunkPayload.streamIdentifier] = amount + nBytesAcked
-				} else {
-					bytesAckedPerStream[chunkPayload.streamIdentifier] = nBytesAcked
+				// Sum acknowledged bytes against the stream generation that sent
+				// the chunk, not a later stream that reused its identifier.
+				if stream := a.streamForAcknowledgedChunk(chunkPayload); stream != nil {
+					bytesAckedPerStream[stream] += nBytesAcked
 				}
 
 				a.log.Tracef("[%s] tsn=%d has been sacked", a.name, chunkPayload.tsn)
@@ -2839,6 +2914,15 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 	}
 
 	return bytesAckedPerStream, htna, newestDeliveredSendTime, newestDeliveredOrigTSN, deliveredFound, nil
+}
+
+// The caller should hold the association lock.
+func (a *Association) streamForAcknowledgedChunk(chunk *chunkPayloadData) *Stream {
+	if chunk.stream != nil {
+		return chunk.stream
+	}
+
+	return a.streams[chunk.streamIdentifier]
 }
 
 // The caller should hold the lock.
@@ -3030,12 +3114,10 @@ func (a *Association) processAcknowledgement(
 		a.onCumulativeTSNAckPointAdvanced(totalBytesAcked)
 	}
 
-	for si, nBytesAcked := range bytesAckedPerStream {
-		if s, ok := a.streams[si]; ok {
-			a.lock.Unlock()
-			s.onBufferReleased(nBytesAcked)
-			a.lock.Lock()
-		}
+	for stream, nBytesAcked := range bytesAckedPerStream {
+		a.lock.Unlock()
+		stream.onBufferReleased(nBytesAcked)
+		a.lock.Lock()
 	}
 
 	return acknowledgementResult{
@@ -3624,6 +3706,16 @@ func (a *Association) handleReconfigParam(raw param) (*packet, error) {
 	switch par := raw.(type) {
 	case *paramOutgoingResetRequest:
 		a.log.Tracef("[%s] handleReconfigParam (OutgoingResetRequest)", a.name)
+		if par.reconfigRequestSequenceNumber != a.peerNextRSN {
+			if par.reconfigRequestSequenceNumber == a.peerNextRSN-1 && a.lastReconfigResponse != nil {
+				return a.lastReconfigResponse, nil
+			}
+
+			return a.createReconfigResponse(
+				par.reconfigRequestSequenceNumber,
+				reconfigResultErrorBadSequenceNumber,
+			), nil
+		}
 		if a.peerLastTSN() < par.senderLastTSN && len(a.reconfigRequests) >= maxReconfigRequests {
 			// We have too many reconfig requests outstanding. Drop the request and let
 			// the peer retransmit. A well behaved peer should only have 1 outstanding
@@ -3637,6 +3729,7 @@ func (a *Association) handleReconfigParam(raw param) (*packet, error) {
 			// https://chromium.googlesource.com/external/webrtc/+/refs/heads/main/net/dcsctp/socket/stream_reset_handler.cc#271
 			return nil, fmt.Errorf("%w: %d", ErrTooManyReconfigRequests, len(a.reconfigRequests))
 		}
+		a.peerNextRSN++
 		a.reconfigRequests[par.reconfigRequestSequenceNumber] = par
 		resp := a.resetStreamsIfAny(par)
 		if resp != nil {
@@ -3661,7 +3754,7 @@ func (a *Association) handleReconfigParam(raw param) (*packet, error) {
 			return nil, nil //nolint:nilnil
 		}
 		if par.result == reconfigResultSuccessPerformed {
-			a.resetOutgoingStreamSequenceNumbers(par.reconfigResponseSequenceNumber)
+			a.completeOutgoingStreamReset(par.reconfigResponseSequenceNumber)
 		}
 		delete(a.reconfigs, par.reconfigResponseSequenceNumber)
 		if len(a.reconfigs) == 0 {
@@ -3675,7 +3768,7 @@ func (a *Association) handleReconfigParam(raw param) (*packet, error) {
 }
 
 // The caller should hold the lock.
-func (a *Association) resetOutgoingStreamSequenceNumbers(reconfigRequestSequenceNumber uint32) {
+func (a *Association) completeOutgoingStreamReset(reconfigRequestSequenceNumber uint32) {
 	reconfig := a.reconfigs[reconfigRequestSequenceNumber]
 	if reconfig == nil {
 		return
@@ -3688,6 +3781,7 @@ func (a *Association) resetOutgoingStreamSequenceNumbers(reconfigRequestSequence
 		if s, ok := a.streams[id]; ok {
 			s.resetOutgoingStreamSequenceNumbers()
 		}
+		a.completeStreamResetDirection(id, streamResetOutbound)
 	}
 }
 
@@ -3707,6 +3801,7 @@ func (a *Association) resetStreamsIfAny(resetRequest *paramOutgoingResetRequest)
 			a.lock.Lock()
 			a.log.Debugf("[%s] deleting stream %d", a.name, id)
 			delete(a.streams, s.streamIdentifier)
+			a.completeStreamResetDirection(s.streamIdentifier, streamResetInbound)
 		}
 		delete(a.reconfigRequests, resetRequest.reconfigRequestSequenceNumber)
 	} else {
@@ -3715,12 +3810,49 @@ func (a *Association) resetStreamsIfAny(resetRequest *paramOutgoingResetRequest)
 		result = reconfigResultInProgress
 	}
 
+	response := a.createReconfigResponse(resetRequest.reconfigRequestSequenceNumber, result)
+	a.lastReconfigResponse = response
+
+	return response
+}
+
+// The caller should hold the association lock.
+func (a *Association) createReconfigResponse(sequenceNumber uint32, result reconfigResult) *packet {
 	return a.createPacket([]chunk{&chunkReconfig{
 		paramA: &paramReconfigResponse{
-			reconfigResponseSequenceNumber: resetRequest.reconfigRequestSequenceNumber,
+			reconfigResponseSequenceNumber: sequenceNumber,
 			result:                         result,
 		},
 	}})
+}
+
+type streamResetState uint8
+
+const (
+	streamResetInbound streamResetState = 1 << iota
+	streamResetOutbound
+	streamResetBoth = streamResetInbound | streamResetOutbound
+)
+
+// The caller should hold the association lock.
+func (a *Association) completeStreamResetDirection(streamID uint16, direction streamResetState) {
+	if a.streamResetStates == nil {
+		a.streamResetStates = map[uint16]streamResetState{}
+	}
+	state := a.streamResetStates[streamID] | direction
+	if state != streamResetBoth {
+		a.streamResetStates[streamID] = state
+		return
+	}
+	delete(a.streamResetStates, streamID)
+	handler := a.onStreamResetCompleteHandler
+	if handler == nil {
+		return
+	}
+
+	a.lock.Unlock()
+	handler(streamID)
+	a.lock.Lock()
 }
 
 // Move the chunk peeked with a.pendingQueue.peek() to the inflightQueue.
@@ -4419,6 +4551,14 @@ func (a *Association) MaxMessageSize() uint32 {
 // SetMaxMessageSize sets the maximum message size you can send.
 func (a *Association) SetMaxMessageSize(maxMsgSize uint32) {
 	atomic.StoreUint32(&a.maxMessageSize, maxMsgSize)
+}
+
+// OnStreamResetComplete sets a handler invoked after both directions of a
+// stream reset complete and the stream has been removed from the association.
+func (a *Association) OnStreamResetComplete(f func(streamID uint16)) {
+	a.lock.Lock()
+	defer a.lock.Unlock()
+	a.onStreamResetCompleteHandler = f
 }
 
 // completeHandshake sends the given error to  handshakeCompletedCh unless the read/write
