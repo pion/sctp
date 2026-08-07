@@ -5078,6 +5078,77 @@ func TestStreamResetCompleteNotifiesBothAssociations(t *testing.T) {
 	closeAssociationPair(bridge, client, server)
 }
 
+func TestStreamResetRetransmissionDoesNotResetReusedStream(t *testing.T) {
+	const (
+		streamID       = uint16(7)
+		firstSequence  = uint32(101)
+		secondSequence = firstSequence + 1
+	)
+	assoc := createTestAssociation(t, Config{})
+	assoc.setState(established)
+	assoc.payloadQueue.init(100)
+	assoc.peerNextRSN = firstSequence
+	oldStream := assoc.createStream(streamID, false)
+	require.NotNil(t, oldStream)
+
+	completed := make(chan uint16, 2)
+	assoc.OnStreamResetComplete(func(id uint16) {
+		completed <- id
+	})
+
+	assoc.lock.Lock()
+	assoc.completeStreamResetDirection(streamID, streamResetOutbound)
+	response, err := assoc.handleReconfigParam(&paramOutgoingResetRequest{
+		reconfigRequestSequenceNumber: firstSequence,
+		senderLastTSN:                 100,
+		streamIdentifiers:             []uint16{streamID},
+	})
+	assoc.lock.Unlock()
+	require.NoError(t, err)
+	require.Equal(t, reconfigResultSuccessPerformed, resetResponseResult(t, response))
+	require.Equal(t, streamID, <-completed)
+
+	newStream := assoc.createStream(streamID, false)
+	require.NotNil(t, newStream)
+
+	assoc.lock.Lock()
+	response, err = assoc.handleReconfigParam(&paramOutgoingResetRequest{
+		reconfigRequestSequenceNumber: firstSequence,
+		senderLastTSN:                 100,
+		streamIdentifiers:             []uint16{streamID},
+	})
+	assoc.lock.Unlock()
+	require.NoError(t, err)
+	require.Equal(t, reconfigResultSuccessPerformed, resetResponseResult(t, response))
+	assert.Same(t, newStream, assoc.streams[streamID])
+
+	assoc.lock.Lock()
+	response, err = assoc.handleReconfigParam(&paramOutgoingResetRequest{
+		reconfigRequestSequenceNumber: secondSequence,
+		senderLastTSN:                 100,
+	})
+	assoc.lock.Unlock()
+	require.NoError(t, err)
+	require.Equal(t, reconfigResultSuccessPerformed, resetResponseResult(t, response))
+
+	assoc.lock.Lock()
+	response, err = assoc.handleReconfigParam(&paramOutgoingResetRequest{
+		reconfigRequestSequenceNumber: firstSequence,
+		senderLastTSN:                 100,
+		streamIdentifiers:             []uint16{streamID},
+	})
+	assoc.lock.Unlock()
+	require.NoError(t, err)
+	require.Equal(t, reconfigResultErrorBadSequenceNumber, resetResponseResult(t, response))
+	assert.Same(t, newStream, assoc.streams[streamID])
+
+	select {
+	case id := <-completed:
+		t.Fatalf("reset completion fired twice for stream %d", id)
+	default:
+	}
+}
+
 func resetResponseResult(t *testing.T, packet *packet) reconfigResult { //nolint:thelper
 	t.Helper()
 	require.NotNil(t, packet)

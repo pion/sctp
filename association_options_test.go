@@ -268,3 +268,25 @@ func TestAssociationRTOMaxStillIncludesHandshakeByDefault(t *testing.T) {
 	assert.Equal(t, float64(250), effectiveHandshakeRTOMax(250, 0))
 	assert.Equal(t, float64(150), effectiveHandshakeRTOMax(1000, 150))
 }
+
+func TestAssociationConfigCopiesStreamLimits(t *testing.T) {
+	const (
+		numInbound  = uint16(7)
+		numOutbound = uint16(9)
+	)
+	config := Config{
+		NetConn:            &dumbConn{},
+		NumInboundStreams:  numInbound,
+		NumOutboundStreams: numOutbound,
+	}
+
+	serverConfig, err := buildServerConfig(config)
+	assert.NoError(t, err)
+	assert.Equal(t, numInbound, serverConfig.NumInboundStreams)
+	assert.Equal(t, numOutbound, serverConfig.NumOutboundStreams)
+
+	clientConfig, err := buildClientConfig(config)
+	assert.NoError(t, err)
+	assert.Equal(t, numInbound, clientConfig.NumInboundStreams)
+	assert.Equal(t, numOutbound, clientConfig.NumOutboundStreams)
+}
