@@ -2096,6 +2096,18 @@ func (a *Association) handleInit(pkt *packet, initChunk *chunkInit) ([]*packet, 
 	// responding, the endpoint MUST send the INIT ACK back to the same
 	// address that the original INIT (sent by this endpoint) was sent.
 
+	if state == established &&
+		a.sourcePort == pkt.destinationPort &&
+		a.destinationPort == pkt.sourcePort &&
+		a.peerVerificationTag == initChunk.initiateTag {
+		// An INIT retransmitted by the peer can arrive after its COOKIE ECHO
+		// established this association. It belongs to the current handshake,
+		// so it must not tear down or mutate the live TCB.
+		a.log.Debugf("[%s] ignoring duplicate INIT for established association", a.name)
+
+		return nil, nil
+	}
+
 	if state != closed && state != cookieWait && state != cookieEchoed {
 		// 5.2.2.  Unexpected INIT in States Other than CLOSED, COOKIE-ECHOED,
 		//        COOKIE-WAIT, and SHUTDOWN-ACK-SENT

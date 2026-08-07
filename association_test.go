@@ -4749,8 +4749,42 @@ func TestAssocHandleInit(t *testing.T) {
 		handleInitTest(t, closed, false)
 	})
 
-	t.Run("unexpected state established", func(t *testing.T) {
+	t.Run("unexpected new association in established state", func(t *testing.T) {
 		handleInitTest(t, established, true)
+	})
+
+	t.Run("duplicate init in established state", func(t *testing.T) {
+		assoc := createTestAssociation(t, Config{
+			NetConn:       &dumbConn{},
+			LoggerFactory: loggerFactory,
+		})
+		assoc.setState(established)
+		assoc.sourcePort = 5002
+		assoc.destinationPort = 5001
+		assoc.peerVerificationTag = 5678
+		assoc.peerInboundStreams = 11
+		assoc.peerOutboundStreams = 12
+		pkt := &packet{
+			sourcePort:      5001,
+			destinationPort: 5002,
+		}
+		init := &chunkInit{
+			chunkInitCommon: chunkInitCommon{
+				initialTSN:                     1234,
+				numOutboundStreams:             1001,
+				numInboundStreams:              1002,
+				initiateTag:                    5678,
+				advertisedReceiverWindowCredit: 512 * 1024,
+			},
+		}
+
+		packets, err := assoc.handleInit(pkt, init)
+		require.NoError(t, err)
+		assert.Empty(t, packets)
+		assert.Equal(t, established, assoc.getState())
+		assert.Equal(t, uint32(5678), assoc.peerVerificationTag)
+		assert.Equal(t, uint16(11), assoc.peerInboundStreams)
+		assert.Equal(t, uint16(12), assoc.peerOutboundStreams)
 	})
 
 	t.Run("shutdownAckSent matching ports retransmits shutdown ack", func(t *testing.T) {
