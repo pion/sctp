@@ -4675,7 +4675,7 @@ func TestAssocAbort(t *testing.T) {
 	packet, err := a0.marshalPacket(a0.createPacket([]chunk{abort}))
 	assert.NoError(t, err)
 
-	_, _, err = establishSessionPair(br, a0, a1, si)
+	_, remoteStream, err := establishSessionPair(br, a0, a1, si)
 	assert.NoError(t, err)
 
 	// Both associations are established
@@ -4692,6 +4692,10 @@ func TestAssocAbort(t *testing.T) {
 	// The receiving association should be closed because it got an ABORT
 	assert.Equal(t, established, a0.getState())
 	assert.Equal(t, closed, a1.getState())
+
+	_, err = remoteStream.Read(make([]byte, 1))
+	assert.ErrorIs(t, err, ErrChunk)
+	assert.False(t, errors.Is(err, ErrUserInitiatedAbort))
 
 	closeAssociationPair(br, a0, a1)
 }
@@ -6122,7 +6126,9 @@ func TestAssociation_Abort(t *testing.T) {
 
 	i, err = s21.Read(buf)
 	assert.Equal(t, i, 0, "expected no data read")
-	assert.Error(t, err, "User Initiated Abort: 1234", "expected abort reason")
+	assert.ErrorContains(t, err, "(User Initiated Abort: 1234)")
+	assert.ErrorIs(t, err, ErrChunk)
+	assert.ErrorIs(t, err, ErrUserInitiatedAbort)
 }
 
 // clientContextConn signals when the handshake starts and can block deadline updates.
