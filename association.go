@@ -68,23 +68,6 @@ var (
 	ErrTooManyReconfigRequests    = errors.New("too many outstanding reconfig requests")
 )
 
-type abortError struct {
-	message               string
-	hasUserInitiatedAbort bool
-}
-
-func (e *abortError) Error() string {
-	return e.message
-}
-
-func (e *abortError) Is(target error) bool {
-	return target == ErrUserInitiatedAbort && e.hasUserInitiatedAbort
-}
-
-func (e *abortError) Unwrap() error {
-	return ErrChunk
-}
-
 const (
 	receiveMTU            uint32 = 8192 // MTU for inbound packet (from DTLS)
 	initialMTU            uint32 = 1191 // initial MTU for outgoing packets (to DTLS)
@@ -3371,10 +3354,11 @@ func (a *Association) handleAbort(c *chunkAbort) error {
 
 	_ = a.close()
 
-	return &abortError{
-		message:               fmt.Sprintf("[%s] %s: %s", a.name, ErrChunk, errStr.String()),
-		hasUserInitiatedAbort: hasUserInitiatedAbort,
+	if hasUserInitiatedAbort {
+		return fmt.Errorf("[%s] %w: %w: %s", a.name, ErrChunk, ErrUserInitiatedAbort, errStr.String())
 	}
+
+	return fmt.Errorf("[%s] %w: %s", a.name, ErrChunk, errStr.String())
 }
 
 // createForwardTSN generates ForwardTSN chunk.
