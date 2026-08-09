@@ -4,8 +4,13 @@
 package sctp
 
 import (
+	"errors"
 	"fmt"
 )
+
+// ErrUserInitiatedAbort is matched by errors.Is when a received ABORT chunk
+// contains a User Initiated Abort cause.
+var ErrUserInitiatedAbort = errors.New("user initiated abort")
 
 /*
 This error cause MAY be included in ABORT chunks that are sent
