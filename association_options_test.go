@@ -60,6 +60,23 @@ func TestAssociationOptions_Interleaving(t *testing.T) {
 	assert.True(t, disabledCfg.enableInterleavingSet)
 }
 
+func TestAssociationOptions_DefaultMTU(t *testing.T) {
+	ca, cb := udpPiper(t)
+	defer func() {
+		_ = ca.Close()
+		_ = cb.Close()
+	}()
+
+	cfg, err := buildClientConfig(WithNetConn(ca))
+	assert.NoError(t, err)
+	assert.Equal(t, uint32(1191), cfg.MTU)
+
+	assoc := createAssociationFromConfigWithTsn(cfg, 1)
+	defer assoc.close() //nolint:errcheck
+	assert.Equal(t, uint32(1191), assoc.MTU())
+	assert.Equal(t, maxPayloadSizeForMTU(initialMTU, false), assoc.maxPayloadSize)
+}
+
 func TestAssociationOptions_Validation(t *testing.T) {
 	t.Run("nil logger factory", func(t *testing.T) {
 		var cfg Config
@@ -77,6 +94,21 @@ func TestAssociationOptions_Validation(t *testing.T) {
 		var cfg Config
 		err := WithMTU(0).applyServer(&cfg)
 		assert.ErrorIs(t, err, errZeroMTUOption)
+	})
+
+	t.Run("mtu too small", func(t *testing.T) {
+		minMTU := commonHeaderSize + iDataChunkHeaderSize + paddingMultiple
+
+		var cfg Config
+		err := WithMTU(minMTU - 1).applyServer(&cfg)
+		assert.ErrorIs(t, err, errMTUTooSmallOption)
+
+		err = Config{MTU: minMTU - 1}.applyClient(&cfg)
+		assert.ErrorIs(t, err, errMTUTooSmallOption)
+
+		err = WithMTU(minMTU).applyServer(&cfg)
+		assert.NoError(t, err)
+		assert.Equal(t, minMTU, cfg.MTU)
 	})
 
 	t.Run("max recv buf zero", func(t *testing.T) {
@@ -213,8 +245,8 @@ func TestAssociationOptions_ClientAndServer(t *testing.T) {
 	assert.True(t, aClient.recvZeroChecksum)
 	assert.True(t, aServer.recvZeroChecksum)
 
-	assert.Equal(t, uint32(1200)-(commonHeaderSize+dataChunkHeaderSize), aClient.maxPayloadSize)
-	assert.Equal(t, uint32(1200)-(commonHeaderSize+dataChunkHeaderSize), aServer.maxPayloadSize)
+	assert.Equal(t, maxPayloadSizeForMTU(1200, false), aClient.maxPayloadSize)
+	assert.Equal(t, maxPayloadSizeForMTU(1200, false), aServer.maxPayloadSize)
 
 	assert.Equal(t, "opt-pair", aClient.name)
 	assert.Equal(t, "opt-pair", aServer.name)
