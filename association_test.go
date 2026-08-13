@@ -4759,9 +4759,9 @@ func TestAssocHandleInit(t *testing.T) {
 		assert.True(t, assoc.useForwardTSN, "should be set to true")
 
 		metadata, ok := assoc.Metadata()
-		assert.True(t, ok, "should be true")
-		assert.Equal(t, uint16(1001), metadata.NumInboundStreams, "should match")
-		assert.Equal(t, uint16(1002), metadata.NumOutboundStreams, "should match")
+		assert.False(t, ok, "metadata should not be available until the association is established")
+		assert.Equal(t, uint16(0), metadata.NumInboundStreams, "inbound streams should be 0 until the association is established")
+		assert.Equal(t, uint16(0), metadata.NumOutboundStreams, "outbound streams should be 0 until the association is established")
 	}
 
 	t.Run("normal", func(t *testing.T) {
