@@ -10,10 +10,13 @@ import (
 )
 
 const (
+	// Default SACK delay per RFC 9260 (protocol parameter 'SACK.Delay').
 	ackInterval time.Duration = 200 * time.Millisecond
+	// Implementations MUST NOT allow SACK.Delay > 500ms (RFC 9260).
+	ackMaxDelay time.Duration = 500 * time.Millisecond
 )
 
-// ackTimerObserver is the inteface to an ack timer observer.
+// ackTimerObserver is the interface to an ack timer observer.
 type ackTimerObserver interface {
 	onAckTimeout()
 }
@@ -26,18 +29,27 @@ const (
 	ackTimerClosed
 )
 
-// ackTimer provides the retnransmission timer conforms with RFC 4960 Sec 6.3.1.
+// ackTimer provides the SACK.Delay according to RFC 9260 section 6.2.
 type ackTimer struct {
 	timer    *time.Timer
 	observer ackTimerObserver
-	mutex    sync.Mutex
-	state    ackTimerState
-	pending  uint8
+
+	mutex   sync.Mutex
+	state   ackTimerState
+	pending uint8
+
+	// SACK delay clamped to (0, ackMaxDelay].
+	interval time.Duration
 }
 
 // newAckTimer creates a new acknowledgement timer used to enable delayed ack.
+// Default delay is 200ms (SACK.Delay). The maximum allowed by spec is 500ms.
 func newAckTimer(observer ackTimerObserver) *ackTimer {
-	t := &ackTimer{observer: observer}
+	t := &ackTimer{
+		observer: observer,
+		interval: ackInterval,
+	}
+
 	t.timer = time.AfterFunc(math.MaxInt64, t.timeout)
 	t.timer.Stop()
 
@@ -53,7 +65,7 @@ func (t *ackTimer) timeout() {
 	t.mutex.Unlock()
 }
 
-// start starts the timer.
+// start starts the timer if not already running. Returns true if it started.
 func (t *ackTimer) start() bool {
 	t.mutex.Lock()
 	defer t.mutex.Unlock()
@@ -65,20 +77,30 @@ func (t *ackTimer) start() bool {
 
 	t.state = ackTimerStarted
 	t.pending++
-	t.timer.Reset(ackInterval)
+
+	// Clamp interval (0, ackMaxDelay].
+	delay := t.interval
+	if delay <= 0 {
+		delay = ackInterval
+	} else if delay > ackMaxDelay {
+		delay = ackMaxDelay
+	}
+
+	t.timer.Reset(delay)
 
 	return true
 }
 
-// stops the timer. this is similar to stop() but subsequent start() call
-// will fail (the timer is no longer usable).
+// stop stops the timer if running and keeps it reusable.
 func (t *ackTimer) stop() {
 	t.mutex.Lock()
 	defer t.mutex.Unlock()
 
 	if t.state == ackTimerStarted {
 		if t.timer.Stop() {
-			t.pending--
+			if t.pending > 0 {
+				t.pending--
+			}
 		}
 		t.state = ackTimerStopped
 	}
@@ -91,7 +113,9 @@ func (t *ackTimer) close() {
 	defer t.mutex.Unlock()
 
 	if t.state == ackTimerStarted && t.timer.Stop() {
-		t.pending--
+		if t.pending > 0 {
+			t.pending--
+		}
 	}
 	t.state = ackTimerClosed
 }
