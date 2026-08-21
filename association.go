@@ -3344,11 +3344,19 @@ func (a *Association) handleShutdownComplete(_ *chunkShutdownComplete) error {
 
 func (a *Association) handleAbort(c *chunkAbort) error {
 	var errStr strings.Builder
+	hasUserInitiatedAbort := false
 	for _, e := range c.errorCauses {
 		fmt.Fprintf(&errStr, "(%s)", e)
+		if e.errorCauseCode() == userInitiatedAbort {
+			hasUserInitiatedAbort = true
+		}
 	}
 
 	_ = a.close()
+
+	if hasUserInitiatedAbort {
+		return fmt.Errorf("[%s] %w: %w: %s", a.name, ErrChunk, ErrUserInitiatedAbort, errStr.String())
+	}
 
 	return fmt.Errorf("[%s] %w: %s", a.name, ErrChunk, errStr.String())
 }
