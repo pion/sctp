@@ -306,6 +306,9 @@ type Association struct {
 	maxReceiveBufferSize      uint32
 	maxMessageSize            uint32
 	maxReassemblyQueueEntries uint32
+	maxInboundMessageSize     uint32
+	maxRetainedPayloadChunks  uint32
+	retainedPayloadChunks     atomic.Uint32
 	cwnd                      uint32 // my congestion window size
 	rwnd                      uint32 // calculated peer's receiver windows size
 	ssthresh                  uint32 // slow start threshold
@@ -426,6 +429,10 @@ type Config struct {
 
 	// Reassembly queue config options
 	maxReassemblyQueueEntries uint32
+	maxInboundStreams         uint16
+	maxOutboundStreams        uint16
+	maxInboundMessageSize     uint32
+	maxRetainedPayloadChunks  uint32
 
 	// SNAP/sctp-init
 	snapConfig *snapConfig
@@ -807,12 +814,14 @@ func createAssociationFromConfigWithTsn(cfg *Config, tsn uint32) *Association {
 		maxReceiveBufferSize:      maxReceiveBufferSize,
 		maxMessageSize:            maxMessageSize,
 		maxReassemblyQueueEntries: cfg.maxReassemblyQueueEntries,
+		maxInboundMessageSize:     cfg.maxInboundMessageSize,
+		maxRetainedPayloadChunks:  cfg.maxRetainedPayloadChunks,
 		minCwnd:                   cfg.MinCwnd,
 		fastRtxWnd:                cfg.FastRtxWnd,
 		cwndCAStep:                cfg.CwndCAStep,
 
-		myMaxNumOutboundStreams: math.MaxUint16,
-		myMaxNumInboundStreams:  math.MaxUint16,
+		myMaxNumOutboundStreams: streamLimitOrMax(cfg.maxOutboundStreams),
+		myMaxNumInboundStreams:  streamLimitOrMax(cfg.maxInboundStreams),
 
 		payloadQueue:            newReceivePayloadQueue(getMaxTSNOffset(maxReceiveBufferSize)),
 		inflightQueue:           newPayloadQueue(),
@@ -886,6 +895,13 @@ func createAssociationFromConfigWithTsn(cfg *Config, tsn uint32) *Association {
 	assoc.ackTimer = newAckTimer(assoc)
 
 	return assoc
+}
+
+func streamLimitOrMax(limit uint16) uint16 {
+	if limit == 0 {
+		return math.MaxUint16
+	}
+	return limit
 }
 
 func (a *Association) initWithOutOfBandTokens(localInit *chunkInit, remoteInit *chunkInit) error {
@@ -2466,12 +2482,23 @@ func (a *Association) handleData(chunkPayload *chunkPayloadData) []*packet {
 
 // The caller should hold the lock.
 func (a *Association) acceptPayloadData(chunkPayload *chunkPayloadData) bool {
+	if chunkPayload.streamIdentifier >= a.myMaxNumInboundStreams {
+		a.abortProtocolViolation("inbound stream limit exceeded")
+		return false
+	}
 	stream := a.getOrCreateStream(chunkPayload.streamIdentifier, true, PayloadTypeUnknown)
 	if stream == nil {
 		// silently discard the data. (sender will retry on T3-rtx timeout)
 		// see pion/sctp#30
 		a.log.Debugf("[%s] discard %d", a.name, chunkPayload.streamSequenceNumber)
 
+		return false
+	}
+	if stream.isDuplicate(chunkPayload) {
+		return true
+	}
+	if a.maxRetainedPayloadChunks > 0 && a.retainedPayloadChunks.Load() >= a.maxRetainedPayloadChunks {
+		a.abortProtocolViolation("association retained payload chunk limit exceeded")
 		return false
 	}
 
@@ -2501,12 +2528,17 @@ func (a *Association) acceptPayloadData(chunkPayload *chunkPayloadData) bool {
 
 // The caller should hold the lock.
 func (a *Association) pushPayloadDataToStream(stream *Stream, chunkPayload *chunkPayloadData) bool {
-	a.payloadQueue.push(chunkPayload.tsn)
-	if err := stream.handleData(chunkPayload); err != nil {
+	accepted, err := stream.handleData(chunkPayload)
+	if err != nil {
 		a.abortProtocolViolation(err.Error())
 
 		return false
 	}
+	if !accepted {
+		return true
+	}
+	a.retainedPayloadChunks.Add(1)
+	a.payloadQueue.push(chunkPayload.tsn)
 
 	return true
 }
@@ -2590,6 +2622,9 @@ func (a *Association) OpenStream(
 	case shutdownAckSent, shutdownPending, shutdownReceived, shutdownSent, closed:
 		return nil, ErrAssociationClosed
 	}
+	if streamIdentifier >= a.myMaxNumOutboundStreams {
+		return nil, ErrOutboundStreamLimitExceeded
+	}
 
 	return a.getOrCreateStream(streamIdentifier, false, defaultPayloadType), nil
 }
@@ -2616,6 +2651,12 @@ func (a *Association) createStream(streamIdentifier uint16, accept bool) *Stream
 		log:           a.log,
 		name:          fmt.Sprintf("%d:%s", streamIdentifier, a.name),
 		writeDeadline: deadline.New(),
+	}
+	stream.reassemblyQueue.maxMessageBytes = a.maxInboundMessageSize
+	stream.reassemblyQueue.onRelease = func(n uint32) {
+		for range n {
+			a.retainedPayloadChunks.Add(^uint32(0))
+		}
 	}
 
 	stream.readNotifier = sync.NewCond(&stream.lock)
