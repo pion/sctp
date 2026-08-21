@@ -399,10 +399,11 @@ type snapConfig struct {
 // Config collects the arguments to createAssociation construction into
 // a single structure.
 type Config struct {
-	LoggerFactory      logging.LoggerFactory
-	Name               string
-	NetConn            net.Conn
-	BlockWrite         bool
+	LoggerFactory logging.LoggerFactory
+	Name          string
+	NetConn       net.Conn
+	BlockWrite    bool
+	// EnableZeroChecksum enables RFC 9653 and should only be used when SCTP is carried over DTLS.
 	EnableZeroChecksum bool
 	MTU                uint32
 
@@ -1300,11 +1301,17 @@ func chunkMandatoryChecksum(cc []chunk) bool {
 }
 
 func (a *Association) marshalPacket(p *packet) ([]byte, error) {
+	// RFC 9653: decide whether this packet should carry a real CRC32c checksum.
+	// INIT / COOKIE ECHO always require a real CRC32c (even when zero-checksum mode is enabled).
 	return p.marshal(!a.sendZeroChecksum || chunkMandatoryChecksum(p.chunks))
 }
 
 func (a *Association) unmarshalPacket(raw []byte) (*packet, error) {
 	p := &packet{}
+	// If we advertised ZCA via (recvZeroChecksum), accept packets that
+	// carry a zero checksum (skip CRC32c verification). Packets that
+	// still carry a non-zero checksum are verified anyways.
+	// Note that INIT / COOKIE ECHO always force verification inside `packet.unmarshal()`.
 	if err := p.unmarshal(!a.recvZeroChecksum, raw); err != nil {
 		return nil, err
 	}
