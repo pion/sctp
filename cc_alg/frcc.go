@@ -10,6 +10,7 @@ import (
 // this file is nearly a copy of
 // https://github.com/108anup/frcc_kernel/blob/ade790959c4fdfa7549d4f26f459dfc5eb507130/tcp_frcc.c
 
+const MinPacingRate = 15 //15000 byte/s
 type FRCCParam struct {
 	// Assumptions about network scenarios
 	UBRTProp    time.Duration
@@ -280,10 +281,7 @@ func (frcc *FRCC) updatePacingRate(rtt time.Duration, probeGain bool) {
 	} else {
 		frcc.PacingRate = uint32(2 * nextRate / frcc.MinRTProp.Microseconds())
 	}
-
-	if frcc.PacingRate == 0 {
-		log.Printf("%#v", frcc)
-	}
+	frcc.PacingRate = max(frcc.PacingRate, MinPacingRate)
 }
 func (frcc *FRCC) updateEstimates(rttSample time.Duration) {
 	initRTT := frcc.getInitialRTT()
@@ -735,7 +733,7 @@ func (frcc *FRCC) CanSend(bytes uint32, smoothedRTT time.Duration) (canSend bool
 			if r1 > math.MaxUint32 {
 				log.Printf("PacingRate > MaxUint32: %v", r1)
 			}
-			frcc.PacingRate = uint32(r1)
+			frcc.PacingRate = max(uint32(r1), MinPacingRate)
 		} // updatePacingRate() will update frcc.PacingRate
 		frcc.SentInSlot = 0
 		sinceStart = 1000
