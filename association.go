@@ -444,6 +444,12 @@ func createClientWithContext(ctx context.Context, config Config) (*Association, 
 	return ClientContext(ctx, config)
 }
 
+// snapEnabled reports whether both SNAP tokens are present, i.e. the handshake was
+// negotiated out of band.
+func (c *Config) snapEnabled() bool {
+	return c.snapConfig != nil && len(c.snapConfig.remoteInit) != 0 && len(c.snapConfig.localInit) != 0
+}
+
 func createSNAPAssociation(config *Config) (*Association, error) {
 	// SNAP, aka sctp-init in the SDP.
 	remote := &chunkInit{}
@@ -465,14 +471,20 @@ func createSNAPAssociation(config *Config) (*Association, error) {
 }
 
 // ClientContext opens a SCTP stream over a conn.
-// If ctx is canceled before the SCTP handshake completes, the association is
-// closed and ctx.Err() is returned.
+// If ctx is done before the association is established, ctx.Err() is returned and
+// the association is torn down in the background, so a conn whose Close blocks
+// cannot stall the caller.
 func ClientContext(ctx context.Context, opts ...ClientOption) (*Association, error) {
 	config, err := buildClientConfig(opts...)
 	if err != nil {
 		return nil, err
 	}
-	if config.snapConfig != nil && len(config.snapConfig.remoteInit) != 0 && len(config.snapConfig.localInit) != 0 {
+	if config.snapEnabled() {
+		// SNAP carries the handshake out of band, so ctx can only gate entry.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+
 		return createSNAPAssociation(config)
 	}
 	assoc, err := createClientAssociation(opts...)
@@ -485,7 +497,7 @@ func ClientContext(ctx context.Context, opts ...ClientOption) (*Association, err
 	select {
 	case <-ctx.Done():
 		assoc.log.Errorf("[%s] client handshake canceled: state=%s", assoc.name, getAssociationStateString(assoc.getState()))
-		assoc.Close() // nolint:errcheck,gosec
+		assoc.closeAsync()
 
 		return nil, ctx.Err()
 	case err := <-assoc.handshakeCompletedCh:
@@ -1011,6 +1023,19 @@ func (a *Association) Close() error {
 	a.log.Debugf("[%s] stats nFastRetrans: %d", a.name, a.stats.getNumFastRetrans())
 
 	return err
+}
+
+// closeAsync closes the association without waiting for it. netConn.Close may block
+// indefinitely, and readLoop only exits once its pending Read is unblocked, so the
+// read deadline is pushed first and the rest is handed to a goroutine.
+func (a *Association) closeAsync() {
+	_ = a.netConn.SetReadDeadline(time.Now())
+
+	go func() {
+		if err := a.Close(); err != nil {
+			a.log.Warnf("[%s] failed to close association: %v", a.name, err)
+		}
+	}()
 }
 
 func (a *Association) close() error {

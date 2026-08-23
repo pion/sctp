@@ -5022,6 +5022,56 @@ loop:
 	assert.Error(t, err2, "context canceled")
 }
 
+// TestClientContextCancelBlockingClose asserts cancellation returns promptly even
+// when the underlying conn's Close never returns.
+func TestClientContextCancelBlockingClose(t *testing.T) {
+	lim := test.TimeOut(time.Second * 5)
+	defer lim.Stop()
+
+	checkGoroutineLeaks(t)
+
+	conn := newBlockingCloseConn()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := ClientContext(ctx, WithNetConn(conn), WithLoggerFactory(logging.NewDefaultLoggerFactory()))
+		errCh <- err
+	}()
+
+	select {
+	case err := <-errCh:
+		assert.ErrorIs(t, err, context.Canceled)
+	case <-time.After(time.Second):
+		require.FailNow(t, "ClientContext did not return while conn.Close was blocked")
+	}
+
+	close(conn.closeBlocked)
+}
+
+// TestClientContextSNAPCanceled asserts the out-of-band SNAP path honors ctx instead
+// of handing back an established association.
+func TestClientContextSNAPCanceled(t *testing.T) {
+	lim := test.TimeOut(time.Second * 5)
+	defer lim.Stop()
+
+	checkGoroutineLeaks(t)
+
+	br := test.NewBridge()
+
+	init, err := GenerateOutOfBandToken(Config{MaxReceiveBufferSize: 65535})
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	assoc, err := ClientContext(ctx, WithNetConn(br.GetConn0()), WithSNAP(init, init))
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.Nil(t, assoc)
+}
+
 type customLogger struct {
 	expectZeroChecksum bool
 	t                  *testing.T
