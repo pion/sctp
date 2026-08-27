@@ -6918,6 +6918,31 @@ func TestRACK_PTO_DoesNotProbe_WhenPendingExists(t *testing.T) {
 	assert.False(t, got.retransmit, "PTO must prefer sending pending data over probing")
 }
 
+func TestRACK_PTO_RearmsT3AfterProbe(t *testing.T) {
+	assoc := newRackTestAssoc(t)
+	t.Cleanup(assoc.closeAllTimers)
+
+	chunk := mkChunk(100, time.Now())
+	assoc.inflightQueue.pushNoCheck(chunk)
+	require.True(t, assoc.t3RTX.start(50))
+	assoc.t3RTX.mutex.Lock()
+	assoc.t3RTX.nRtos = 1
+	assoc.t3RTX.mutex.Unlock()
+
+	assoc.onPTOTimer()
+
+	assoc.t3RTX.mutex.Lock()
+	nRTOs := assoc.t3RTX.nRtos
+	assoc.t3RTX.mutex.Unlock()
+	assert.Zero(t, nRTOs, "T3 backoff must restart after the PTO probe")
+	assert.True(t, assoc.t3RTX.isRunning())
+	assert.True(t, chunk.retransmit)
+	assoc.timerMu.Lock()
+	ptoDeadline := assoc.ptoDeadline
+	assoc.timerMu.Unlock()
+	assert.True(t, ptoDeadline.IsZero(), "the loss probe must not rearm PTO")
+}
+
 func TestFastRecoveryExitOnAckedExitPoint(t *testing.T) {
 	assoc := newRackTestAssoc(t)
 

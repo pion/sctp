@@ -4989,6 +4989,7 @@ func (a *Association) onPTOTimerLocked() {
 
 	// If we have unsent data, PTO should just wake the writer.
 	if a.pendingQueue.size() > 0 {
+		a.rearmT3AfterPTOProbeLocked()
 		a.awakeWriteLoop()
 
 		return
@@ -5014,6 +5015,15 @@ func (a *Association) onPTOTimerLocked() {
 		a.log.Tracef("[%s] PTO fired: probe tsn=%d", a.name, latest.tsn)
 		a.awakeWriteLoop()
 	}
+	a.rearmT3AfterPTOProbeLocked()
+}
+
+// rearmT3AfterPTOProbeLocked restarts RTO recovery after a loss probe is sent.
+// RFC 8985 section 7.3 requires rearming RTO, not PTO, after the probe.
+// Caller must hold a.lock.
+func (a *Association) rearmT3AfterPTOProbeLocked() {
+	a.t3RTX.stop()
+	a.t3RTX.start(a.rtoMgr.getRTO())
 }
 
 func (a *Association) rackInsert(c *chunkPayloadData) {
