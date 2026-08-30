@@ -3725,9 +3725,11 @@ func (a *Association) resetStreamsIfAny(resetRequest *paramOutgoingResetRequest)
 
 // Move the chunk peeked with a.pendingQueue.peek() to the inflightQueue.
 // The caller should hold the lock.
-func (a *Association) movePendingDataChunkToInflightQueue(chunkPayload *chunkPayloadData) {
+func (a *Association) movePendingDataChunkToInflightQueue(chunkPayload *chunkPayloadData) bool {
 	if err := a.pendingQueue.pop(chunkPayload); err != nil {
 		a.log.Errorf("[%s] failed to pop from pending queue: %s", a.name, err.Error())
+
+		return false
 	}
 
 	if chunkPayload.endingFragment {
@@ -3757,6 +3759,8 @@ func (a *Association) movePendingDataChunkToInflightQueue(chunkPayload *chunkPay
 
 	// RACK: track outstanding original transmissions by send time.
 	a.rackInsert(chunkPayload)
+
+	return true
 }
 
 // popPendingDataChunksToSend pops chunks from the pending queues as many as
@@ -3770,6 +3774,7 @@ func (a *Association) popPendingDataChunksToSend( //nolint:cyclop,gocognit
 ) ([]*chunkPayloadData, []uint16) {
 	chunks := []*chunkPayloadData{}
 	var sisToReset []uint16 // stream indentifiers to reset
+	pendingQueuePopFailed := false
 
 	// track current packet size for MTU bundling so budgeting is accurate.
 	bytesInPacket := 0
@@ -3791,11 +3796,14 @@ func (a *Association) popPendingDataChunksToSend( //nolint:cyclop,gocognit
 
 			dataLen := uint32(len(chunkPayload.userData)) //nolint:gosec // G115
 			if dataLen == 0 {
-				sisToReset = append(sisToReset, chunkPayload.streamIdentifier)
 				err := a.pendingQueue.pop(chunkPayload)
 				if err != nil {
 					a.log.Errorf("failed to pop from pending queue: %s", err.Error())
+					pendingQueuePopFailed = true
+
+					break
 				}
+				sisToReset = append(sisToReset, chunkPayload.streamIdentifier)
 
 				continue
 			}
@@ -3809,6 +3817,7 @@ func (a *Association) popPendingDataChunksToSend( //nolint:cyclop,gocognit
 			}
 
 			chunkBytes := chunkPayload.chunkSizeInPacket()
+			budgetBefore := snapshotBurstBudget(budgetScaled, consumed)
 
 			// ensure MTU bundling matches bundleDataChunksIntoPackets().
 			addBytes := chunkBytes
@@ -3838,25 +3847,33 @@ func (a *Association) popPendingDataChunksToSend( //nolint:cyclop,gocognit
 				}
 			}
 
-			a.setRWND(a.RWND() - dataLen)
+			if !a.movePendingDataChunkToInflightQueue(chunkPayload) {
+				budgetBefore.applyTo(budgetScaled, consumed)
+				pendingQueuePopFailed = true
 
-			a.movePendingDataChunkToInflightQueue(chunkPayload)
+				break
+			}
+			a.setRWND(a.RWND() - dataLen)
 			chunks = append(chunks, chunkPayload)
 			bytesInPacket += chunkBytes
 		}
 
 		// allow one DATA chunk if nothing is inflight to the receiver.
-		if len(chunks) == 0 && a.inflightQueue.size() == 0 {
+		if !pendingQueuePopFailed && len(chunks) == 0 && a.inflightQueue.size() == 0 {
 			// Send zero window probe
 			c := a.pendingQueue.peek()
 			if c != nil && len(c.userData) > 0 {
 				// probe is a new packet: common header + chunk bytes.
 				chunkBytes := c.chunkSizeInPacket()
 				addBytes := int(commonHeaderSize) + chunkBytes
+				budgetBefore := snapshotBurstBudget(budgetScaled, consumed)
 
 				if addBytes <= int(a.MTU()) && a.tlrAllowSendLocked(budgetScaled, consumed, addBytes) {
-					a.movePendingDataChunkToInflightQueue(c)
-					chunks = append(chunks, c)
+					if !a.movePendingDataChunkToInflightQueue(c) {
+						budgetBefore.applyTo(budgetScaled, consumed)
+					} else {
+						chunks = append(chunks, c)
+					}
 				}
 			}
 		}
@@ -4068,6 +4085,36 @@ func (a *Association) getDataPacketsToRetransmit(budgetScaled *int64, consumed *
 	}
 
 	return a.bundleDataChunksIntoPackets(chunks)
+}
+
+type burstBudgetSnapshot struct {
+	budgetScaled   int64
+	consumed       bool
+	hasBudget      bool
+	tracksConsumed bool
+}
+
+func snapshotBurstBudget(budgetScaled *int64, consumed *bool) burstBudgetSnapshot {
+	snapshot := burstBudgetSnapshot{}
+	if budgetScaled != nil {
+		snapshot.budgetScaled = *budgetScaled
+		snapshot.hasBudget = true
+	}
+	if consumed != nil {
+		snapshot.consumed = *consumed
+		snapshot.tracksConsumed = true
+	}
+
+	return snapshot
+}
+
+func (s burstBudgetSnapshot) applyTo(budgetScaled *int64, consumed *bool) {
+	if budgetScaled != nil && s.hasBudget {
+		*budgetScaled = s.budgetScaled
+	}
+	if consumed != nil && s.tracksConsumed {
+		*consumed = s.consumed
+	}
 }
 
 // generateNextTSN returns the myNextTSN and increases it. The caller should hold the lock.
