@@ -3353,24 +3353,26 @@ func (a *Association) handleAbort(c *chunkAbort) error {
 	return fmt.Errorf("[%s] %w: %s", a.name, ErrChunk, errStr.String())
 }
 
-// createForwardTSN generates ForwardTSN chunk.
-// This method will be be called if useForwardTSN is set to false.
+// createForwardTSN generates a FORWARD TSN chunk reporting ordered streams only.
 // The caller should hold the lock.
 func (a *Association) createForwardTSN() *chunkForwardTSN {
-	// RFC 3758 Sec 3.5 C4
+	// RFC 3758: report the highest SSN per ordered stream (3.5 C4); unordered is excluded (3.2).
 	streamMap := map[uint16]uint16{} // to report only once per SI
 	for i := a.cumulativeTSNAckPoint + 1; sna32LTE(i, a.advancedPeerTSNAckPoint); i++ {
-		c, ok := a.inflightQueue.get(i)
+		chunkPayload, ok := a.inflightQueue.get(i)
 		if !ok {
 			break
 		}
+		if chunkPayload.unordered {
+			continue
+		}
 
-		ssn, ok := streamMap[c.streamIdentifier]
+		ssn, ok := streamMap[chunkPayload.streamIdentifier]
 		if !ok {
-			streamMap[c.streamIdentifier] = c.streamSequenceNumber
-		} else if sna16LT(ssn, c.streamSequenceNumber) {
+			streamMap[chunkPayload.streamIdentifier] = chunkPayload.streamSequenceNumber
+		} else if sna16LT(ssn, chunkPayload.streamSequenceNumber) {
 			// to report only once with greatest SSN
-			streamMap[c.streamIdentifier] = c.streamSequenceNumber
+			streamMap[chunkPayload.streamIdentifier] = chunkPayload.streamSequenceNumber
 		}
 	}
 
