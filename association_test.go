@@ -2907,6 +2907,73 @@ func TestCreateForwardTSN(t *testing.T) {
 		assert.True(t, si1OK, "si=1 should be present")
 		assert.True(t, si2OK, "si=2 should be present")
 	})
+
+	t.Run("omit unordered streams", func(t *testing.T) {
+		assoc := createTestAssociation(t, Config{
+			NetConn:       &dumbConn{},
+			LoggerFactory: loggerFactory,
+		})
+
+		assoc.cumulativeTSNAckPoint = 9
+		assoc.advancedPeerTSNAckPoint = 10
+		assoc.inflightQueue.pushNoCheck(&chunkPayloadData{
+			unordered:            true,
+			beginningFragment:    true,
+			endingFragment:       true,
+			tsn:                  10,
+			streamIdentifier:     1,
+			streamSequenceNumber: 42,
+			_abandoned:           true,
+			_allInflight:         true,
+		})
+
+		forwardTSN := assoc.createForwardTSN()
+
+		assert.Equal(t, uint32(10), forwardTSN.newCumulativeTSN)
+		assert.Empty(t, forwardTSN.streams, "unordered DATA has no valid stream sequence number")
+
+		raw, err := forwardTSN.marshal()
+		require.NoError(t, err)
+		assert.Len(t, raw, 8, "a FORWARD TSN without ordered streams only contains its fixed fields")
+
+		decoded := &chunkForwardTSN{}
+		require.NoError(t, decoded.unmarshal(raw))
+		assert.Equal(t, forwardTSN.newCumulativeTSN, decoded.newCumulativeTSN)
+		assert.Empty(t, decoded.streams)
+	})
+
+	t.Run("omit unordered DATA sharing an ordered stream identifier", func(t *testing.T) {
+		assoc := createTestAssociation(t, Config{
+			NetConn:       &dumbConn{},
+			LoggerFactory: loggerFactory,
+		})
+
+		assoc.cumulativeTSNAckPoint = 9
+		assoc.advancedPeerTSNAckPoint = 11
+		assoc.inflightQueue.pushNoCheck(&chunkPayloadData{
+			unordered:            true,
+			beginningFragment:    true,
+			endingFragment:       true,
+			tsn:                  10,
+			streamIdentifier:     1,
+			streamSequenceNumber: 42,
+			_abandoned:           true,
+			_allInflight:         true,
+		})
+		assoc.inflightQueue.pushNoCheck(&chunkPayloadData{
+			beginningFragment:    true,
+			endingFragment:       true,
+			tsn:                  11,
+			streamIdentifier:     1,
+			streamSequenceNumber: 3,
+			_abandoned:           true,
+			_allInflight:         true,
+		})
+
+		forwardTSN := assoc.createForwardTSN()
+
+		require.Equal(t, []chunkForwardTSNStream{{identifier: 1, sequence: 3}}, forwardTSN.streams)
+	})
 }
 
 func TestCreateIForwardTSN(t *testing.T) {
@@ -2942,7 +3009,7 @@ func TestCreateIForwardTSN(t *testing.T) {
 		}}, fwdtsn.streams, "should report the abandoned ordered MID")
 	})
 
-	t.Run("forward ordered and unordered with the same SI", func(t *testing.T) {
+	t.Run("retain ordered and unordered I-FORWARD TSN entries", func(t *testing.T) {
 		assoc := createTestAssociation(t, Config{
 			NetConn:       &dumbConn{},
 			LoggerFactory: loggerFactory,
@@ -3011,6 +3078,7 @@ func TestCreateIForwardTSN(t *testing.T) {
 		fwdtsn := assoc.createIForwardTSN()
 
 		assert.Equal(t, uint32(14), fwdtsn.newCumulativeTSN, "should set new cumulative TSN")
+		// RFC 8260 gives I-FORWARD TSN entries an ordered flag, so the FORWARD TSN exclusion does not apply.
 		assert.ElementsMatch(t, []chunkIForwardTSNStream{
 			{
 				identifier:        1,
