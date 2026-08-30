@@ -502,8 +502,11 @@ func (s *Stream) SetBufferedAmountLowThreshold(th uint64) {
 	s.bufferedAmountLow = th
 }
 
-// OnBufferedAmountLow sets the callback handler which would be called when the number of
-// bytes of outgoing data buffered is lower than the threshold.
+// OnBufferedAmountLow sets the callback invoked when buffered outgoing bytes
+// fall to or below the threshold. Callbacks are asynchronous and serialized per
+// association; slow callbacks delay other streams. Pending crossings are
+// coalesced per stream and use the current handler. Queued callbacks may outlive
+// Association.Close; crossings observed after shutdown begins are discarded.
 func (s *Stream) OnBufferedAmountLow(f func()) {
 	s.lock.Lock()
 	defer s.lock.Unlock()
@@ -511,14 +514,15 @@ func (s *Stream) OnBufferedAmountLow(f func()) {
 	s.onBufferedAmountLow = f
 }
 
-// This method is called by association's readLoop (go-)routine to notify this stream
-// of the specified amount of outgoing data has been delivered to the peer.
-func (s *Stream) onBufferReleased(nBytesReleased int) {
+// releaseBuffer updates the buffered amount and reports whether a threshold
+// crossing with a registered callback should be dispatched.
+func (s *Stream) releaseBuffer(nBytesReleased int) bool {
 	if nBytesReleased <= 0 {
-		return
+		return false
 	}
 
 	s.lock.Lock()
+	defer s.lock.Unlock()
 
 	fromAmount := s.bufferedAmount
 
@@ -533,14 +537,20 @@ func (s *Stream) onBufferReleased(nBytesReleased int) {
 	s.log.Tracef("[%s] bufferedAmount = %d", s.name, s.bufferedAmount)
 
 	if s.onBufferedAmountLow != nil && fromAmount > s.bufferedAmountLow && s.bufferedAmount <= s.bufferedAmountLow {
-		f := s.onBufferedAmountLow
-		s.lock.Unlock()
-		f()
-
-		return
+		return true
 	}
 
-	s.lock.Unlock()
+	return false
+}
+
+func (s *Stream) invokeBufferedAmountLowCallback() {
+	s.lock.RLock()
+	callback := s.onBufferedAmountLow
+	s.lock.RUnlock()
+
+	if callback != nil {
+		callback()
+	}
 }
 
 func (s *Stream) getNumBytesInReassemblyQueue() int {

@@ -66,34 +66,39 @@ func TestSessionBufferedAmount(t *testing.T) {
 		stream.OnBufferedAmountLow(func() {
 			nCbs++
 		})
+		releaseBuffer := func(nBytesReleased int) {
+			if stream.releaseBuffer(nBytesReleased) {
+				stream.invokeBufferedAmountLowCallback()
+			}
+		}
 
 		// Negative value should be ignored (by design)
-		stream.onBufferReleased(-32) // bufferedAmount = 3072
+		releaseBuffer(-32) // bufferedAmount = 3072
 		assert.Equal(t, uint64(4096), stream.BufferedAmount(), "unexpected bufferedAmount")
 		assert.Equal(t, 0, nCbs, "callback count mismatch")
 
 		// Above to above, no callback
-		stream.onBufferReleased(1024) // bufferedAmount = 3072
+		releaseBuffer(1024) // bufferedAmount = 3072
 		assert.Equal(t, uint64(3072), stream.BufferedAmount(), "unexpected bufferedAmount")
 		assert.Equal(t, 0, nCbs, "callback count mismatch")
 
 		// Above to equal, callback should be made
-		stream.onBufferReleased(1024) // bufferedAmount = 2048
+		releaseBuffer(1024) // bufferedAmount = 2048
 		assert.Equal(t, uint64(2048), stream.BufferedAmount(), "unexpected bufferedAmount")
 		assert.Equal(t, 1, nCbs, "callback count mismatch")
 
 		// Eaual to below, no callback
-		stream.onBufferReleased(1024) // bufferedAmount = 1024
+		releaseBuffer(1024) // bufferedAmount = 1024
 		assert.Equal(t, uint64(1024), stream.BufferedAmount(), "unexpected bufferedAmount")
 		assert.Equal(t, 1, nCbs, "callback count mismatch")
 
 		// Blow to below, no callback
-		stream.onBufferReleased(1024) // bufferedAmount = 0
+		releaseBuffer(1024) // bufferedAmount = 0
 		assert.Equal(t, uint64(0), stream.BufferedAmount(), "unexpected bufferedAmount")
 		assert.Equal(t, 1, nCbs, "callback count mismatch")
 
 		// Capped at 0, no callback
-		stream.onBufferReleased(1024) // bufferedAmount = 0
+		releaseBuffer(1024) // bufferedAmount = 0
 		assert.Equal(t, uint64(0), stream.BufferedAmount(), "unexpected bufferedAmount")
 		assert.Equal(t, 1, nCbs, "callback count mismatch")
 	})
