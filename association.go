@@ -355,7 +355,8 @@ type Association struct {
 	closeWriteLoopCh     chan struct{}
 	handshakeCompletedCh chan error
 
-	closeWriteLoopOnce sync.Once
+	closeWriteLoopOnce        sync.Once
+	bufferedAmountLowNotifier *bufferedAmountLowNotifier
 
 	// local error
 	silentError error
@@ -814,38 +815,39 @@ func createAssociationFromConfigWithTsn(cfg *Config, tsn uint32) *Association {
 		myMaxNumOutboundStreams: math.MaxUint16,
 		myMaxNumInboundStreams:  math.MaxUint16,
 
-		payloadQueue:            newReceivePayloadQueue(getMaxTSNOffset(maxReceiveBufferSize)),
-		inflightQueue:           newPayloadQueue(),
-		pendingQueue:            newPendingQueue(interleaving.newStreamScheduler),
-		controlQueue:            newControlQueue(),
-		mtu:                     mtu,
-		maxPayloadSize:          maxPayloadSizeForMTU(mtu, false),
-		myVerificationTag:       generateInitiateTag(),
-		initialTSN:              tsn,
-		myNextTSN:               tsn,
-		myNextRSN:               tsn,
-		minTSN2MeasureRTT:       tsn,
-		state:                   closed,
-		rtoMgr:                  newRTOManager(rtoMax),
-		streams:                 map[uint16]*Stream{},
-		reconfigs:               map[uint32]*chunkReconfig{},
-		reconfigRequests:        map[uint32]*paramOutgoingResetRequest{},
-		acceptCh:                make(chan *Stream, acceptChSize),
-		readLoopCloseCh:         make(chan struct{}),
-		awakeWriteLoopCh:        make(chan struct{}, 1),
-		closeWriteLoopCh:        make(chan struct{}),
-		handshakeCompletedCh:    make(chan error),
-		cumulativeTSNAckPoint:   tsn - 1,
-		advancedPeerTSNAckPoint: tsn - 1,
-		recvZeroChecksum:        cfg.EnableZeroChecksum,
-		localInterleaving:       cfg.enableInterleaving,
-		silentError:             ErrSilentlyDiscard,
-		stats:                   &associationStats{},
-		log:                     cfg.LoggerFactory.NewLogger("sctp"),
-		name:                    cfg.Name,
-		blockWrite:              cfg.BlockWrite,
-		writeNotify:             make(chan struct{}, 1),
-		abortSentCh:             make(chan struct{}),
+		payloadQueue:              newReceivePayloadQueue(getMaxTSNOffset(maxReceiveBufferSize)),
+		inflightQueue:             newPayloadQueue(),
+		pendingQueue:              newPendingQueue(interleaving.newStreamScheduler),
+		controlQueue:              newControlQueue(),
+		mtu:                       mtu,
+		maxPayloadSize:            maxPayloadSizeForMTU(mtu, false),
+		myVerificationTag:         generateInitiateTag(),
+		initialTSN:                tsn,
+		myNextTSN:                 tsn,
+		myNextRSN:                 tsn,
+		minTSN2MeasureRTT:         tsn,
+		state:                     closed,
+		rtoMgr:                    newRTOManager(rtoMax),
+		streams:                   map[uint16]*Stream{},
+		reconfigs:                 map[uint32]*chunkReconfig{},
+		reconfigRequests:          map[uint32]*paramOutgoingResetRequest{},
+		acceptCh:                  make(chan *Stream, acceptChSize),
+		readLoopCloseCh:           make(chan struct{}),
+		awakeWriteLoopCh:          make(chan struct{}, 1),
+		closeWriteLoopCh:          make(chan struct{}),
+		handshakeCompletedCh:      make(chan error),
+		cumulativeTSNAckPoint:     tsn - 1,
+		advancedPeerTSNAckPoint:   tsn - 1,
+		recvZeroChecksum:          cfg.EnableZeroChecksum,
+		localInterleaving:         cfg.enableInterleaving,
+		silentError:               ErrSilentlyDiscard,
+		stats:                     &associationStats{},
+		log:                       cfg.LoggerFactory.NewLogger("sctp"),
+		name:                      cfg.Name,
+		blockWrite:                cfg.BlockWrite,
+		writeNotify:               make(chan struct{}, 1),
+		abortSentCh:               make(chan struct{}),
+		bufferedAmountLowNotifier: newBufferedAmountLowNotifier(),
 	}
 
 	// adaptive burst mitigation defaults
@@ -1062,6 +1064,7 @@ func (a *Association) close() error {
 	a.log.Debugf("[%s] closing association..", a.name)
 
 	a.setState(closed)
+	a.closeBufferedAmountLowNotifier()
 
 	err := a.closeNetConn()
 
@@ -1071,6 +1074,17 @@ func (a *Association) close() error {
 	a.closeWriteLoopOnce.Do(func() { close(a.closeWriteLoopCh) })
 
 	return err
+}
+
+func (a *Association) releaseStreamBuffer(stream *Stream, nBytesReleased int) {
+	if !stream.releaseBuffer(nBytesReleased) {
+		return
+	}
+	a.bufferedAmountLowNotifier.notify(stream)
+}
+
+func (a *Association) closeBufferedAmountLowNotifier() {
+	a.bufferedAmountLowNotifier.close()
 }
 
 func (a *Association) closeNetConn() error {
@@ -1148,6 +1162,7 @@ func (a *Association) readLoop() {
 		}
 		a.unblockPendingWrites()
 		a.lock.Unlock()
+		a.closeBufferedAmountLowNotifier()
 		close(a.acceptCh)
 		close(a.readLoopCloseCh)
 
@@ -3032,9 +3047,7 @@ func (a *Association) processAcknowledgement(
 
 	for si, nBytesAcked := range bytesAckedPerStream {
 		if s, ok := a.streams[si]; ok {
-			a.lock.Unlock()
-			s.onBufferReleased(nBytesAcked)
-			a.lock.Lock()
+			a.releaseStreamBuffer(s, nBytesAcked)
 		}
 	}
 

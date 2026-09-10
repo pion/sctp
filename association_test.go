@@ -1116,6 +1116,7 @@ func TestAssociationShutdownProcessesCumulativeTSNAck(t *testing.T) {
 
 func TestAssociationShutdownRejectsBufferedAmountLowWrite(t *testing.T) {
 	assoc := createTestAssociation(t, Config{})
+	t.Cleanup(assoc.closeBufferedAmountLowNotifier)
 	assoc.cumulativeTSNAckPoint = 99
 	assoc.advancedPeerTSNAckPoint = 99
 	assoc.setState(established)
@@ -1124,14 +1125,15 @@ func TestAssociationShutdownRejectsBufferedAmountLowWrite(t *testing.T) {
 	require.NotNil(t, stream)
 	stream.bufferedAmount = 1
 
-	callbackCalled := false
-	callbackN := 0
-	var callbackErr error
-	var callbackState uint32
+	type callbackResult struct {
+		n     int
+		err   error
+		state uint32
+	}
+	callbackResultCh := make(chan callbackResult, 1)
 	stream.OnBufferedAmountLow(func() {
-		callbackCalled = true
-		callbackState = assoc.getState()
-		callbackN, callbackErr = stream.WriteSCTP([]byte("must be rejected"), PayloadTypeWebRTCBinary)
+		n, err := stream.WriteSCTP([]byte("must be rejected"), PayloadTypeWebRTCBinary)
+		callbackResultCh <- callbackResult{n: n, err: err, state: assoc.getState()}
 	})
 
 	assoc.inflightQueue.pushNoCheck(mkChunk(100, time.Now()))
@@ -1141,15 +1143,200 @@ func TestAssociationShutdownRejectsBufferedAmountLowWrite(t *testing.T) {
 	assoc.lock.Unlock()
 
 	require.NoError(t, err)
-	require.True(t, callbackCalled)
-	assert.Equal(t, shutdownReceived, callbackState)
-	assert.Zero(t, callbackN)
-	assert.ErrorIs(t, callbackErr, ErrPayloadDataStateNotExist)
+	var callback callbackResult
+	select {
+	case callback = <-callbackResultCh:
+	case <-time.After(time.Second):
+		require.FailNow(t, "buffered amount low callback was not called")
+	}
+	assert.Equal(t, shutdownAckSent, callback.state)
+	assert.Zero(t, callback.n)
+	assert.ErrorIs(t, callback.err, ErrPayloadDataStateNotExist)
 	assert.Zero(t, stream.BufferedAmount())
 	assert.Zero(t, assoc.inflightQueue.size())
 	assert.Zero(t, assoc.pendingQueue.size())
 	assert.Equal(t, shutdownAckSent, assoc.getState())
 	assert.True(t, assoc.willSendShutdownAck)
+}
+
+func TestAssociationBufferedAmountLowCallbacksAreSerialized(t *testing.T) {
+	assoc := createTestAssociation(t, Config{})
+	firstStream := assoc.createStream(1, false)
+	secondStream := assoc.createStream(2, false)
+	for _, stream := range []*Stream{firstStream, secondStream} {
+		stream.bufferedAmount = 1
+	}
+
+	firstStarted := make(chan struct{})
+	firstReleaseCh := make(chan struct{})
+	releaseFirst := sync.OnceFunc(func() { close(firstReleaseCh) })
+	t.Cleanup(releaseFirst)
+	secondStarted := make(chan struct{})
+	firstStream.OnBufferedAmountLow(func() {
+		close(firstStarted)
+		<-firstReleaseCh
+	})
+	secondStream.OnBufferedAmountLow(func() {
+		close(secondStarted)
+	})
+
+	assoc.releaseStreamBuffer(firstStream, 1)
+	requireChannelSignal(t, firstStarted, "first callback was not called")
+
+	assoc.releaseStreamBuffer(secondStream, 1)
+	requireNoChannelSignal(t, secondStarted, 20*time.Millisecond, "callbacks ran concurrently")
+
+	releaseFirst()
+	requireChannelSignal(t, secondStarted, "second callback was not called")
+}
+
+func TestAssociationBufferedAmountLowNotifierCloseIsIdempotent(t *testing.T) {
+	assoc := createTestAssociation(t, Config{})
+
+	require.NotPanics(t, func() {
+		assoc.closeBufferedAmountLowNotifier()
+		assoc.closeBufferedAmountLowNotifier()
+	})
+	assoc.bufferedAmountLowNotifier.wait()
+}
+
+func TestAssociationBufferedAmountLowNotifierRejectsCallbacksAfterClose(t *testing.T) {
+	assoc := createTestAssociation(t, Config{})
+	stream := assoc.createStream(1, false)
+	stream.bufferedAmount = 1
+	callbackCalled := make(chan struct{}, 1)
+	stream.OnBufferedAmountLow(func() {
+		callbackCalled <- struct{}{}
+	})
+
+	assoc.closeBufferedAmountLowNotifier()
+	assoc.releaseStreamBuffer(stream, 1)
+	assoc.bufferedAmountLowNotifier.wait()
+	requireNoChannelSignal(t, callbackCalled, 0, "callback submitted after close was called")
+}
+
+func TestAssociationBufferedAmountLowCallbacksAreCoalescedPerStream(t *testing.T) {
+	assoc := createTestAssociation(t, Config{})
+	blockingStream := assoc.createStream(1, false)
+	queuedStream := assoc.createStream(2, false)
+	blockingStream.bufferedAmount = 1
+
+	blockingStarted := make(chan struct{})
+	blockingReleaseCh := make(chan struct{})
+	releaseBlocking := sync.OnceFunc(func() { close(blockingReleaseCh) })
+	t.Cleanup(releaseBlocking)
+	queuedCallbacks := make(chan int, 2)
+	blockingStream.OnBufferedAmountLow(func() {
+		close(blockingStarted)
+		<-blockingReleaseCh
+	})
+	assoc.releaseStreamBuffer(blockingStream, 1)
+	requireChannelSignal(t, blockingStarted, "blocking callback was not called")
+
+	queuedStream.OnBufferedAmountLow(func() {
+		queuedCallbacks <- 1
+	})
+	assoc.bufferedAmountLowNotifier.notify(queuedStream)
+	queuedStream.OnBufferedAmountLow(func() {
+		queuedCallbacks <- 2
+	})
+	assoc.bufferedAmountLowNotifier.notify(queuedStream)
+	releaseBlocking()
+
+	select {
+	case callback := <-queuedCallbacks:
+		assert.Equal(t, 2, callback, "the latest handler must receive the coalesced crossing")
+	case <-time.After(time.Second):
+		require.FailNow(t, "queued callback was not called")
+	}
+	select {
+	case <-queuedCallbacks:
+		require.FailNow(t, "duplicate callback was not coalesced")
+	case <-time.After(20 * time.Millisecond):
+	}
+}
+
+func TestAssociationBufferedAmountLowQueuedCallbackHonorsHandlerRemoval(t *testing.T) {
+	assoc := createTestAssociation(t, Config{})
+	blockingStream := assoc.createStream(1, false)
+	queuedStream := assoc.createStream(2, false)
+	drainStream := assoc.createStream(3, false)
+	blockingStream.bufferedAmount = 1
+	queuedStream.bufferedAmount = 1
+	drainStream.bufferedAmount = 1
+
+	blockingStarted := make(chan struct{})
+	blockingReleaseCh := make(chan struct{})
+	releaseBlocking := sync.OnceFunc(func() { close(blockingReleaseCh) })
+	t.Cleanup(releaseBlocking)
+	blockingStream.OnBufferedAmountLow(func() {
+		close(blockingStarted)
+		<-blockingReleaseCh
+	})
+	assoc.releaseStreamBuffer(blockingStream, 1)
+	requireChannelSignal(t, blockingStarted, "blocking callback was not called")
+
+	removedHandlerCalled := make(chan struct{}, 1)
+	queuedStream.OnBufferedAmountLow(func() {
+		removedHandlerCalled <- struct{}{}
+	})
+	assoc.releaseStreamBuffer(queuedStream, 1)
+	queuedStream.OnBufferedAmountLow(nil)
+	notifierDrained := make(chan struct{})
+	drainStream.OnBufferedAmountLow(func() { close(notifierDrained) })
+	assoc.releaseStreamBuffer(drainStream, 1)
+	releaseBlocking()
+
+	requireChannelSignal(t, notifierDrained, "notifier did not process the queued callback")
+	requireNoChannelSignal(t, removedHandlerCalled, 0, "removed handler was called")
+}
+
+func TestAssociationBufferedAmountLowCallbackCanFireAgain(t *testing.T) {
+	assoc := createTestAssociation(t, Config{})
+	stream := assoc.createStream(1, false)
+	stream.SetBufferedAmountLowThreshold(1)
+	callbacks := make(chan struct{}, 2)
+	stream.OnBufferedAmountLow(func() {
+		callbacks <- struct{}{}
+	})
+
+	for range 2 {
+		stream.lock.Lock()
+		stream.bufferedAmount = 2
+		stream.lock.Unlock()
+		assoc.releaseStreamBuffer(stream, 1)
+		requireChannelSignal(t, callbacks, "callback was not called after a new threshold crossing")
+	}
+}
+
+func requireChannelSignal(t *testing.T, signal <-chan struct{}, message string) {
+	t.Helper()
+
+	select {
+	case <-signal:
+	case <-time.After(time.Second):
+		require.FailNow(t, message)
+	}
+}
+
+func requireNoChannelSignal(t *testing.T, signal <-chan struct{}, timeout time.Duration, message string) {
+	t.Helper()
+
+	if timeout == 0 {
+		select {
+		case <-signal:
+			require.FailNow(t, message)
+		default:
+		}
+
+		return
+	}
+
+	select {
+	case <-signal:
+		require.FailNow(t, message)
+	case <-time.After(timeout):
+	}
 }
 
 func TestAssociationShutdownUnblocksPendingWrites(t *testing.T) {
@@ -2812,6 +2999,10 @@ func createTestAssociationWithOptions(t *testing.T, cfg Config, opts ...Associat
 
 	a, err := createServerAssociation(serverOpts...)
 	require.NoError(t, err)
+	t.Cleanup(func() {
+		a.closeBufferedAmountLowNotifier()
+		a.bufferedAmountLowNotifier.wait()
+	})
 
 	return a
 }
