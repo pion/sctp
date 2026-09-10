@@ -7750,3 +7750,67 @@ func TestAssociationSNAPInterleavingNegotiationPayloadChunkType(t *testing.T) {
 		})
 	}
 }
+
+func TestSelectiveAckMTU(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		mtu            uint32
+		gaps           int
+		duplicates     int
+		wantGaps       int
+		wantDuplicates int
+	}{
+		{"scattered loss", 1228, 4500, 0, 300, 0},
+		{"gaps take priority", 1228, 4500, 500, 300, 0},
+		{"duplicates fill remainder", 1228, 299, 500, 299, 1},
+		{"duplicates only", 1228, 0, 500, 0, 300},
+		{"exact fit", 1228, 300, 0, 300, 0},
+		{"unaligned MTU", 1191, 4500, 0, 290, 0},
+		{"small MTU", 36, 20, 20, 2, 0},
+		{"all entries fit", 1228, 3, 2, 3, 2},
+		{"empty", 1228, 0, 0, 0, 0},
+		{"chunk length limit", 100000, 0, 20000, 0, 16379},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			queue := newReceivePayloadQueue(16384)
+			cumulativeTSN := uint32(0xfffffff0)
+			queue.init(cumulativeTSN)
+			for i := 1; i <= tc.gaps; i++ {
+				require.True(t, queue.push(cumulativeTSN+uint32(2*i))) //nolint:gosec // G115
+			}
+			for i := 0; i < tc.duplicates; i++ {
+				require.False(t, queue.push(cumulativeTSN))
+			}
+			assoc := &Association{
+				mtu:                  tc.mtu,
+				payloadQueue:         queue,
+				maxReceiveBufferSize: 24 * 1024 * 1024,
+				ackState:             ackStateImmediate,
+				stats:                &associationStats{},
+				log:                  logging.NewDefaultLoggerFactory().NewLogger("sctp-test"),
+			}
+			rawPackets := assoc.gatherOutboundSackPackets(nil)
+			require.Len(t, rawPackets, 1)
+			require.LessOrEqual(t, len(rawPackets[0]), int(tc.mtu))
+			var decoded packet
+			require.NoError(t, decoded.unmarshal(true, rawPackets[0]))
+			require.Len(t, decoded.chunks, 1)
+			sack, ok := decoded.chunks[0].(*chunkSelectiveAck)
+			require.True(t, ok)
+			require.Len(t, sack.gapAckBlocks, tc.wantGaps)
+			require.Len(t, sack.duplicateTSN, tc.wantDuplicates)
+			require.Equal(t, cumulativeTSN, sack.cumulativeTSNAck)
+			require.Equal(t, assoc.maxReceiveBufferSize, sack.advertisedReceiverWindowCredit)
+			for i, block := range sack.gapAckBlocks {
+				offset := uint16(2 * (i + 1)) //nolint:gosec // G115
+				require.Equal(t, gapAckBlock{start: offset, end: offset}, block)
+			}
+			for _, duplicate := range sack.duplicateTSN {
+				require.Equal(t, cumulativeTSN, duplicate)
+			}
+			require.Empty(t, queue.popDuplicates())
+			require.Equal(t, tc.gaps, queue.size())
+			require.Len(t, queue.getGapAckBlocks(queue.size()), tc.gaps)
+		})
+	}
+}

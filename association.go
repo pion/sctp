@@ -4094,8 +4094,19 @@ func (a *Association) createSelectiveAckChunk() *chunkSelectiveAck {
 	sack := &chunkSelectiveAck{}
 	sack.cumulativeTSNAck = a.peerLastTSN()
 	sack.advertisedReceiverWindowCredit = a.getMyReceiverWindowCredit()
-	sack.duplicateTSN = a.payloadQueue.popDuplicates()
-	sack.gapAckBlocks = a.payloadQueue.getGapAckBlocks()
+	const headerSize = commonHeaderSize + chunkHeaderSize + selectiveAckHeaderSize
+	maxEntries := 0
+	if mtu := a.MTU(); mtu > headerSize {
+		// Chunk Length: 16 bits
+		// https://www.rfc-editor.org/rfc/rfc9260.html#section-3.2
+		// "Gap Ack Block Start: 16 bits"
+		// "Gap Ack Block End: 16 bits", and "Duplicate TSN: 32 bits.
+		// https://www.rfc-editor.org/rfc/rfc9260.html#section-3.3.4
+		maxEntries = int(min(mtu-headerSize, 65535-chunkHeaderSize-selectiveAckHeaderSize) / 4)
+	}
+	sack.gapAckBlocks = a.payloadQueue.getGapAckBlocks(maxEntries)
+	duplicates := a.payloadQueue.popDuplicates()
+	sack.duplicateTSN = duplicates[:min(len(duplicates), maxEntries-len(sack.gapAckBlocks))]
 
 	return sack
 }
