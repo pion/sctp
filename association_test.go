@@ -7173,6 +7173,188 @@ func TestTLR_PopPendingDataChunksToSend_RespectsBurstBudget_FirstRTT_OnePacketPe
 	assert.Equal(t, int64(0), budget)
 }
 
+type failingPopStreamScheduler struct {
+	chunks   []StreamSchedulerChunk
+	popCalls int
+	failOn   int
+}
+
+func (s *failingPopStreamScheduler) Reset() {
+	clear(s.chunks)
+	s.chunks = nil
+	s.popCalls = 0
+}
+
+func (s *failingPopStreamScheduler) Push(chunk StreamSchedulerChunk) {
+	s.chunks = append(s.chunks, chunk)
+}
+
+func (s *failingPopStreamScheduler) Peek() StreamSchedulerChunk {
+	if len(s.chunks) == 0 {
+		return nil
+	}
+
+	return s.chunks[0]
+}
+
+func (s *failingPopStreamScheduler) Pop(chunk StreamSchedulerChunk) error {
+	s.popCalls++
+	if s.failOn == 0 || s.popCalls == s.failOn {
+		return ErrUnexpectedQState
+	}
+	if len(s.chunks) == 0 || s.chunks[0].chunkPayloadData() != chunk.chunkPayloadData() {
+		return ErrUnexpectedChunkPoppedStream
+	}
+	s.chunks[0] = nil
+	s.chunks = s.chunks[1:]
+
+	return nil
+}
+
+func TestPopPendingDataChunksToSend_DoesNotSendAfterDataPopFailure(t *testing.T) {
+	lim := test.TimeOut(time.Second)
+	defer lim.Stop()
+
+	assoc := newRackTestAssoc(t)
+	scheduler := &failingPopStreamScheduler{}
+	assoc.pendingQueue = newPendingQueue(func() InterleavingStreamScheduler {
+		return scheduler
+	})
+	require.NoError(t, assoc.pendingQueue.setInterleaving(true))
+	assoc.setCWND(assoc.MTU())
+	assoc.setRWND(assoc.MTU())
+	assoc.tlrActive = true
+
+	pending := mkChunk(0, time.Time{})
+	pending.tsn = 0
+	pending.nSent = 0
+	assoc.pendingQueue.push(pending)
+	nextTSN := assoc.myNextTSN
+	initialRWND := assoc.RWND()
+	budget := int64(assoc.MTU()) * tlrUnitsPerMTU
+	initialBudget := budget
+	consumed := false
+
+	chunks, streamsToReset := assoc.popPendingDataChunksToSend(&budget, &consumed)
+
+	assert.Empty(t, chunks)
+	assert.Empty(t, streamsToReset)
+	assert.Equal(t, 1, assoc.pendingQueue.size(), "failed pop must leave the pending chunk in place")
+	assert.Zero(t, assoc.inflightQueue.size(), "failed pop must not send DATA")
+	assert.Equal(t, nextTSN, assoc.myNextTSN, "failed pop must not consume a TSN")
+	assert.Equal(t, initialRWND, assoc.RWND(), "failed pop must not consume receiver window")
+	assert.Zero(t, pending.nSent)
+	assert.Equal(t, 1, scheduler.popCalls, "a failed pop must suppress a zero-window probe retry")
+	assert.Equal(t, initialBudget, budget, "failed pop must restore burst budget")
+	assert.False(t, consumed, "failed pop must restore burst consumption state")
+}
+
+func TestPopPendingDataChunksToSend_RestoresBudgetAfterProbePopFailure(t *testing.T) {
+	lim := test.TimeOut(time.Second)
+	defer lim.Stop()
+
+	assoc := newRackTestAssoc(t)
+	scheduler := &failingPopStreamScheduler{}
+	assoc.pendingQueue = newPendingQueue(func() InterleavingStreamScheduler {
+		return scheduler
+	})
+	require.NoError(t, assoc.pendingQueue.setInterleaving(true))
+	assoc.setCWND(assoc.MTU())
+	assoc.setRWND(0)
+	assoc.tlrActive = true
+
+	pending := mkChunk(0, time.Time{})
+	pending.tsn = 0
+	pending.nSent = 0
+	assoc.pendingQueue.push(pending)
+	budget := int64(assoc.MTU()) * tlrUnitsPerMTU
+	initialBudget := budget
+	consumed := false
+
+	chunks, streamsToReset := assoc.popPendingDataChunksToSend(&budget, &consumed)
+
+	assert.Empty(t, chunks)
+	assert.Empty(t, streamsToReset)
+	assert.Equal(t, 1, assoc.pendingQueue.size(), "failed probe pop must leave the chunk pending")
+	assert.Zero(t, assoc.inflightQueue.size())
+	assert.Equal(t, 1, scheduler.popCalls)
+	assert.Equal(t, initialBudget, budget, "failed probe pop must restore burst budget")
+	assert.False(t, consumed, "failed probe pop must restore burst consumption state")
+}
+
+func TestPopPendingDataChunksToSend_DoesNotResetAfterMarkerPopFailure(t *testing.T) {
+	lim := test.TimeOut(time.Second)
+	defer lim.Stop()
+
+	assoc := newRackTestAssoc(t)
+	scheduler := &failingPopStreamScheduler{}
+	assoc.pendingQueue = newPendingQueue(func() InterleavingStreamScheduler {
+		return scheduler
+	})
+	require.NoError(t, assoc.pendingQueue.setInterleaving(true))
+
+	resetMarker := &chunkPayloadData{
+		streamIdentifier:  1,
+		beginningFragment: true,
+		endingFragment:    true,
+	}
+	assoc.pendingQueue.push(resetMarker)
+
+	chunks, streamsToReset := assoc.popPendingDataChunksToSend(nil, nil)
+
+	assert.Empty(t, chunks)
+	assert.Empty(t, streamsToReset, "failed pop must not initiate a stream reset")
+	assert.Equal(t, 1, assoc.pendingQueue.size())
+	assert.Equal(t, 1, scheduler.popCalls, "a failed marker pop must stop the selection pass")
+}
+
+func TestPopPendingDataChunksToSend_PreservesProgressBeforeLaterPopFailure(t *testing.T) {
+	lim := test.TimeOut(time.Second)
+	defer lim.Stop()
+
+	assoc := newRackTestAssoc(t)
+	scheduler := &failingPopStreamScheduler{failOn: 2}
+	assoc.pendingQueue = newPendingQueue(func() InterleavingStreamScheduler {
+		return scheduler
+	})
+	require.NoError(t, assoc.pendingQueue.setInterleaving(true))
+	assoc.setCWND(2 * assoc.MTU())
+	assoc.setRWND(2 * assoc.MTU())
+	assoc.tlrActive = true
+
+	first := mkChunk(0, time.Time{})
+	first.tsn = 0
+	first.nSent = 0
+	second := mkChunk(0, time.Time{})
+	second.tsn = 0
+	second.nSent = 0
+	assoc.pendingQueue.push(first)
+	assoc.pendingQueue.push(second)
+
+	nextTSN := assoc.myNextTSN
+	initialRWND := assoc.RWND()
+	budget := int64(2*assoc.MTU()) * tlrUnitsPerMTU
+	initialBudget := budget
+	consumed := false
+
+	chunks, streamsToReset := assoc.popPendingDataChunksToSend(&budget, &consumed)
+
+	require.Equal(t, []*chunkPayloadData{first}, chunks)
+	assert.Empty(t, streamsToReset)
+	assert.Equal(t, 1, assoc.pendingQueue.size(), "failed chunk must remain pending")
+	assert.Equal(t, 1, assoc.inflightQueue.size(), "successful chunk must remain in flight")
+	assert.Equal(t, nextTSN, first.tsn)
+	assert.Equal(t, uint32(1), first.nSent)
+	assert.Zero(t, second.tsn)
+	assert.Zero(t, second.nSent)
+	assert.Equal(t, nextTSN+1, assoc.myNextTSN, "only the successful pop may consume a TSN")
+	assert.Equal(t, initialRWND-uint32(len(first.userData)), assoc.RWND()) //nolint:gosec // G115
+	expectedBudget := initialBudget - int64(int(commonHeaderSize)+first.chunkSizeInPacket())*tlrUnitsPerMTU
+	assert.Equal(t, expectedBudget, budget, "only the successful pop may consume burst budget")
+	assert.True(t, consumed)
+	assert.Equal(t, 2, scheduler.popCalls)
+}
+
 func TestTLR_GetDataPacketsToRetransmit_RespectsBurstBudget_LaterRTT(t *testing.T) {
 	assoc, peer := newTLRAssociationForTest(t)
 	defer shutdownTLRAssociationForTest(assoc, peer)
