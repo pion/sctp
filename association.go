@@ -306,6 +306,7 @@ type Association struct {
 	maxReceiveBufferSize      uint32
 	maxMessageSize            uint32
 	maxReassemblyQueueEntries uint32
+	discardInboundAfterClose  bool
 	cwnd                      uint32 // my congestion window size
 	rwnd                      uint32 // calculated peer's receiver windows size
 	ssthresh                  uint32 // slow start threshold
@@ -426,6 +427,9 @@ type Config struct {
 
 	// Reassembly queue config options
 	maxReassemblyQueueEntries uint32
+
+	// Discard inbound data of streams the application has closed
+	discardInboundAfterClose bool
 
 	// SNAP/sctp-init
 	snapConfig *snapConfig
@@ -601,6 +605,9 @@ func (c Config) applyServer(cfg *Config) error { //nolint:dupl,cyclop
 	if c.maxReassemblyQueueEntries != 0 {
 		cfg.maxReassemblyQueueEntries = c.maxReassemblyQueueEntries
 	}
+	if c.discardInboundAfterClose {
+		cfg.discardInboundAfterClose = true
+	}
 	if c.RTOMax != 0 {
 		cfg.RTOMax = c.RTOMax
 	}
@@ -720,6 +727,9 @@ func (c Config) applyClient(cfg *Config) error { //nolint:dupl,cyclop
 	if c.maxReassemblyQueueEntries != 0 {
 		cfg.maxReassemblyQueueEntries = c.maxReassemblyQueueEntries
 	}
+	if c.discardInboundAfterClose {
+		cfg.discardInboundAfterClose = true
+	}
 	if c.RTOMax != 0 {
 		cfg.RTOMax = c.RTOMax
 	}
@@ -807,6 +817,7 @@ func createAssociationFromConfigWithTsn(cfg *Config, tsn uint32) *Association {
 		maxReceiveBufferSize:      maxReceiveBufferSize,
 		maxMessageSize:            maxMessageSize,
 		maxReassemblyQueueEntries: cfg.maxReassemblyQueueEntries,
+		discardInboundAfterClose:  cfg.discardInboundAfterClose,
 		minCwnd:                   cfg.MinCwnd,
 		fastRtxWnd:                cfg.FastRtxWnd,
 		cwndCAStep:                cfg.CwndCAStep,
@@ -2562,6 +2573,21 @@ func (a *Association) handlePeerLastTSNAndAcknowledgement(sackImmediately bool) 
 	a.immediateAckTriggered = true
 
 	return reply
+}
+
+// onReceiveWindowOpened sends a SACK advertising the new receive window after
+// queued data was dropped without the application reading it. The peer may
+// otherwise only learn about it from its next zero window probe.
+func (a *Association) onReceiveWindowOpened() {
+	a.lock.Lock()
+	defer a.lock.Unlock()
+
+	if !isDataReceiveState(a.getState()) {
+		return
+	}
+	a.ackState = ackStateImmediate
+	a.ackTimer.stop()
+	a.awakeWriteLoop()
 }
 
 // The caller should hold the lock.

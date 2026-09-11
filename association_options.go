@@ -146,6 +146,21 @@ func WithMaxReassemblyQueueEntries(maxEntries uint32) AssociationOption {
 	})
 }
 
+// WithDiscardInboundAfterClose sets whether Stream.Close also discards the
+// stream's inbound data, both queued and arriving later, instead of keeping
+// it for Read until the peer resets its outgoing stream. Reads still return
+// io.EOF once the peer's reset arrives. This matches WebRTC data channels,
+// which discard messages received once the channel is no longer open, and
+// keeps unread data of closed streams from holding the receive window. By
+// default this is false and Close only closes the write direction.
+func WithDiscardInboundAfterClose(b bool) AssociationOption {
+	return sharedOption(func(c *Config) error {
+		c.discardInboundAfterClose = b
+
+		return nil
+	})
+}
+
 // WithRTOMax sets the max retransmission timeout in ms for the association.
 func WithRTOMax(rtoMax float64) AssociationOption {
 	return sharedOption(func(c *Config) error {
