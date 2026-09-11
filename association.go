@@ -3771,7 +3771,13 @@ func (a *Association) completeOutgoingStreamReset(reconfigRequestSequenceNumber 
 		return
 	}
 	for _, id := range resetRequest.streamIdentifiers {
-		if s, ok := a.streams[id]; ok {
+		// Outgoing resets are only requested by Stream.Close, so the stream
+		// that asked for this one is no longer open. An open stream under the
+		// same identifier is a new generation: the peer may already have seen
+		// the reset complete in both directions and reused the identifier
+		// before this response arrived. Resetting that stream would make it
+		// repeat SSNs/MIDs the peer has already delivered.
+		if s, ok := a.streams[id]; ok && s.State() != StreamStateOpen {
 			s.resetOutgoingStreamSequenceNumbers()
 		}
 		a.completeStreamResetDirection(id, streamResetOutbound)
