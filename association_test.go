@@ -6663,7 +6663,7 @@ func TestFastRecoveryExitOnAckedExitPoint(t *testing.T) {
 	assoc.fastRecoverExitPoint = 101
 
 	assoc.lock.Lock()
-	_, _, _, _, _, err := assoc.processSelectiveAck(&chunkSelectiveAck{ //nolint:dogsled
+	_, _, _, _, _, _, err := assoc.processSelectiveAck(&chunkSelectiveAck{ //nolint:dogsled
 		cumulativeTSNAck: 101,
 	})
 	exited := !assoc.inFastRecovery

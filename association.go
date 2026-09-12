@@ -19,6 +19,7 @@ import (
 
 	"github.com/pion/logging"
 	"github.com/pion/randutil"
+	"github.com/pion/sctp/cc_alg"
 	"github.com/pion/transport/v4/deadline"
 )
 
@@ -388,6 +389,8 @@ type Association struct {
 
 	tlrGoodOps   uint32    // count of TLR ops completed w/o additional loss
 	tlrStartTime time.Time // time of first recovery RTT
+
+	CC1 CongestionController
 }
 
 type snapConfig struct {
@@ -802,6 +805,7 @@ func createAssociationFromConfigWithTsn(cfg *Config, tsn uint32) *Association {
 		setWeightedFairQueueingStreamScheduler(interleaving)
 	}
 
+	cc1 := cc_alg.CreateReno(cfg.CwndCAStep)
 	assoc := &Association{
 		netConn:                   cfg.NetConn,
 		maxReceiveBufferSize:      maxReceiveBufferSize,
@@ -846,6 +850,8 @@ func createAssociationFromConfigWithTsn(cfg *Config, tsn uint32) *Association {
 		blockWrite:              cfg.BlockWrite,
 		writeNotify:             make(chan struct{}, 1),
 		abortSentCh:             make(chan struct{}),
+
+		CC1: &cc1,
 	}
 
 	// adaptive burst mitigation defaults
@@ -1327,6 +1333,8 @@ func (a *Association) handleInbound(raw []byte) error {
 		return nil
 	}
 
+	a.lock.Lock()
+	defer a.lock.Unlock()
 	a.handleChunksStart()
 
 	for _, c := range pkt.chunks {
@@ -1453,13 +1461,15 @@ func (a *Association) gatherOutboundFastRetransmissionPackets( //nolint:gocognit
 
 	toFastRetrans := []*chunkPayloadData{}
 	fastRetransSize := int(commonHeaderSize)
-	fastRetransWnd := int(max(a.MTU(), a.fastRtxWnd))
+	//fastRetransWnd := int(max(a.MTU(), a.fastRtxWnd))
 	now := time.Now()
 
 	// MTU bundling + burst budgeting tracker
-	bytesInPacket := 0
-	stopBundling := false
+	/*bytesInPacket := 0
+	stopBundling := false*/
 
+	totalBytes := uint32(0)
+	srtt := time.Duration(a.SRTT()*1000.0) * time.Microsecond
 	for i := 0; ; i++ {
 		chunkPayload, ok := a.inflightQueue.get(a.cumulativeTSNAckPoint + uint32(i) + 1) //nolint:gosec // G115
 		if !ok {
@@ -1486,13 +1496,23 @@ func (a *Association) gatherOutboundFastRetransmissionPackets( //nolint:gocognit
 
 		chunkBytes := chunkPayload.chunkSizeInPacket()
 
+		dataLen := uint32(len(chunkPayload.userData))
+
 		// fast retransmit window cap
-		if fastRetransWnd < fastRetransSize+chunkBytes {
+		/*if fastRetransWnd < fastRetransSize+chunkBytes {
+			break
+		}*/
+		canSend, next := a.CC1.CanSend(totalBytes+dataLen, srtt)
+		if !canSend {
+			time.AfterFunc(next.Sub(now), func() {
+				a.awakeWriteLoop()
+			})
 			break
 		}
+		totalBytes += dataLen
 
 		// MTU bundling + burst budget before mutating
-		for {
+		/*for {
 			addBytes := chunkBytes
 
 			if bytesInPacket == 0 {
@@ -1509,13 +1529,6 @@ func (a *Association) gatherOutboundFastRetransmissionPackets( //nolint:gocognit
 				continue
 			}
 
-			if !a.tlrAllowSendLocked(budgetScaled, consumed, addBytes) {
-				// budget exhausted, stop selecting any more fast-rtx chunks
-				stopBundling = true
-
-				break
-			}
-
 			if bytesInPacket == 0 {
 				bytesInPacket = int(commonHeaderSize)
 			}
@@ -1526,7 +1539,7 @@ func (a *Association) gatherOutboundFastRetransmissionPackets( //nolint:gocognit
 
 		if stopBundling {
 			break
-		}
+		}*/
 
 		fastRetransSize += chunkBytes
 		a.stats.incFastRetrans()
@@ -1556,6 +1569,7 @@ func (a *Association) gatherOutboundFastRetransmissionPackets( //nolint:gocognit
 		}
 		rawPackets = append(rawPackets, raw)
 	}
+	a.CC1.OnSend(totalBytes, true)
 
 	return rawPackets
 }
@@ -1749,8 +1763,8 @@ func (a *Association) gatherOutbound() ([][]byte, bool) {
 		consumed := false
 
 		rawPackets = a.gatherDataPacketsToRetransmit(rawPackets, &budgetUnits, &consumed)
-		rawPackets = a.gatherOutboundDataAndReconfigPackets(rawPackets, &budgetUnits, &consumed)
 		rawPackets = a.gatherOutboundFastRetransmissionPackets(rawPackets, &budgetUnits, &consumed)
+		rawPackets = a.gatherOutboundDataAndReconfigPackets(rawPackets, &budgetUnits, &consumed)
 
 		// control traffic shouldn't be limited.
 		rawPackets = a.gatherOutboundSackPackets(rawPackets)
@@ -2668,6 +2682,7 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 	newestDeliveredSendTime time.Time,
 	newestDeliveredOrigTSN uint32,
 	deliveredFound bool,
+	rttSample time.Duration,
 	err error,
 ) {
 	bytesAckedPerStream = map[uint16]int{}
@@ -2679,35 +2694,36 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 	if sna32LT(a.cumulativeTSNAckPoint, selectiveAckChunk.cumulativeTSNAck) {
 		firstTSN := a.cumulativeTSNAckPoint + 1
 		if _, ok := a.inflightQueue.get(firstTSN); !ok {
-			return nil, 0, time.Time{}, 0, false, fmt.Errorf("%w: %v", ErrInflightQueueTSNPop, firstTSN)
+			return nil, 0, time.Time{}, 0, false, rttSample, fmt.Errorf("%w: %v", ErrInflightQueueTSNPop, firstTSN)
 		}
 		if _, ok := a.inflightQueue.get(selectiveAckChunk.cumulativeTSNAck); !ok {
-			return nil, 0, time.Time{}, 0, false,
+			return nil, 0, time.Time{}, 0, false, rttSample,
 				fmt.Errorf("%w: %v", ErrInflightQueueTSNPop, selectiveAckChunk.cumulativeTSNAck)
 		}
 	}
 	for _, gap := range selectiveAckChunk.gapAckBlocks {
 		if gap.start == 0 {
-			return nil, 0, time.Time{}, 0, false,
+			return nil, 0, time.Time{}, 0, false, rttSample,
 				fmt.Errorf("%w: %v", ErrTSNRequestNotExist, selectiveAckChunk.cumulativeTSNAck)
 		}
 		if gap.start > gap.end {
-			return nil, 0, time.Time{}, 0, false,
+			return nil, 0, time.Time{}, 0, false, rttSample,
 				fmt.Errorf("%w: invalid Gap Ack Block %d-%d", ErrTSNRequestNotExist, gap.start, gap.end)
 		}
 
 		firstTSN := selectiveAckChunk.cumulativeTSNAck + uint32(gap.start)
 		if _, ok := a.inflightQueue.get(firstTSN); !ok {
-			return nil, 0, time.Time{}, 0, false, fmt.Errorf("%w: %v", ErrTSNRequestNotExist, firstTSN)
+			return nil, 0, time.Time{}, 0, false, rttSample, fmt.Errorf("%w: %v", ErrTSNRequestNotExist, firstTSN)
 		}
 		lastTSN := selectiveAckChunk.cumulativeTSNAck + uint32(gap.end)
 		if lastTSN != firstTSN {
 			if _, ok := a.inflightQueue.get(lastTSN); !ok {
-				return nil, 0, time.Time{}, 0, false,
+				return nil, 0, time.Time{}, 0, false, rttSample,
 					fmt.Errorf("%w: %v", ErrTSNRequestNotExist, lastTSN)
 			}
 		}
 	}
+	t1 := true
 
 	// New ack point, so pop all ACKed packets from inflightQueue
 	// We add 1 because the "currentAckPoint" has already been popped from the inflight queue
@@ -2715,7 +2731,7 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 	for idx := a.cumulativeTSNAckPoint + 1; sna32LTE(idx, selectiveAckChunk.cumulativeTSNAck); idx++ {
 		chunkPayload, ok := a.inflightQueue.pop(idx)
 		if !ok {
-			return nil, 0, time.Time{}, 0, false, fmt.Errorf("%w: %v", ErrInflightQueueTSNPop, idx)
+			return nil, 0, time.Time{}, 0, false, rttSample, fmt.Errorf("%w: %v", ErrInflightQueueTSNPop, idx)
 		}
 
 		// RACK: remove from xmit-time list since it's delivered
@@ -2754,9 +2770,14 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 				// Only original transmissions for classic RTT measurement (Karn's rule)
 				if chunkPayload.nSent == 1 {
 					a.minTSN2MeasureRTT = a.myNextTSN
-					rtt := now.Sub(chunkPayload.since).Seconds() * 1000.0
-					srtt := a.rtoMgr.setNewRTT(rtt)
+					rtt := now.Sub(chunkPayload.since)
+					srtt := a.rtoMgr.setNewRTT(rtt.Seconds() * 1000.0)
 					a.srtt.Store(srtt)
+
+					if t1 {
+						t1 = false
+						rttSample = rtt
+					}
 
 					// use a window to determine minRtt instead of a global min
 					// as the RTT can fluctuate, which can cause problems if going from a
@@ -2766,6 +2787,9 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 					a.log.Tracef("[%s] SACK: measured-rtt=%f srtt=%f new-rto=%f",
 						a.name, rtt, srtt, a.rtoMgr.getRTO())
 				}
+			} else if t1 && chunkPayload.nSent == 1 {
+				t1 = false
+				rttSample = now.Sub(chunkPayload.since)
 			}
 
 			// RFC 8985 (RACK) sec 5.2: RACK.segment is the most recently sent
@@ -2780,6 +2804,7 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 		if a.inFastRecovery && chunkPayload.tsn == a.fastRecoverExitPoint {
 			a.log.Debugf("[%s] exit fast-recovery", a.name)
 			a.inFastRecovery = false
+			a.CC1.SetFastRecovery(false)
 		}
 	}
 
@@ -2791,7 +2816,7 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 			tsn := selectiveAckChunk.cumulativeTSNAck + i
 			chunkPayload, ok := a.inflightQueue.get(tsn)
 			if !ok {
-				return nil, 0, time.Time{}, 0, false, fmt.Errorf("%w: %v", ErrTSNRequestNotExist, tsn)
+				return nil, 0, time.Time{}, 0, false, rttSample, fmt.Errorf("%w: %v", ErrTSNRequestNotExist, tsn)
 			}
 
 			// RACK: remove from xmit-time list since it's delivered
@@ -2814,15 +2839,23 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 					// Only original transmissions for classic RTT measurement
 					if chunkPayload.nSent == 1 {
 						a.minTSN2MeasureRTT = a.myNextTSN
-						rtt := now.Sub(chunkPayload.since).Seconds() * 1000.0
-						srtt := a.rtoMgr.setNewRTT(rtt)
+						rtt := now.Sub(chunkPayload.since)
+						srtt := a.rtoMgr.setNewRTT(rtt.Seconds() * 1000.0)
 						a.srtt.Store(srtt)
 
 						a.rack.rackMinRTTWnd.Push(now, now.Sub(chunkPayload.since))
 
+						if t1 {
+							t1 = false
+							rttSample = rtt
+						}
+
 						a.log.Tracef("[%s] SACK: measured-rtt=%f srtt=%f new-rto=%f",
 							a.name, rtt, srtt, a.rtoMgr.getRTO())
 					}
+				} else if t1 && chunkPayload.nSent == 1 {
+					t1 = false
+					rttSample = now.Sub(chunkPayload.since)
 				}
 
 				if chunkPayload.since.After(newestDeliveredSendTime) {
@@ -2838,11 +2871,11 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 		}
 	}
 
-	return bytesAckedPerStream, htna, newestDeliveredSendTime, newestDeliveredOrigTSN, deliveredFound, nil
+	return bytesAckedPerStream, htna, newestDeliveredSendTime, newestDeliveredOrigTSN, deliveredFound, rttSample, nil
 }
 
 // The caller should hold the lock.
-func (a *Association) onCumulativeTSNAckPointAdvanced(totalBytesAcked int) {
+func (a *Association) onCumulativeTSNAckPointAdvanced(totalBytesAcked int, rttSample time.Duration, smoothedRTT time.Duration) {
 	// RFC 4960, sec 6.3.2.  Retransmission Timer Rules
 	//   R2)  Whenever all outstanding data sent to an address have been
 	//        acknowledged, turn off the T3-rtx timer of that address.
@@ -2856,51 +2889,8 @@ func (a *Association) onCumulativeTSNAckPointAdvanced(totalBytesAcked int) {
 		a.t3RTX.start(a.rtoMgr.getRTO())
 	}
 
-	// Update congestion control parameters
-	if a.CWND() <= a.ssthresh { //nolint:nestif
-		// RFC 4960, sec 7.2.1.  Slow-Start
-		//   o  When cwnd is less than or equal to ssthresh, an SCTP endpoint MUST
-		//		use the slow-start algorithm to increase cwnd only if the current
-		//      congestion window is being fully utilized, an incoming SACK
-		//      advances the Cumulative TSN Ack Point, and the data sender is not
-		//      in Fast Recovery.  Only when these three conditions are met can
-		//      the cwnd be increased; otherwise, the cwnd MUST not be increased.
-		//		If these conditions are met, then cwnd MUST be increased by, at
-		//      most, the lesser of 1) the total size of the previously
-		//      outstanding DATA chunk(s) acknowledged, and 2) the destination's
-		//      path MTU.
-		if !a.inFastRecovery &&
-			a.pendingQueue.size() > 0 {
-			a.setCWND(a.CWND() + min32(uint32(totalBytesAcked), a.CWND())) //nolint:gosec // G115
-			// a.cwnd += min32(uint32(totalBytesAcked), a.MTU()) // SCTP way (slow)
-			a.log.Tracef("[%s] updated cwnd=%d ssthresh=%d acked=%d (SS)",
-				a.name, a.CWND(), a.ssthresh, totalBytesAcked)
-		} else {
-			a.log.Tracef("[%s] cwnd did not grow: cwnd=%d ssthresh=%d acked=%d FR=%v pending=%d",
-				a.name, a.CWND(), a.ssthresh, totalBytesAcked, a.inFastRecovery, a.pendingQueue.size())
-		}
-	} else {
-		// RFC 4960, sec 7.2.2.  Congestion Avoidance
-		//   o  Whenever cwnd is greater than ssthresh, upon each SACK arrival
-		//      that advances the Cumulative TSN Ack Point, increase
-		//      partial_bytes_acked by the total number of bytes of all new chunks
-		//      acknowledged in that SACK including chunks acknowledged by the new
-		//      Cumulative TSN Ack and by Gap Ack Blocks.
-		a.partialBytesAcked += uint32(totalBytesAcked) //nolint:gosec // G115
-
-		//   o  When partial_bytes_acked is equal to or greater than cwnd and
-		//      before the arrival of the SACK the sender had cwnd or more bytes
-		//      of data outstanding (i.e., before arrival of the SACK, flight size
-		//      was greater than or equal to cwnd), increase cwnd by MTU, and
-		//      reset partial_bytes_acked to (partial_bytes_acked - cwnd).
-		if a.partialBytesAcked >= a.CWND() && a.pendingQueue.size() > 0 {
-			a.partialBytesAcked -= a.CWND()
-			step := max(a.MTU(), a.cwndCAStep)
-			a.setCWND(a.CWND() + step)
-			a.log.Tracef("[%s] updated cwnd=%d ssthresh=%d acked=%d (CA)",
-				a.name, a.CWND(), a.ssthresh, totalBytesAcked)
-		}
-	}
+	a.CC1.OnACK(uint32(totalBytesAcked), rttSample, smoothedRTT)
+	a.setCWND(a.CC1.GetWindow())
 }
 
 // The caller should hold the lock.
@@ -2948,19 +2938,20 @@ func (a *Association) processFastRetransmission( //nolint:gocognit
 						a.tlrApplyAdditionalLossLocked(time.Now())
 					}
 
+					a.CC1.OnLoss()
 					if !a.inFastRecovery {
 						// 2)  If not in Fast Recovery, adjust the ssthresh and cwnd of the
 						//     destination address(es) to which the missing DATA chunks were
 						//     last sent, according to the formula described in Section 7.2.3.
 						a.inFastRecovery = true
 						a.fastRecoverExitPoint = htna
-						a.ssthresh = max32(a.CWND()/2, 4*a.MTU())
-						a.setCWND(a.ssthresh)
+						cwnd := a.CC1.GetWindow()
+						a.setCWND(cwnd)
 						a.partialBytesAcked = 0
 						a.willRetransmitFast = true
 
 						a.log.Tracef("[%s] updated cwnd=%d ssthresh=%d inflight=%d (FR)",
-							a.name, a.CWND(), a.ssthresh, a.inflightQueue.getNumBytes())
+							a.name, cwnd, a.ssthresh, a.inflightQueue.getNumBytes())
 					}
 				}
 			}
@@ -3008,7 +2999,7 @@ func (a *Association) processAcknowledgement(
 	// Process selective ack
 	bytesAckedPerStream, htna,
 		newestDeliveredSendTime, newestDeliveredOrigTSN,
-		deliveredFound, err := a.processSelectiveAck(selectiveAckChunk)
+		deliveredFound, rttSample, err := a.processSelectiveAck(selectiveAckChunk)
 	if err != nil {
 		return acknowledgementResult{}, err
 	}
@@ -3019,6 +3010,7 @@ func (a *Association) processAcknowledgement(
 	}
 
 	cumTSNAckPointAdvanced := false
+	srtt := time.Duration(a.SRTT()*1000.0) * time.Microsecond
 	if sna32LT(a.cumulativeTSNAckPoint, selectiveAckChunk.cumulativeTSNAck) {
 		a.log.Tracef("[%s] SACK: cumTSN advanced: %d -> %d",
 			a.name,
@@ -3027,7 +3019,10 @@ func (a *Association) processAcknowledgement(
 
 		a.cumulativeTSNAckPoint = selectiveAckChunk.cumulativeTSNAck
 		cumTSNAckPointAdvanced = true
-		a.onCumulativeTSNAckPointAdvanced(totalBytesAcked)
+		a.onCumulativeTSNAckPointAdvanced(totalBytesAcked, rttSample, srtt)
+	} else {
+		a.CC1.OnACK(uint32(totalBytesAcked), rttSample, srtt)
+		a.setCWND(a.CC1.GetWindow())
 	}
 
 	for si, nBytesAcked := range bytesAckedPerStream {
@@ -3132,7 +3127,7 @@ func (a *Association) handleSack(selectiveAckChunk *chunkSelectiveAck) error {
 		return err
 	}
 
-	a.postprocessSack(state, result.cumTSNAckPointAdvanced)
+	a.postprocessSack(state, result.deliveredFound)
 
 	// RACK
 	a.onRackAfterSACK(
@@ -3775,6 +3770,7 @@ func (a *Association) popPendingDataChunksToSend( //nolint:cyclop,gocognit
 
 	// track current packet size for MTU bundling so budgeting is accurate.
 	bytesInPacket := 0
+	totalBytes := uint32(0)
 
 	if a.pendingQueue.size() > 0 { //nolint:nestif
 		// RFC 4960 sec 6.1.  Transmission of DATA Chunks
@@ -3785,6 +3781,8 @@ func (a *Association) popPendingDataChunksToSend( //nolint:cyclop,gocognit
 		//      is 0), the data sender can always have one DATA chunk in flight to
 		//      the receiver if allowed by cwnd (see rule B, below).
 
+		now := time.Now()
+		srtt := time.Duration(a.SRTT()*1000.0) * time.Microsecond
 		for {
 			chunkPayload := a.pendingQueue.peek()
 			if chunkPayload == nil {
@@ -3812,8 +3810,17 @@ func (a *Association) popPendingDataChunksToSend( //nolint:cyclop,gocognit
 
 			chunkBytes := chunkPayload.chunkSizeInPacket()
 
+			canSend, next := a.CC1.CanSend(totalBytes+dataLen, srtt)
+			if !canSend {
+				time.AfterFunc(next.Sub(now), func() {
+					a.awakeWriteLoop()
+				})
+				break
+			}
+			totalBytes += dataLen
+
 			// ensure MTU bundling matches bundleDataChunksIntoPackets().
-			addBytes := chunkBytes
+			/*addBytes := chunkBytes
 			if bytesInPacket == 0 {
 				addBytes += int(commonHeaderSize)
 				if addBytes > int(a.MTU()) {
@@ -3821,9 +3828,6 @@ func (a *Association) popPendingDataChunksToSend( //nolint:cyclop,gocognit
 				}
 
 				// reserve budget for common header + first chunk.
-				if !a.tlrAllowSendLocked(budgetScaled, consumed, addBytes) {
-					break
-				}
 
 				bytesInPacket = int(commonHeaderSize)
 			} else {
@@ -3835,10 +3839,7 @@ func (a *Association) popPendingDataChunksToSend( //nolint:cyclop,gocognit
 				}
 
 				// reserve budget for the additional chunk bytes.
-				if !a.tlrAllowSendLocked(budgetScaled, consumed, chunkBytes) {
-					break
-				}
-			}
+			}*/
 
 			a.setRWND(a.RWND() - dataLen)
 
@@ -3854,15 +3855,26 @@ func (a *Association) popPendingDataChunksToSend( //nolint:cyclop,gocognit
 			if c != nil && len(c.userData) > 0 {
 				// probe is a new packet: common header + chunk bytes.
 				chunkBytes := c.chunkSizeInPacket()
+				dataLen := len(c.userData)
 				addBytes := int(commonHeaderSize) + chunkBytes
 
-				if addBytes <= int(a.MTU()) && a.tlrAllowSendLocked(budgetScaled, consumed, addBytes) {
-					a.movePendingDataChunkToInflightQueue(c)
-					chunks = append(chunks, c)
+				if addBytes <= int(a.MTU()) {
+					canSend, next := a.CC1.CanSend(totalBytes+uint32(dataLen), srtt)
+					if canSend {
+						totalBytes += uint32(dataLen)
+						a.movePendingDataChunkToInflightQueue(c)
+						chunks = append(chunks, c)
+					} else {
+						time.AfterFunc(next.Sub(now), func() {
+							a.awakeWriteLoop()
+						})
+					}
 				}
 			}
 		}
 	}
+
+	a.CC1.OnSend(totalBytes, false)
 
 	if a.blockWrite && len(chunks) > 0 && a.pendingQueue.size() == 0 {
 		a.log.Tracef("[%s] all pending data have been sent, notify writable", a.name)
@@ -4003,8 +4015,10 @@ func (a *Association) getDataPacketsToRetransmit(budgetScaled *int64, consumed *
 	var bytesToSend int
 	currRtxTimestamp := time.Now()
 
-	bytesInPacket := 0
+	//bytesInPacket := 0
 
+	totalBytes := uint32(0)
+	srtt := time.Duration(a.SRTT()*1000.0) * time.Microsecond
 	for i := 0; ; i++ {
 		chunkPayload, ok := a.inflightQueue.get(a.cumulativeTSNAckPoint + uint32(i) + 1) //nolint:gosec // G115
 		if !ok {
@@ -4020,11 +4034,18 @@ func (a *Association) getDataPacketsToRetransmit(budgetScaled *int64, consumed *
 		} else if bytesToSend+len(chunkPayload.userData) > int(awnd) {
 			break
 		}
-
-		chunkBytes := chunkPayload.chunkSizeInPacket()
+		dataLen := uint32(len(chunkPayload.userData))
+		canSend, next := a.CC1.CanSend(totalBytes+dataLen, srtt)
+		if !canSend {
+			time.AfterFunc(next.Sub(currRtxTimestamp), func() {
+				a.awakeWriteLoop()
+			})
+			break
+		}
+		totalBytes += dataLen
 
 		// retry as first chunk in a new packet if needed.
-		for {
+		/*for {
 			addBytes := chunkBytes
 			if bytesInPacket == 0 {
 				addBytes += int(commonHeaderSize)
@@ -4038,9 +4059,6 @@ func (a *Association) getDataPacketsToRetransmit(budgetScaled *int64, consumed *
 			}
 
 			// burst budget gate before mutating the chunk.
-			if !a.tlrAllowSendLocked(budgetScaled, consumed, addBytes) {
-				return a.bundleDataChunksIntoPackets(chunks)
-			}
 
 			if bytesInPacket == 0 {
 				bytesInPacket = int(commonHeaderSize)
@@ -4048,7 +4066,7 @@ func (a *Association) getDataPacketsToRetransmit(budgetScaled *int64, consumed *
 			bytesInPacket += chunkBytes
 
 			break
-		}
+		}*/
 
 		chunkPayload.retransmit = false
 		bytesToSend += len(chunkPayload.userData)
@@ -4068,6 +4086,7 @@ func (a *Association) getDataPacketsToRetransmit(budgetScaled *int64, consumed *
 
 		chunks = append(chunks, chunkPayload)
 	}
+	a.CC1.OnSend(totalBytes, true)
 
 	return a.bundleDataChunksIntoPackets(chunks)
 }
@@ -4115,35 +4134,29 @@ func pack(p *packet) []*packet {
 	return []*packet{p}
 }
 
+// caller must hold a.lock
 func (a *Association) handleChunksStart() {
-	a.lock.Lock()
-	defer a.lock.Unlock()
-
 	a.stats.incPacketsReceived()
 
 	a.delayedAckTriggered = false
 	a.immediateAckTriggered = false
 }
 
+// caller must hold a.lock
 func (a *Association) handleChunksEnd() {
-	a.lock.Lock()
-	defer a.lock.Unlock()
-
 	if a.immediateAckTriggered {
 		a.ackState = ackStateImmediate
 		a.ackTimer.stop()
 		a.awakeWriteLoop()
-	} else if a.delayedAckTriggered {
+	} else if a.delayedAckTriggered && a.ackState != ackStateImmediate { // don't cancel the scheduled ACK
 		// Will send delayed ack in the next ack timeout
 		a.ackState = ackStateDelay
 		a.ackTimer.start()
 	}
 }
 
+// caller must hold a.lock
 func (a *Association) handleChunk(receivedPacket *packet, receivedChunk chunk) error { //nolint:cyclop
-	a.lock.Lock()
-	defer a.lock.Unlock()
-
 	var packets []*packet
 	var err error
 
@@ -4305,16 +4318,18 @@ func (a *Association) onRetransmissionTimeout(id int, nRtos uint) { //nolint:cyc
 		//      ssthresh = max(cwnd/2, 4*MTU)
 		//      cwnd = 1*MTU
 
-		a.ssthresh = max32(a.CWND()/2, 4*a.MTU())
-		a.setCWND(a.MTU())
+		a.CC1.OnTimeout()
+		cwnd := a.CC1.GetWindow()
+		a.setCWND(cwnd)
 		a.log.Tracef("[%s] updated cwnd=%d ssthresh=%d inflight=%d (RTO)",
-			a.name, a.CWND(), a.ssthresh, a.inflightQueue.getNumBytes())
+			a.name, cwnd, a.ssthresh, a.inflightQueue.getNumBytes())
 		// If not in Fast Recovery, enter Fast Recovery and mark the highest outstanding TSN as the Fast Recovery exit point.
 		// When a SACK acknowledges all TSNs up to and including this exit point, Fast Recovery is exited.
 		// https://www.rfc-editor.org/rfc/rfc4960#section-7.2.4
 		// https://www.rfc-editor.org/rfc/rfc9260.html#section-7.2.4
 		if a.inFastRecovery {
 			a.inFastRecovery = false
+			a.CC1.SetFastRecovery(false)
 			a.willRetransmitFast = false
 			a.fastRecoverExitPoint = 0
 			a.partialBytesAcked = 0

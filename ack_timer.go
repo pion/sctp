@@ -10,7 +10,10 @@ import (
 )
 
 const (
-	ackInterval time.Duration = 200 * time.Millisecond
+	//We use pacing instead of some burst mitigation that relies on ack
+	ackInterval time.Duration = 16 * time.Millisecond
+	/*The story behind the fixed 200ms ACK delay timer
+	https://news.ycombinator.com/item?id=9050645 */
 )
 
 // ackTimerObserver is the inteface to an ack timer observer.
