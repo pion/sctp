@@ -104,13 +104,29 @@ func TestChromeChunk2InitAck(t *testing.T) {
 		0x00, 0x06, 0x00, 0x01, 0x00, 0x00, 0x80, 0x03, 0x00, 0x06, 0x80, 0xc1, 0x00, 0x00, 0xca, 0x0c, 0x21, 0x11,
 		0xce, 0xf4, 0xfc, 0xb3, 0x66, 0x99, 0x4f, 0xdb, 0x4f, 0x95, 0x6b, 0x6f, 0x3b, 0xb1, 0xdb, 0x5a,
 	}
+
 	err := pkt.unmarshal(true, rawPkt)
 	assert.NoError(t, err)
 
-	rawPkt2, err := pkt.marshal(true)
+	// Strict marshal (CRC32c): should reproduce the original bit-for-bit.
+	rawStrict, err := pkt.marshal(false)
+	assert.NoError(t, err)
+	assert.Equal(t, rawPkt, rawStrict)
+
+	// ZCA marshal (zero checksum allowed, and this packet has INIT-ACK, not restricted)
+	rawZero, err := pkt.marshal(true)
 	assert.NoError(t, err)
 
-	assert.Equal(t, rawPkt, rawPkt2)
+	// Expect the same bytes as original, except checksum field zeroed.
+	expZero := make([]byte, len(rawPkt))
+	copy(expZero, rawPkt)
+	expZero[8], expZero[9], expZero[10], expZero[11] = 0, 0, 0, 0
+	assert.Equal(t, expZero, rawZero)
+
+	// Receiver behavior: zero-checksum packet is rejected in strict mode, accepted in ZCA mode.
+	pkt2 := &packet{}
+	assert.Error(t, pkt2.unmarshal(false, rawZero))
+	assert.NoError(t, pkt2.unmarshal(true, rawZero))
 }
 
 func TestInitMarshalUnmarshal(t *testing.T) {
