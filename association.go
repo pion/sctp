@@ -19,7 +19,7 @@ import (
 
 	"github.com/pion/logging"
 	"github.com/pion/randutil"
-	"github.com/pion/transport/v4/deadline"
+	"github.com/pion/transport/v5/deadline"
 )
 
 // Port 5000 shows up in examples for SDPs used by WebRTC. Since this implementation
@@ -3922,7 +3922,7 @@ func (a *Association) sendPayloadData(ctx context.Context, chunks []*chunkPayloa
 			a.lock.Unlock()
 			select {
 			case <-ctx.Done():
-				return ctx.Err()
+				return context.Cause(ctx)
 			case <-writeNotify:
 			}
 			a.lock.Lock()

@@ -25,7 +25,7 @@ import (
 	"time"
 
 	"github.com/pion/logging"
-	"github.com/pion/transport/v4/test"
+	"github.com/pion/transport/v5/test"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -6286,31 +6286,29 @@ func TestAssociation_BlockWrite(t *testing.T) {
 	// test write deadline
 	// a2's awnd is 0, so write should be blocked
 	require.NoError(t, s1.SetWriteDeadline(time.Now().Add(100*time.Millisecond)))
-	_, err = s1.WriteSCTP(data, PayloadTypeWebRTCBinary)
-	require.ErrorIs(t, err, context.DeadlineExceeded, err)
+	n, err = s1.WriteSCTP(data, PayloadTypeWebRTCBinary)
+	require.Zero(t, n)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
 
 	// test write deadline cancel
 	require.NoError(t, s1.SetWriteDeadline(time.Time{}))
 	var deadLineCanceled atomic.Bool
-	writeCanceled := make(chan struct{}, 2)
+	writeCanceled := make(chan error, 2)
 	// both write should be blocked and canceled by deadline
-	go func() {
-		_, err1 := s1.WriteSCTP(data, PayloadTypeWebRTCBinary)
-		require.ErrorIs(t, err, context.DeadlineExceeded, err1)
-		require.True(t, deadLineCanceled.Load())
-		writeCanceled <- struct{}{}
-	}()
-	go func() {
-		_, err1 := s1.WriteSCTP(data, PayloadTypeWebRTCBinary)
-		require.ErrorIs(t, err, context.DeadlineExceeded, err1)
-		require.True(t, deadLineCanceled.Load())
-		writeCanceled <- struct{}{}
-	}()
+	for range 2 {
+		go func() {
+			written, writeErr := s1.WriteSCTP(data, PayloadTypeWebRTCBinary)
+			assert.Zero(t, written)
+			assert.True(t, deadLineCanceled.Load())
+			writeCanceled <- writeErr
+		}()
+	}
 	time.Sleep(100 * time.Millisecond)
 	deadLineCanceled.Store(true)
 	require.NoError(t, s1.SetWriteDeadline(time.Now().Add(-1*time.Second)))
-	<-writeCanceled
-	<-writeCanceled
+	for range 2 {
+		require.ErrorIs(t, <-writeCanceled, context.DeadlineExceeded)
+	}
 	require.NoError(t, s1.SetWriteDeadline(time.Time{}))
 
 	rn, rerr := s2.Read(data)
