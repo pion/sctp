@@ -3968,7 +3968,10 @@ func (a *Association) checkPartialReliabilityStatus(chunkPayload *chunkPayloadDa
 	if stream, ok := a.streams[chunkPayload.streamIdentifier]; ok { //nolint:nestif
 		stream.lock.RLock()
 		if stream.reliabilityType == ReliabilityTypeRexmit {
-			if chunkPayload.nSent >= stream.reliabilityValue {
+			// nSent counts transmissions, the first one included. Once it exceeds
+			// the limit, every allowed retransmission has been used, and the next
+			// one "would exceed the provided limit" (RFC 7496 Sec 3.1).
+			if chunkPayload.nSent > stream.reliabilityValue {
 				chunkPayload.setAbandoned(true)
 				a.rackRemove(chunkPayload)
 				a.log.Tracef(

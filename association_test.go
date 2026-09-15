@@ -2656,6 +2656,131 @@ func TestAssocUnreliable(t *testing.T) { //nolint:maintidx
 // A test for this PR https://github.com/pion/sctp/pull/341
 // We drop the first INIT ACK, and we expect the verification tag to be 0 on
 // retransmission.
+// maxRetransmits=N must allow N retransmissions: RFC 7496 Section 3.1 abandons
+// a message only when a retransmission "would exceed the provided limit", and
+// RFC 8832 Section 5.1 says messages "will not be retransmitted more times than
+// specified in the Reliability Parameter".
+func TestAssocUnreliableRexmitLimit(t *testing.T) {
+	for _, tc := range []struct {
+		limit     uint32
+		drops     int
+		sends     int
+		delivered bool
+	}{
+		{limit: 0, drops: 1, sends: 1, delivered: false},
+		{limit: 1, drops: 1, sends: 2, delivered: true},
+		{limit: 1, drops: 2, sends: 2, delivered: false},
+		{limit: 2, drops: 2, sends: 3, delivered: true},
+		{limit: 2, drops: 3, sends: 3, delivered: false},
+	} {
+		t.Run(fmt.Sprintf("limit %d drops %d", tc.limit, tc.drops), func(t *testing.T) {
+			sends, delivered := runRexmitLimit(t, tc.limit, tc.drops)
+			assert.Equal(t, tc.sends, sends, "unexpected number of transmissions")
+			assert.Equal(t, tc.delivered, delivered, "unexpected delivery")
+		})
+	}
+}
+
+// runRexmitLimit writes one message on an unordered stream limited to limit
+// retransmissions, discards the first drops copies of it on the wire, and
+// reports how many copies were sent and whether the message was delivered.
+func runRexmitLimit(t *testing.T, limit uint32, drops int) (int, bool) { //nolint:cyclop
+	t.Helper()
+
+	lim := test.TimeOut(time.Second * 10)
+	defer lim.Stop()
+
+	br := test.NewBridge()
+
+	a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, 0)
+	assert.NoError(t, err, "failed to create associations")
+
+	s0, s1, err := establishSessionPair(br, a0, a1, 1)
+	assert.NoError(t, err, "failed to establish session pair")
+	defer closeAssociationPair(br, a0, a1)
+
+	// Keep the T3-rtx retransmissions well inside the observation window.
+	a0.rtoMgr.setRTO(50.0, true)
+
+	s0.SetReliabilityParams(true, ReliabilityTypeRexmit, limit)
+
+	const msgSize = 1000
+	var (
+		mu        sync.Mutex
+		target    uint32
+		hasTarget bool
+		sends     int
+	)
+	br.Filter(0, func(raw []byte) bool {
+		p := &packet{}
+		if p.unmarshal(true, raw) != nil {
+			return true
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+
+		for _, c := range p.chunks {
+			data, ok := c.(*chunkPayloadData)
+			if !ok || len(data.userData) != msgSize {
+				continue
+			}
+			if !hasTarget {
+				target, hasTarget = data.tsn, true
+			}
+			if data.tsn == target {
+				sends++
+
+				return sends > drops
+			}
+		}
+
+		return true
+	})
+	countSends := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+
+		return sends
+	}
+
+	var delivered atomic.Int32
+	go func() {
+		buf := make([]byte, 2000)
+		for {
+			n, _, readErr := s1.ReadSCTP(buf)
+			if readErr != nil {
+				return
+			}
+			if n == msgSize {
+				delivered.Add(1)
+			}
+		}
+	}()
+
+	_, err = s0.WriteSCTP(make([]byte, msgSize), PayloadTypeWebRTCBinary)
+	assert.NoError(t, err)
+	for countSends() == 0 {
+		br.Tick()
+		time.Sleep(time.Millisecond)
+	}
+
+	// Followers, sent after the message, make the receiver report the gap.
+	for range 4 {
+		_, err = s0.WriteSCTP(make([]byte, 10), PayloadTypeWebRTCBinary)
+		assert.NoError(t, err)
+	}
+
+	// Long enough for every allowed retransmission, and for one more to show.
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		br.Tick()
+		time.Sleep(time.Millisecond)
+	}
+
+	return countSends(), delivered.Load() == 1
+}
+
 func TestInitVerificationTagIsZero(t *testing.T) { //nolint:cyclop
 	lim := test.TimeOut(time.Second * 10)
 	defer lim.Stop()
