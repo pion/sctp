@@ -1069,10 +1069,12 @@ func (a *Association) Close() error {
 }
 
 // closeAsync closes the association without waiting for the underlying connection.
-// The deadline helps unblock a pending Read when Close itself blocks.
+// The deadlines unblock pending I/O and shutdown writes performed by Close.
 func (a *Association) closeAsync() {
 	go func() {
-		_ = a.netConn.SetReadDeadline(time.Now())
+		deadline := time.Now()
+		_ = a.netConn.SetReadDeadline(deadline)
+		_ = a.netConn.SetWriteDeadline(deadline)
 
 		if err := a.Close(); err != nil {
 			a.log.Warnf("[%s] failed to close association: %v", a.name, err)
