@@ -273,9 +273,11 @@ type Association struct {
 	abortSentCh        chan struct{}
 
 	// Reconfig
-	myNextRSN        uint32
-	reconfigs        map[uint32]*chunkReconfig
-	reconfigRequests map[uint32]*paramOutgoingResetRequest
+	myNextRSN                    uint32
+	reconfigs                    map[uint32]*chunkReconfig
+	reconfigRequests             map[uint32]*paramOutgoingResetRequest
+	onStreamResetCompleteHandler func(streamID uint16)
+	streamResetStates            map[uint16]streamResetState
 
 	// Non-RFC internal data
 	sourcePort              uint16
@@ -830,6 +832,7 @@ func createAssociationFromConfigWithTsn(cfg *Config, tsn uint32) *Association {
 		streams:                 map[uint16]*Stream{},
 		reconfigs:               map[uint32]*chunkReconfig{},
 		reconfigRequests:        map[uint32]*paramOutgoingResetRequest{},
+		streamResetStates:       map[uint16]streamResetState{},
 		acceptCh:                make(chan *Stream, acceptChSize),
 		readLoopCloseCh:         make(chan struct{}),
 		awakeWriteLoopCh:        make(chan struct{}, 1),
@@ -3663,7 +3666,7 @@ func (a *Association) handleReconfigParam(raw param) (*packet, error) {
 			return nil, nil //nolint:nilnil
 		}
 		if par.result == reconfigResultSuccessPerformed {
-			a.resetOutgoingStreamSequenceNumbers(par.reconfigResponseSequenceNumber)
+			a.completeOutgoingStreamReset(par.reconfigResponseSequenceNumber)
 		}
 		delete(a.reconfigs, par.reconfigResponseSequenceNumber)
 		if len(a.reconfigs) == 0 {
@@ -3677,7 +3680,7 @@ func (a *Association) handleReconfigParam(raw param) (*packet, error) {
 }
 
 // The caller should hold the lock.
-func (a *Association) resetOutgoingStreamSequenceNumbers(reconfigRequestSequenceNumber uint32) {
+func (a *Association) completeOutgoingStreamReset(reconfigRequestSequenceNumber uint32) {
 	reconfig := a.reconfigs[reconfigRequestSequenceNumber]
 	if reconfig == nil {
 		return
@@ -3690,6 +3693,7 @@ func (a *Association) resetOutgoingStreamSequenceNumbers(reconfigRequestSequence
 		if s, ok := a.streams[id]; ok {
 			s.resetOutgoingStreamSequenceNumbers()
 		}
+		a.completeStreamResetDirection(id, streamResetOutbound)
 	}
 }
 
@@ -3709,6 +3713,7 @@ func (a *Association) resetStreamsIfAny(resetRequest *paramOutgoingResetRequest)
 			a.lock.Lock()
 			a.log.Debugf("[%s] deleting stream %d", a.name, id)
 			delete(a.streams, s.streamIdentifier)
+			a.completeStreamResetDirection(s.streamIdentifier, streamResetInbound)
 		}
 		delete(a.reconfigRequests, resetRequest.reconfigRequestSequenceNumber)
 	} else {
@@ -3723,6 +3728,45 @@ func (a *Association) resetStreamsIfAny(resetRequest *paramOutgoingResetRequest)
 			result:                         result,
 		},
 	}})
+}
+
+type streamResetState uint8
+
+const (
+	streamResetInbound streamResetState = 1 << iota
+	streamResetOutbound
+	streamResetBoth = streamResetInbound | streamResetOutbound
+)
+
+// The caller should hold the association lock.
+func (a *Association) completeStreamResetDirection(streamID uint16, direction streamResetState) {
+	if a.streamResetStates == nil {
+		a.streamResetStates = map[uint16]streamResetState{}
+	}
+	state := a.streamResetStates[streamID] | direction
+	if state != streamResetBoth {
+		a.streamResetStates[streamID] = state
+
+		return
+	}
+	delete(a.streamResetStates, streamID)
+	handler := a.onStreamResetCompleteHandler
+	if handler == nil {
+		return
+	}
+
+	a.lock.Unlock()
+	handler(streamID)
+	a.lock.Lock()
+}
+
+// OnStreamResetComplete sets a handler invoked after both directions of a
+// stream reset complete and the stream has been removed from the association.
+// A stream identifier is safe to reuse once the handler has been called.
+func (a *Association) OnStreamResetComplete(f func(streamID uint16)) {
+	a.lock.Lock()
+	defer a.lock.Unlock()
+	a.onStreamResetCompleteHandler = f
 }
 
 // Move the chunk peeked with a.pendingQueue.peek() to the inflightQueue.
