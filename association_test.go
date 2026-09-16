@@ -5159,7 +5159,7 @@ func createAssocs() (*Association, *Association, error) { //nolint:cyclop
 	defer cancel()
 
 	go func() {
-		a, err2 := createClientWithContext(ctx, Config{
+		a, err2 := ClientContext(ctx, Config{
 			NetConn:       udp1,
 			LoggerFactory: loggerFactory,
 		})
@@ -5171,7 +5171,7 @@ func createAssocs() (*Association, *Association, error) { //nolint:cyclop
 	}()
 
 	go func() {
-		a, err2 := createClientWithContext(ctx, Config{
+		a, err2 := ClientContext(ctx, Config{
 			NetConn:       udp2,
 			LoggerFactory: loggerFactory,
 		})
@@ -5254,7 +5254,7 @@ func createAssociationPairWithConfig(
 		cfg := config
 		cfg.NetConn = udpConn1
 		cfg.LoggerFactory = loggerFactory
-		a, err2 := createClientWithContext(ctx, cfg)
+		a, err2 := ClientContext(ctx, cfg)
 		if err2 != nil {
 			a1Chan <- err2
 		} else {
@@ -5269,7 +5269,7 @@ func createAssociationPairWithConfig(
 		if cfg.MaxReceiveBufferSize == 0 {
 			cfg.MaxReceiveBufferSize = 100_000
 		}
-		a, err2 := createClientWithContext(ctx, cfg)
+		a, err2 := ClientContext(ctx, cfg)
 		if err2 != nil {
 			a2Chan <- err2
 		} else {
@@ -6091,114 +6091,6 @@ func TestAssociation_Abort(t *testing.T) {
 	i, err = s21.Read(buf)
 	assert.Equal(t, i, 0, "expected no data read")
 	assert.Error(t, err, "User Initiated Abort: 1234", "expected abort reason")
-}
-
-// TestClientContext tests that the client is closed when the context is canceled.
-func TestClientContext(t *testing.T) {
-	// Limit runtime in case of deadlocks
-	lim := test.TimeOut(time.Second * 5)
-	defer lim.Stop()
-
-	checkGoroutineLeaks(t)
-
-	udp1, udp2 := createUDPConnPair()
-
-	loggerFactory := logging.NewDefaultLoggerFactory()
-
-	errCh1 := make(chan error)
-	errCh2 := make(chan error)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-
-	go func() {
-		_, err2 := ClientContext(ctx, WithNetConn(udp1), WithLoggerFactory(loggerFactory))
-		if err2 != nil {
-			errCh1 <- err2
-		} else {
-			errCh1 <- nil
-		}
-	}()
-
-	go func() {
-		_, err2 := ClientContext(ctx, WithNetConn(udp2), WithLoggerFactory(loggerFactory))
-		if err2 != nil {
-			errCh2 <- err2
-		} else {
-			errCh2 <- nil
-		}
-	}()
-
-	// Cancel the context immediately
-	cancel()
-
-	var err1 error
-	var err2 error
-loop:
-	for {
-		select {
-		case err1 = <-errCh1:
-			if err1 != nil && err2 != nil {
-				break loop
-			}
-		case err2 = <-errCh2:
-			if err1 != nil && err2 != nil {
-				break loop
-			}
-		}
-	}
-
-	assert.Error(t, err1, "context canceled")
-	assert.Error(t, err2, "context canceled")
-}
-
-// TestClientContextCancelBlockingClose asserts cancellation returns promptly even
-// when the underlying conn's Close never returns.
-func TestClientContextCancelBlockingClose(t *testing.T) {
-	lim := test.TimeOut(time.Second * 5)
-	defer lim.Stop()
-
-	checkGoroutineLeaks(t)
-
-	conn := newBlockingCloseConn()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	errCh := make(chan error, 1)
-	go func() {
-		_, err := ClientContext(ctx, WithNetConn(conn), WithLoggerFactory(logging.NewDefaultLoggerFactory()))
-		errCh <- err
-	}()
-
-	select {
-	case err := <-errCh:
-		assert.ErrorIs(t, err, context.Canceled)
-	case <-time.After(time.Second):
-		require.FailNow(t, "ClientContext did not return while conn.Close was blocked")
-	}
-
-	close(conn.closeBlocked)
-}
-
-// TestClientContextSNAPCanceled asserts the out-of-band SNAP path honors ctx instead
-// of handing back an established association.
-func TestClientContextSNAPCanceled(t *testing.T) {
-	lim := test.TimeOut(time.Second * 5)
-	defer lim.Stop()
-
-	checkGoroutineLeaks(t)
-
-	br := test.NewBridge()
-
-	init, err := GenerateOutOfBandToken(Config{MaxReceiveBufferSize: 65535})
-	require.NoError(t, err)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	assoc, err := ClientContext(ctx, WithNetConn(br.GetConn0()), WithSNAP(init, init))
-	assert.ErrorIs(t, err, context.Canceled)
-	assert.Nil(t, assoc)
 }
 
 type customLogger struct {
@@ -7752,7 +7644,10 @@ func TestAssociationSNAP(t *testing.T) {
 	initB, err := GenerateOutOfBandToken(tokenConfig)
 	assert.NoError(t, err)
 
-	assocA, err := ClientWithOptions(
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	assocA, err := ClientContext(ctx,
 		WithName("a"),
 		WithNetConn(br.GetConn0()),
 		WithLoggerFactory(loggerFactory),
@@ -7767,6 +7662,9 @@ func TestAssociationSNAP(t *testing.T) {
 		WithSNAP(initB, initA))
 	assert.NoError(t, err)
 	assert.NotNil(t, assocB)
+
+	// The context only controls setup; established associations remain usable.
+	cancel()
 
 	const si uint16 = 1
 	const msg = "SNAP is snappy"

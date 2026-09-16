@@ -473,17 +473,14 @@ func ClientWithOptions(opts ...ClientOption) (*Association, error) {
 	return ClientContext(context.Background(), opts...)
 }
 
-func createClientWithContext(ctx context.Context, config Config) (*Association, error) {
-	return ClientContext(ctx, config)
-}
-
 // snapEnabled reports whether both SNAP tokens are present, i.e. the handshake was
 // negotiated out of band.
 func (c *Config) snapEnabled() bool {
 	return c.snapConfig != nil && len(c.snapConfig.remoteInit) != 0 && len(c.snapConfig.localInit) != 0
 }
 
-func createSNAPAssociation(config *Config) (*Association, error) {
+// createSNAPAssociation establishes an association using out-of-band handshake tokens.
+func createSNAPAssociation(ctx context.Context, config *Config) (*Association, error) {
 	// SNAP, aka sctp-init in the SDP.
 	remote := &chunkInit{}
 	err := remote.unmarshal(config.snapConfig.remoteInit)
@@ -497,6 +494,13 @@ func createSNAPAssociation(config *Config) (*Association, error) {
 	}
 	assoc := createAssociationFromConfigWithTsn(config, local.initialTSN)
 	if err = assoc.initWithOutOfBandTokens(local, remote); err != nil {
+		assoc.closeAsync()
+
+		return nil, err
+	}
+	if err = ctx.Err(); err != nil {
+		assoc.closeAsync()
+
 		return nil, err
 	}
 
@@ -504,23 +508,23 @@ func createSNAPAssociation(config *Config) (*Association, error) {
 }
 
 // ClientContext opens a SCTP stream over a conn.
-// If ctx is done before the association is established, ctx.Err() is returned and
-// the association is torn down in the background, so a conn whose Close blocks
-// cannot stall the caller.
+// The context controls establishment only; canceling it after this function
+// returns successfully does not close the association.
+// If ctx is already done, no association is started and the conn is left open.
+// If ctx is done during establishment, ctx.Err() is returned and the association
+// is closed in the background so a blocking conn cannot stall the caller.
 func ClientContext(ctx context.Context, opts ...ClientOption) (*Association, error) {
 	config, err := buildClientConfig(opts...)
 	if err != nil {
 		return nil, err
 	}
-	if config.snapEnabled() {
-		// SNAP carries the handshake out of band, so ctx can only gate entry.
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, ctxErr
-		}
-
-		return createSNAPAssociation(config)
+	if err = ctx.Err(); err != nil {
+		return nil, err
 	}
-	assoc, err := createClientAssociation(opts...)
+	if config.snapEnabled() {
+		return createSNAPAssociation(ctx, config)
+	}
+	assoc, err := createAssociationFromConfig(config)
 	if err != nil {
 		return nil, err
 	}
@@ -659,15 +663,6 @@ func buildServerConfig(opts ...ServerOption) (*Config, error) {
 	}
 
 	return cfg, nil
-}
-
-func createClientAssociation(opts ...ClientOption) (*Association, error) {
-	cfg, err := buildClientConfig(opts...)
-	if err != nil {
-		return nil, err
-	}
-
-	return createAssociationFromConfig(cfg)
 }
 
 func (a *Association) initClient() {
@@ -1073,13 +1068,12 @@ func (a *Association) Close() error {
 	return err
 }
 
-// closeAsync closes the association without waiting for it. netConn.Close may block
-// indefinitely, and readLoop only exits once its pending Read is unblocked, so the
-// read deadline is pushed first and the rest is handed to a goroutine.
+// closeAsync closes the association without waiting for the underlying connection.
+// The deadline helps unblock a pending Read when Close itself blocks.
 func (a *Association) closeAsync() {
-	_ = a.netConn.SetReadDeadline(time.Now())
-
 	go func() {
+		_ = a.netConn.SetReadDeadline(time.Now())
+
 		if err := a.Close(); err != nil {
 			a.log.Warnf("[%s] failed to close association: %v", a.name, err)
 		}
