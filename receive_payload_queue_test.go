@@ -19,12 +19,12 @@ func TestReceivePayloadQueue(t *testing.T) {
 	assert.Zero(t, payloadQueue.size())
 	_, ok := payloadQueue.getLastTSNReceived()
 	assert.False(t, ok)
-	assert.Empty(t, payloadQueue.getGapAckBlocks())
+	assert.Empty(t, payloadQueue.getGapAckBlocks(payloadQueue.size()))
 	// force pop empy queue to advance cumulative TSN
 	assert.False(t, payloadQueue.pop(true))
 	assert.Equal(t, initTSN-1, payloadQueue.getcumulativeTSN())
 	assert.Zero(t, payloadQueue.size())
-	assert.Empty(t, payloadQueue.getGapAckBlocks())
+	assert.Empty(t, payloadQueue.getGapAckBlocks(payloadQueue.size()))
 
 	nextTSN := initTSN + maxOffset - 1
 	assert.True(t, payloadQueue.push(nextTSN))
@@ -40,7 +40,7 @@ func TestReceivePayloadQueue(t *testing.T) {
 	assert.True(t, payloadQueue.canPush(nextTSN-1))
 	assert.Equal(t, 2, payloadQueue.size())
 
-	gaps := payloadQueue.getGapAckBlocks()
+	gaps := payloadQueue.getGapAckBlocks(payloadQueue.size())
 	assert.EqualValues(t, []gapAckBlock{
 		{start: uint16(1), end: uint16(1)},
 		{start: uint16(maxOffset), end: uint16(maxOffset)},
@@ -75,7 +75,7 @@ func TestReceivePayloadQueue(t *testing.T) {
 	size += int(range1[1] - range1[0] + 1)
 
 	assert.Equal(t, size, payloadQueue.size())
-	gaps = payloadQueue.getGapAckBlocks()
+	gaps = payloadQueue.getGapAckBlocks(payloadQueue.size())
 	assert.EqualValues(t, []gapAckBlock{
 		//nolint:gosec // G115
 		{start: uint16(range0[0] - initTSN), end: uint16(range0[1] - initTSN)},
@@ -108,7 +108,7 @@ func TestReceivePayloadQueue(t *testing.T) {
 	assert.False(t, payloadQueue.pop(false))
 	cumulativeTSN := payloadQueue.getcumulativeTSN()
 	assert.Equal(t, range0[1], cumulativeTSN)
-	gaps = payloadQueue.getGapAckBlocks()
+	gaps = payloadQueue.getGapAckBlocks(payloadQueue.size())
 	assert.EqualValues(t, []gapAckBlock{
 		//nolint:gosec // G115
 		{start: uint16(range1[0] - range0[1]), end: uint16(range1[1] - range0[1])},
@@ -126,7 +126,7 @@ func TestReceivePayloadQueue(t *testing.T) {
 	}
 	assert.False(t, payloadQueue.pop(false))
 	assert.Equal(t, range1[1], payloadQueue.getcumulativeTSN())
-	gaps = payloadQueue.getGapAckBlocks()
+	gaps = payloadQueue.getGapAckBlocks(payloadQueue.size())
 	assert.EqualValues(t, []gapAckBlock{
 		//nolint:gosec // G115
 		{start: uint16(nextTSN - range1[1]), end: uint16(nextTSN - range1[1])},
@@ -137,7 +137,7 @@ func TestReceivePayloadQueue(t *testing.T) {
 	for tsn := nextTSN + 1; sna32LTE(tsn, endTSN); tsn++ {
 		assert.True(t, payloadQueue.push(tsn))
 	}
-	gaps = payloadQueue.getGapAckBlocks()
+	gaps = payloadQueue.getGapAckBlocks(payloadQueue.size())
 	assert.EqualValues(t, []gapAckBlock{
 		//nolint:gosec // G115
 		{start: uint16(nextTSN - range1[1]), end: uint16(endTSN - range1[1])},
@@ -162,7 +162,7 @@ func TestReceivePayloadQueueAdvanceCumulativeTSN(t *testing.T) {
 	assert.False(t, payloadQueue.hasChunk(initTSN+3))
 	assert.False(t, payloadQueue.hasChunk(initTSN+5))
 	assert.True(t, payloadQueue.hasChunk(initTSN+20))
-	assert.EqualValues(t, []gapAckBlock{{start: 15, end: 15}}, payloadQueue.getGapAckBlocks())
+	assert.EqualValues(t, []gapAckBlock{{start: 15, end: 15}}, payloadQueue.getGapAckBlocks(payloadQueue.size()))
 
 	payloadQueue.advanceCumulativeTSN(initTSN + 4)
 
@@ -177,7 +177,7 @@ func TestReceivePayloadQueueAdvanceCumulativeTSN(t *testing.T) {
 	assert.Zero(t, payloadQueue.size())
 	_, ok := payloadQueue.getLastTSNReceived()
 	assert.False(t, ok)
-	assert.Empty(t, payloadQueue.getGapAckBlocks())
+	assert.Empty(t, payloadQueue.getGapAckBlocks(payloadQueue.size()))
 
 	ambiguousPayloadQueue := newReceivePayloadQueue(512)
 	ambiguousPayloadQueue.init(initTSN)

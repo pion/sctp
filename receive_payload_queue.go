@@ -155,10 +155,10 @@ func (q *receivePayloadQueue) popDuplicates() []uint32 {
 	return dups
 }
 
-func (q *receivePayloadQueue) getGapAckBlocks() (gapAckBlocks []gapAckBlock) {
+func (q *receivePayloadQueue) getGapAckBlocks(maxBlocks int) (gapAckBlocks []gapAckBlock) {
 	var ackBlock gapAckBlock
 
-	if q.chunkSize == 0 {
+	if q.chunkSize == 0 || maxBlocks <= 0 {
 		return nil
 	}
 
@@ -166,7 +166,7 @@ func (q *receivePayloadQueue) getGapAckBlocks() (gapAckBlocks []gapAckBlock) {
 	// the Cumulative TSN Ack and up to the highest TSN newly received.
 	startTSN, endTSN := q.cumulativeTSN+1, q.tailTSN
 	var findEnd bool
-	for tsn := startTSN; sna32LTE(tsn, endTSN); {
+	for tsn := startTSN; sna32LTE(tsn, endTSN) && len(gapAckBlocks) < maxBlocks; {
 		index, offset := int(tsn/64)%len(q.tsnBitmask), int(tsn%64)
 		if !findEnd { //nolint:nestif
 			// find first received tsn as start
@@ -212,7 +212,7 @@ func (q *receivePayloadQueue) getGapAckBlocks() (gapAckBlocks []gapAckBlock) {
 }
 
 func (q *receivePayloadQueue) getGapAckBlocksString() string {
-	gapAckBlocks := q.getGapAckBlocks()
+	gapAckBlocks := q.getGapAckBlocks(q.chunkSize)
 	var str strings.Builder
 	fmt.Fprintf(&str, "cumTSN=%d", q.cumulativeTSN)
 	for _, b := range gapAckBlocks {

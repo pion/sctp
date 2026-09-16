@@ -14,6 +14,9 @@ var (
 	// errZeroMTUOption indicates that the MTU option was set to zero.
 	errZeroMTUOption = errors.New("MTU option cannot be set to zero")
 
+	// errMTUTooSmallOption indicates that the MTU cannot fit SCTP DATA and I-DATA headers plus padding.
+	errMTUTooSmallOption = errors.New("MTU option is too small")
+
 	// errZeroMaxReceiveBufferOption indicates that the MTU option was set to zero.
 	errZeroMaxReceiveBufferOption = errors.New("MaxReceiveBuffer option cannot be set to zero")
 

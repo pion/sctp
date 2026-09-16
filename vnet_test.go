@@ -14,8 +14,8 @@ import (
 	"time"
 
 	"github.com/pion/logging"
-	"github.com/pion/transport/v4/test"
-	"github.com/pion/transport/v4/vnet"
+	"github.com/pion/transport/v5/test"
+	"github.com/pion/transport/v5/vnet"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -734,6 +734,10 @@ func TestRACK_RTTSwitch_Reordering_NoDrop(t *testing.T) { //nolint:gocyclo,cyclo
 	const (
 		numMessages = 40
 		messageSize = 256
+		// The VNet filter drops a whole SCTP packet, so keep exactly one
+		// message in each packet. Otherwise a single configured drop can
+		// legitimately cause several fast retransmits.
+		testMTU uint32 = 512
 	)
 
 	makeMessages := func() [][]byte {
@@ -781,6 +785,7 @@ func TestRACK_RTTSwitch_Reordering_NoDrop(t *testing.T) { //nolint:gocyclo,cyclo
 
 		assoc, err := Server(Config{
 			NetConn:       conn,
+			MTU:           testMTU,
 			LoggerFactory: loggerFactory,
 		})
 		if err != nil {
@@ -844,6 +849,7 @@ func TestRACK_RTTSwitch_Reordering_NoDrop(t *testing.T) { //nolint:gocyclo,cyclo
 
 		assoc, err := Client(Config{
 			NetConn:       conn,
+			MTU:           testMTU,
 			LoggerFactory: loggerFactory,
 		})
 		if err != nil {

@@ -25,7 +25,7 @@ import (
 	"time"
 
 	"github.com/pion/logging"
-	"github.com/pion/transport/v4/test"
+	"github.com/pion/transport/v5/test"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -37,6 +37,7 @@ var (
 	errReceivedDataNot3Bytes = errors.New("received data must by 3 bytes")
 	errPPIUnexpected         = errors.New("unexpected ppi")
 	errReceivedDataMismatch  = errors.New("received data mismatch")
+	errConnWrite             = errors.New("connection write failed")
 )
 
 func TestAssocStressDuplex(t *testing.T) {
@@ -847,6 +848,23 @@ func TestAssociationInterleavingNegotiationPayloadChunkType(t *testing.T) {
 	}
 }
 
+func TestAssociationInterleavingUpdatesMaxPayloadSize(t *testing.T) {
+	assoc := createTestAssociation(t, Config{MTU: initialMTU})
+
+	require.False(t, assoc.useInterleaving)
+	require.Equal(t, maxPayloadSizeForMTU(initialMTU, false), assoc.maxPayloadSize)
+
+	assoc.peerInterleaving = true
+	require.NoError(t, assoc.updateInterleavingState())
+	require.True(t, assoc.useInterleaving)
+	require.Equal(t, maxPayloadSizeForMTU(initialMTU, true), assoc.maxPayloadSize)
+
+	assoc.peerInterleaving = false
+	require.NoError(t, assoc.updateInterleavingState())
+	require.False(t, assoc.useInterleaving)
+	require.Equal(t, maxPayloadSizeForMTU(initialMTU, false), assoc.maxPayloadSize)
+}
+
 func TestAssociationMetadataNotReadyBeforeHandshake(t *testing.T) {
 	assoc := createTestAssociation(t, Config{
 		NetConn: &dumbConn{},
@@ -960,30 +978,766 @@ func TestAssociationInterleavingFinalizedOnEstablishedTransition(t *testing.T) {
 	})
 }
 
-func TestAssociationDataIgnoredBeforeEstablished(t *testing.T) {
+func TestAssociationDataIgnoredOutsideReceiveStates(t *testing.T) {
+	for name, state := range map[string]uint32{
+		"before established": cookieEchoed,
+		"shutdown received":  shutdownReceived,
+	} {
+		t.Run(name, func(t *testing.T) {
+			assoc := createTestAssociation(t, Config{})
+			assoc.localInterleaving = true
+			assoc.peerInterleaving = true
+			assoc.useInterleaving = false
+			assoc.payloadQueue.init(0)
+			assoc.setState(state)
+
+			packets := assoc.handleData(&chunkPayloadData{
+				iData:                  true,
+				messageIdentifier:      1,
+				fragmentSequenceNumber: 0,
+				beginningFragment:      true,
+				endingFragment:         true,
+				tsn:                    1,
+				streamIdentifier:       1,
+				payloadType:            PayloadTypeWebRTCBinary,
+				userData:               []byte("ignored"),
+			})
+
+			require.Nil(t, packets)
+			require.False(t, assoc.willSendAbort)
+			require.Equal(t, uint32(0), assoc.peerLastTSN())
+			require.Zero(t, assoc.stats.getNumDATAs())
+		})
+	}
+}
+
+func TestAssociationDataAcknowledgedInShutdownSent(t *testing.T) {
 	assoc := createTestAssociation(t, Config{})
-	assoc.localInterleaving = true
-	assoc.peerInterleaving = true
-	assoc.useInterleaving = false
 	assoc.payloadQueue.init(0)
-	assoc.setState(cookieEchoed)
+	assoc.cumulativeTSNAckPoint = 100
+	assoc.setState(shutdownSent)
+	require.True(t, assoc.t2Shutdown.start(1000))
+	t.Cleanup(assoc.t2Shutdown.close)
 
 	packets := assoc.handleData(&chunkPayloadData{
-		iData:                  true,
-		messageIdentifier:      1,
-		fragmentSequenceNumber: 0,
-		beginningFragment:      true,
-		endingFragment:         true,
-		tsn:                    1,
-		streamIdentifier:       1,
-		payloadType:            PayloadTypeWebRTCBinary,
-		userData:               []byte("pre-established"),
+		beginningFragment: true,
+		endingFragment:    true,
+		tsn:               1,
+		streamIdentifier:  1,
+		payloadType:       PayloadTypeWebRTCBinary,
+		userData:          []byte("in flight during shutdown"),
 	})
 
 	require.Nil(t, packets)
-	require.False(t, assoc.willSendAbort)
-	require.Equal(t, uint32(0), assoc.peerLastTSN())
-	require.Zero(t, assoc.stats.getNumDATAs())
+	assert.Equal(t, uint32(1), assoc.peerLastTSN())
+	assert.True(t, assoc.immediateAckTriggered)
+	assert.True(t, assoc.willSendShutdown)
+	assert.False(t, assoc.t2Shutdown.isRunning(), "T2 must stop before sending the SHUTDOWN response")
+
+	assoc.handleChunksEnd()
+	rawPackets, ok := assoc.gatherOutbound()
+	require.True(t, ok)
+	require.Len(t, rawPackets, 2, "expected immediate SACK followed by a SHUTDOWN response")
+	assert.True(t, assoc.t2Shutdown.isRunning(), "sending the SHUTDOWN response must restart T2")
+
+	var sackFound, shutdownFound bool
+	for _, raw := range rawPackets {
+		packet := &packet{}
+		require.NoError(t, packet.unmarshal(false, raw))
+		require.Len(t, packet.chunks, 1)
+		switch c := packet.chunks[0].(type) {
+		case *chunkSelectiveAck:
+			sackFound = true
+			assert.Equal(t, uint32(1), c.cumulativeTSNAck)
+		case *chunkShutdown:
+			shutdownFound = true
+			assert.Equal(t, uint32(1), c.cumulativeTSNAck)
+		}
+	}
+	assert.True(t, sackFound)
+	assert.True(t, shutdownFound)
+
+	assoc.handleChunksStart()
+	for streamID := uint16(2); streamID <= acceptChSize; streamID++ {
+		require.NotNil(t, assoc.createStream(streamID, true))
+	}
+	packets = assoc.handleData(&chunkPayloadData{
+		beginningFragment: true,
+		endingFragment:    true,
+		tsn:               2,
+		streamIdentifier:  acceptChSize + 1,
+		payloadType:       PayloadTypeWebRTCBinary,
+		userData:          []byte("no room for another stream"),
+	})
+
+	require.Nil(t, packets)
+	assert.Equal(t, uint32(1), assoc.peerLastTSN(), "discarded DATA must not advance the cumulative TSN")
+	assert.True(t, assoc.immediateAckTriggered)
+	assert.True(t, assoc.willSendShutdown)
+	assert.False(t, assoc.t2Shutdown.isRunning())
+}
+
+func TestAssociationShutdownProcessesCumulativeTSNAck(t *testing.T) {
+	assoc := createTestAssociation(t, Config{})
+	assoc.cumulativeTSNAckPoint = 99
+	assoc.advancedPeerTSNAckPoint = 99
+	assoc.setRWND(1234)
+	assoc.setState(established)
+	t.Cleanup(assoc.t3RTX.stop)
+
+	now := time.Now()
+	assoc.inflightQueue.pushNoCheck(mkChunk(100, now))
+	assoc.inflightQueue.pushNoCheck(mkChunk(101, now))
+
+	assoc.lock.Lock()
+	err := assoc.handleShutdown(&chunkShutdown{cumulativeTSNAck: 100})
+	assoc.lock.Unlock()
+
+	require.NoError(t, err)
+	assert.Equal(t, shutdownReceived, assoc.getState())
+	assert.Equal(t, uint32(100), assoc.cumulativeTSNAckPoint)
+	assert.Equal(t, 1, assoc.inflightQueue.size())
+	assert.False(t, assoc.willSendShutdownAck)
+	assert.Equal(t, uint32(1234), assoc.RWND(), "SHUTDOWN must not update a_rwnd")
+	assert.Zero(t, assoc.stats.getNumSACKsReceived())
+
+	assoc.lock.Lock()
+	err = assoc.handleShutdown(&chunkShutdown{cumulativeTSNAck: 101})
+	assoc.lock.Unlock()
+
+	require.NoError(t, err)
+	assert.Equal(t, shutdownAckSent, assoc.getState())
+	assert.Equal(t, uint32(101), assoc.cumulativeTSNAckPoint)
+	assert.Zero(t, assoc.inflightQueue.size())
+	assert.True(t, assoc.willSendShutdownAck)
+	assert.Equal(t, uint32(1234), assoc.RWND())
+	assert.Zero(t, assoc.stats.getNumSACKsReceived())
+}
+
+func TestAssociationShutdownRejectsBufferedAmountLowWrite(t *testing.T) {
+	assoc := createTestAssociation(t, Config{})
+	assoc.cumulativeTSNAckPoint = 99
+	assoc.advancedPeerTSNAckPoint = 99
+	assoc.setState(established)
+
+	stream := assoc.createStream(1, false)
+	require.NotNil(t, stream)
+	stream.bufferedAmount = 1
+
+	callbackCalled := false
+	callbackN := 0
+	var callbackErr error
+	var callbackState uint32
+	stream.OnBufferedAmountLow(func() {
+		callbackCalled = true
+		callbackState = assoc.getState()
+		callbackN, callbackErr = stream.WriteSCTP([]byte("must be rejected"), PayloadTypeWebRTCBinary)
+	})
+
+	assoc.inflightQueue.pushNoCheck(mkChunk(100, time.Now()))
+
+	assoc.lock.Lock()
+	err := assoc.handleShutdown(&chunkShutdown{cumulativeTSNAck: 100})
+	assoc.lock.Unlock()
+
+	require.NoError(t, err)
+	require.True(t, callbackCalled)
+	assert.Equal(t, shutdownReceived, callbackState)
+	assert.Zero(t, callbackN)
+	assert.ErrorIs(t, callbackErr, ErrPayloadDataStateNotExist)
+	assert.Zero(t, stream.BufferedAmount())
+	assert.Zero(t, assoc.inflightQueue.size())
+	assert.Zero(t, assoc.pendingQueue.size())
+	assert.Equal(t, shutdownAckSent, assoc.getState())
+	assert.True(t, assoc.willSendShutdownAck)
+}
+
+func TestAssociationShutdownUnblocksPendingWrites(t *testing.T) {
+	for name, transition := range map[string]func(*Association) error{
+		"local shutdown": func(assoc *Association) error {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+
+			return assoc.Shutdown(ctx)
+		},
+		"peer shutdown": func(assoc *Association) error {
+			assoc.lock.Lock()
+			defer assoc.lock.Unlock()
+
+			return assoc.handleShutdown(&chunkShutdown{cumulativeTSNAck: 99})
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			assoc := createTestAssociation(t, Config{BlockWrite: true})
+			assoc.setState(established)
+			assoc.cumulativeTSNAckPoint = 99
+			assoc.advancedPeerTSNAckPoint = 99
+			assoc.writePending = true
+			writeNotify := assoc.writeNotify
+
+			err := transition(assoc)
+			if name == "local shutdown" {
+				require.ErrorIs(t, err, context.Canceled)
+			} else {
+				require.NoError(t, err)
+			}
+			assert.NotEqual(t, established, assoc.getState())
+			assert.False(t, assoc.writePending)
+
+			select {
+			case <-writeNotify:
+			default:
+				assert.Fail(t, "blocked writers were not notified of shutdown")
+			}
+		})
+	}
+}
+
+func TestAssociationInvalidShutdownAckDoesNotChangeState(t *testing.T) {
+	for name, state := range map[string]uint32{
+		"established":      established,
+		"shutdown pending": shutdownPending,
+	} {
+		t.Run(name, func(t *testing.T) {
+			assoc := createTestAssociation(t, Config{BlockWrite: state == established})
+			assoc.setState(state)
+			assoc.cumulativeTSNAckPoint = 99
+			assoc.inflightQueue.pushNoCheck(mkChunk(100, time.Now()))
+			var writeNotify chan struct{}
+			if state == established {
+				assoc.writePending = true
+				writeNotify = assoc.writeNotify
+			}
+
+			assoc.lock.Lock()
+			err := assoc.handleShutdown(&chunkShutdown{cumulativeTSNAck: 101})
+			assoc.lock.Unlock()
+
+			require.ErrorIs(t, err, ErrInflightQueueTSNPop)
+			assert.Equal(t, state, assoc.getState())
+			assert.Equal(t, uint32(99), assoc.cumulativeTSNAckPoint)
+			assert.Equal(t, 1, assoc.inflightQueue.size())
+			assert.False(t, assoc.willSendShutdownAck)
+			if state == established {
+				assert.True(t, assoc.writePending)
+				select {
+				case <-writeNotify:
+					assert.Fail(t, "invalid shutdown notified blocked writers")
+				default:
+				}
+			}
+		})
+	}
+}
+
+func TestAssociationCrossedShutdownClearsPendingShutdown(t *testing.T) {
+	assoc := createTestAssociation(t, Config{})
+	assoc.cumulativeTSNAckPoint = 99
+	assoc.setState(shutdownSent)
+	assoc.willSendShutdown = true
+	require.True(t, assoc.t2Shutdown.start(1000))
+	t.Cleanup(assoc.t2Shutdown.close)
+
+	assoc.lock.Lock()
+	err := assoc.handleShutdown(&chunkShutdown{cumulativeTSNAck: 99})
+	assoc.lock.Unlock()
+
+	require.NoError(t, err)
+	assert.Equal(t, shutdownAckSent, assoc.getState())
+	assert.False(t, assoc.willSendShutdown)
+	assert.True(t, assoc.willSendShutdownAck)
+	assert.False(t, assoc.t2Shutdown.isRunning())
+
+	rawPackets, ok := assoc.gatherOutbound()
+	require.True(t, ok)
+	require.Len(t, rawPackets, 1)
+	assert.True(t, assoc.t2Shutdown.isRunning())
+
+	packet := &packet{}
+	require.NoError(t, packet.unmarshal(false, rawPackets[0]))
+	require.Len(t, packet.chunks, 1)
+	require.IsType(t, &chunkShutdownAck{}, packet.chunks[0])
+	assert.False(t, assoc.willSendShutdown)
+	assert.False(t, assoc.willSendShutdownAck)
+
+	rawPackets, ok = assoc.gatherOutbound()
+	assert.True(t, ok)
+	assert.Empty(t, rawPackets)
+}
+
+func TestAssociationRepeatedShutdownRetransmitsAck(t *testing.T) {
+	assoc := createTestAssociation(t, Config{})
+	assoc.setState(shutdownAckSent)
+	require.True(t, assoc.t2Shutdown.start(1000))
+	t.Cleanup(assoc.t2Shutdown.close)
+
+	assoc.lock.Lock()
+	err := assoc.handleShutdown(&chunkShutdown{})
+	assoc.lock.Unlock()
+
+	require.NoError(t, err)
+	assert.Equal(t, shutdownAckSent, assoc.getState())
+	assert.True(t, assoc.willSendShutdownAck)
+	assert.False(t, assoc.t2Shutdown.isRunning())
+
+	rawPackets, ok := assoc.gatherOutbound()
+	require.True(t, ok)
+	require.Len(t, rawPackets, 1)
+	assert.True(t, assoc.t2Shutdown.isRunning())
+
+	pkt := &packet{}
+	require.NoError(t, pkt.unmarshal(false, rawPackets[0]))
+	require.Len(t, pkt.chunks, 1)
+	require.IsType(t, &chunkShutdownAck{}, pkt.chunks[0])
+}
+
+func TestAssociationShutdownAckPrioritizedOverControlQueue(t *testing.T) {
+	assoc := createTestAssociation(t, Config{})
+	assoc.setState(shutdownAckSent)
+	assoc.willSendShutdownAck = true
+	assoc.controlQueue.push(assoc.createPacket([]chunk{&chunkCookieAck{}}))
+	t.Cleanup(assoc.t2Shutdown.close)
+
+	rawPackets, ok := assoc.gatherOutbound()
+	require.True(t, ok)
+	require.Len(t, rawPackets, 2)
+	assert.True(t, assoc.t2Shutdown.isRunning())
+
+	shutdownAckPacket := &packet{}
+	require.NoError(t, shutdownAckPacket.unmarshal(false, rawPackets[0]))
+	require.Len(t, shutdownAckPacket.chunks, 1)
+	require.IsType(t, &chunkShutdownAck{}, shutdownAckPacket.chunks[0])
+
+	controlPacket := &packet{}
+	require.NoError(t, controlPacket.unmarshal(false, rawPackets[1]))
+	require.Len(t, controlPacket.chunks, 1)
+	require.IsType(t, &chunkCookieAck{}, controlPacket.chunks[0])
+}
+
+func TestAssociationShutdownPrioritizedOverControlQueue(t *testing.T) {
+	assoc := createTestAssociation(t, Config{})
+	assoc.payloadQueue.init(0)
+	assoc.setState(shutdownSent)
+	assoc.willSendShutdown = true
+	assoc.ackState = ackStateImmediate
+	assoc.controlQueue.push(assoc.createPacket([]chunk{&chunkCookieAck{}}))
+	t.Cleanup(assoc.t2Shutdown.close)
+
+	rawPackets, ok := assoc.gatherOutbound()
+	require.True(t, ok)
+	require.Len(t, rawPackets, 3)
+	assert.True(t, assoc.t2Shutdown.isRunning())
+
+	expected := []chunk{
+		&chunkSelectiveAck{},
+		&chunkShutdown{},
+		&chunkCookieAck{},
+	}
+	for i, expectedChunk := range expected {
+		packet := &packet{}
+		require.NoError(t, packet.unmarshal(false, rawPackets[i]))
+		require.Len(t, packet.chunks, 1)
+		require.IsType(t, expectedChunk, packet.chunks[0])
+	}
+}
+
+func TestAssociationShutdownAckClearsPendingShutdownResponses(t *testing.T) {
+	for name, test := range map[string]struct {
+		state               uint32
+		willSendShutdown    bool
+		willSendShutdownAck bool
+	}{
+		"shutdown sent": {
+			state:            shutdownSent,
+			willSendShutdown: true,
+		},
+		"shutdown ack sent": {
+			state:               shutdownAckSent,
+			willSendShutdownAck: true,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			assoc := createTestAssociation(t, Config{})
+			assoc.setState(test.state)
+			assoc.willSendShutdown = test.willSendShutdown
+			assoc.willSendShutdownAck = test.willSendShutdownAck
+
+			assoc.lock.Lock()
+			assoc.handleShutdownAck(&chunkShutdownAck{})
+			assoc.lock.Unlock()
+
+			assert.False(t, assoc.willSendShutdown)
+			assert.False(t, assoc.willSendShutdownAck)
+			assert.True(t, assoc.willSendShutdownComplete)
+
+			assoc.willSendShutdown = true
+			assoc.willSendShutdownAck = true
+
+			rawPackets, ok := assoc.gatherOutbound()
+			require.False(t, ok)
+			require.Len(t, rawPackets, 1)
+
+			packet := &packet{}
+			require.NoError(t, packet.unmarshal(false, rawPackets[0]))
+			require.Len(t, packet.chunks, 1)
+			require.IsType(t, &chunkShutdownComplete{}, packet.chunks[0])
+		})
+	}
+}
+
+func TestAssociationShutdownCompleteWinsOverLateData(t *testing.T) {
+	assoc := createTestAssociation(t, Config{})
+	assoc.payloadQueue.init(0)
+	assoc.setState(shutdownSent)
+
+	assoc.lock.Lock()
+	assoc.handleShutdownAck(&chunkShutdownAck{})
+	packets := assoc.handleData(&chunkPayloadData{
+		beginningFragment: true,
+		endingFragment:    true,
+		tsn:               0,
+		streamIdentifier:  1,
+		payloadType:       PayloadTypeWebRTCBinary,
+		userData:          []byte("late duplicate"),
+	})
+	assoc.lock.Unlock()
+
+	require.Nil(t, packets)
+	assoc.handleChunksEnd()
+
+	assert.True(t, assoc.willSendShutdownComplete)
+	assert.False(t, assoc.willSendShutdown)
+	assert.False(t, assoc.immediateAckTriggered)
+	assert.Zero(t, assoc.stats.getNumDATAs())
+
+	rawPackets, ok := assoc.gatherOutbound()
+	require.False(t, ok)
+	require.Len(t, rawPackets, 1)
+
+	packet := &packet{}
+	require.NoError(t, packet.unmarshal(false, rawPackets[0]))
+	require.Len(t, packet.chunks, 1)
+	require.IsType(t, &chunkShutdownComplete{}, packet.chunks[0])
+	assert.False(t, assoc.willSendShutdownComplete)
+	assert.True(t, assoc.shutdownCompletePending)
+	assert.False(t, assoc.t2Shutdown.isRunning())
+
+	assoc.lock.Lock()
+	packets = assoc.handleData(&chunkPayloadData{
+		beginningFragment: true,
+		endingFragment:    true,
+		tsn:               0,
+		streamIdentifier:  1,
+		payloadType:       PayloadTypeWebRTCBinary,
+		userData:          []byte("late after gather"),
+	})
+	assoc.lock.Unlock()
+
+	assert.Nil(t, packets)
+	assert.False(t, assoc.willSendShutdown)
+	assert.Zero(t, assoc.stats.getNumDATAs())
+}
+
+func TestAssociationShutdownCompleteWinsOverLateT2Timeout(t *testing.T) {
+	for name, state := range map[string]uint32{
+		"shutdown sent":     shutdownSent,
+		"shutdown ack sent": shutdownAckSent,
+	} {
+		t.Run(name, func(t *testing.T) {
+			assoc := createTestAssociation(t, Config{})
+			assoc.setState(state)
+			require.True(t, assoc.t2Shutdown.start(1000))
+			t.Cleanup(assoc.t2Shutdown.close)
+
+			assoc.lock.Lock()
+			assoc.handleShutdownAck(&chunkShutdownAck{})
+			assoc.lock.Unlock()
+
+			assoc.onRetransmissionTimeout(timerT2Shutdown, 1)
+
+			assert.True(t, assoc.willSendShutdownComplete)
+			assert.False(t, assoc.willSendShutdown)
+			assert.False(t, assoc.willSendShutdownAck)
+			assert.False(t, assoc.t2Shutdown.isRunning())
+
+			rawPackets, ok := assoc.gatherOutbound()
+			require.False(t, ok)
+			require.Len(t, rawPackets, 1)
+
+			packet := &packet{}
+			require.NoError(t, packet.unmarshal(false, rawPackets[0]))
+			require.Len(t, packet.chunks, 1)
+			require.IsType(t, &chunkShutdownComplete{}, packet.chunks[0])
+
+			assoc.onRetransmissionTimeout(timerT2Shutdown, 2)
+			assert.False(t, assoc.willSendShutdown)
+			assert.False(t, assoc.willSendShutdownAck)
+		})
+	}
+}
+
+func TestAssociationShutdownDrainsPendingData(t *testing.T) {
+	assoc := createTestAssociation(t, Config{})
+	assoc.setState(established)
+	assoc.initialTSN = 100
+	assoc.myNextTSN = 100
+	assoc.cumulativeTSNAckPoint = 99
+	assoc.advancedPeerTSNAckPoint = 99
+	assoc.setRWND(1024)
+	t.Cleanup(assoc.closeAllTimers)
+
+	assoc.pendingQueue.push(&chunkPayloadData{
+		beginningFragment: true,
+		endingFragment:    true,
+		streamIdentifier:  1,
+		payloadType:       PayloadTypeWebRTCBinary,
+		userData:          []byte("queued before shutdown"),
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.ErrorIs(t, assoc.Shutdown(ctx), context.Canceled)
+	assert.Equal(t, shutdownPending, assoc.getState())
+	assert.False(t, assoc.willSendShutdown)
+
+	rawPackets, ok := assoc.gatherOutbound()
+	require.True(t, ok)
+	require.Len(t, rawPackets, 1)
+
+	pkt := &packet{}
+	require.NoError(t, pkt.unmarshal(false, rawPackets[0]))
+	require.Len(t, pkt.chunks, 1)
+	data, ok := pkt.chunks[0].(*chunkPayloadData)
+	require.True(t, ok)
+	assert.Equal(t, uint32(100), data.tsn)
+	assert.Zero(t, assoc.pendingQueue.size())
+	assert.Equal(t, 1, assoc.inflightQueue.size())
+	assert.Equal(t, shutdownPending, assoc.getState())
+
+	assoc.lock.Lock()
+	err := assoc.handleSack(&chunkSelectiveAck{
+		cumulativeTSNAck:               100,
+		advertisedReceiverWindowCredit: 1024,
+	})
+	assoc.lock.Unlock()
+	require.NoError(t, err)
+	assert.Equal(t, shutdownSent, assoc.getState())
+	assert.True(t, assoc.willSendShutdown)
+
+	rawPackets, ok = assoc.gatherOutbound()
+	require.True(t, ok)
+	require.Len(t, rawPackets, 1)
+
+	pkt = &packet{}
+	require.NoError(t, pkt.unmarshal(false, rawPackets[0]))
+	require.Len(t, pkt.chunks, 1)
+	require.IsType(t, &chunkShutdown{}, pkt.chunks[0])
+}
+
+func TestAssociationCrossedShutdownDrainsPendingData(t *testing.T) {
+	assoc := createTestAssociation(t, Config{})
+	assoc.setState(shutdownPending)
+	assoc.initialTSN = 100
+	assoc.myNextTSN = 100
+	assoc.cumulativeTSNAckPoint = 99
+	assoc.advancedPeerTSNAckPoint = 99
+	assoc.setRWND(1024)
+	t.Cleanup(assoc.closeAllTimers)
+
+	assoc.pendingQueue.push(&chunkPayloadData{
+		beginningFragment: true,
+		endingFragment:    true,
+		streamIdentifier:  1,
+		payloadType:       PayloadTypeWebRTCBinary,
+		userData:          []byte("queued before crossed shutdown"),
+	})
+
+	assoc.lock.Lock()
+	err := assoc.handleShutdown(&chunkShutdown{cumulativeTSNAck: 99})
+	assoc.lock.Unlock()
+	require.NoError(t, err)
+	assert.Equal(t, shutdownReceived, assoc.getState())
+	assert.False(t, assoc.willSendShutdown)
+	assert.False(t, assoc.willSendShutdownAck)
+
+	rawPackets, ok := assoc.gatherOutbound()
+	require.True(t, ok)
+	require.Len(t, rawPackets, 1)
+
+	pkt := &packet{}
+	require.NoError(t, pkt.unmarshal(false, rawPackets[0]))
+	require.Len(t, pkt.chunks, 1)
+	data, ok := pkt.chunks[0].(*chunkPayloadData)
+	require.True(t, ok)
+	assert.Equal(t, uint32(100), data.tsn)
+	assert.Zero(t, assoc.pendingQueue.size())
+	assert.Equal(t, 1, assoc.inflightQueue.size())
+
+	assoc.lock.Lock()
+	err = assoc.handleSack(&chunkSelectiveAck{
+		cumulativeTSNAck:               100,
+		advertisedReceiverWindowCredit: 1024,
+	})
+	assoc.lock.Unlock()
+	require.NoError(t, err)
+	assert.Equal(t, shutdownAckSent, assoc.getState())
+	assert.True(t, assoc.willSendShutdownAck)
+
+	rawPackets, ok = assoc.gatherOutbound()
+	require.True(t, ok)
+	require.Len(t, rawPackets, 1)
+
+	pkt = &packet{}
+	require.NoError(t, pkt.unmarshal(false, rawPackets[0]))
+	require.Len(t, pkt.chunks, 1)
+	require.IsType(t, &chunkShutdownAck{}, pkt.chunks[0])
+}
+
+func TestAssociationSendsForwardTSNWhileDrainingShutdown(t *testing.T) {
+	for name, state := range map[string]uint32{
+		"shutdown pending":  shutdownPending,
+		"shutdown received": shutdownReceived,
+	} {
+		t.Run(name, func(t *testing.T) {
+			assoc := createTestAssociation(t, Config{})
+			assoc.setState(state)
+			assoc.useForwardTSN = true
+			assoc.cumulativeTSNAckPoint = 9
+			assoc.advancedPeerTSNAckPoint = 9
+			assoc.inflightQueue.pushNoCheck(&chunkPayloadData{
+				beginningFragment:    true,
+				endingFragment:       true,
+				tsn:                  10,
+				streamIdentifier:     1,
+				streamSequenceNumber: 2,
+				userData:             []byte("abandoned"),
+				nSent:                1,
+				_abandoned:           true,
+				_allInflight:         true,
+			})
+
+			assoc.lock.Lock()
+			err := assoc.finishAcknowledgement(
+				&chunkSelectiveAck{cumulativeTSNAck: 9},
+				acknowledgementResult{htna: 9},
+			)
+			assoc.lock.Unlock()
+			require.NoError(t, err)
+			require.Equal(t, uint32(10), assoc.advancedPeerTSNAckPoint)
+			require.True(t, assoc.willSendForwardTSN)
+
+			rawPackets, ok := assoc.gatherOutbound()
+			require.True(t, ok)
+			require.Len(t, rawPackets, 1)
+
+			pkt := &packet{}
+			require.NoError(t, pkt.unmarshal(false, rawPackets[0]))
+			require.Len(t, pkt.chunks, 1)
+			forwardTSN, ok := pkt.chunks[0].(*chunkForwardTSN)
+			require.True(t, ok)
+			assert.Equal(t, uint32(10), forwardTSN.newCumulativeTSN)
+			assert.False(t, assoc.willSendForwardTSN)
+		})
+	}
+}
+
+func TestAssociationShutdownAdvancesAfterPendingStreamReset(t *testing.T) {
+	for name, test := range map[string]struct {
+		state         uint32
+		expectedState uint32
+		expectedChunk chunk
+	}{
+		"shutdown pending": {
+			state:         shutdownPending,
+			expectedState: shutdownSent,
+			expectedChunk: &chunkShutdown{},
+		},
+		"shutdown received": {
+			state:         shutdownReceived,
+			expectedState: shutdownAckSent,
+			expectedChunk: &chunkShutdownAck{},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			assoc := createTestAssociation(t, Config{})
+			assoc.setState(test.state)
+			assoc.myNextTSN = 100
+			t.Cleanup(assoc.closeAllTimers)
+
+			assoc.pendingQueue.push(&chunkPayloadData{
+				beginningFragment: true,
+				endingFragment:    true,
+				streamIdentifier:  1,
+			})
+
+			rawPackets, ok := assoc.gatherOutbound()
+			require.True(t, ok)
+			require.Len(t, rawPackets, 2)
+			assert.Equal(t, test.expectedState, assoc.getState())
+			assert.Zero(t, assoc.pendingQueue.size())
+			assert.Zero(t, assoc.inflightQueue.size())
+
+			reconfigPacket := &packet{}
+			require.NoError(t, reconfigPacket.unmarshal(false, rawPackets[0]))
+			require.Len(t, reconfigPacket.chunks, 1)
+			require.IsType(t, &chunkReconfig{}, reconfigPacket.chunks[0])
+
+			shutdownPacket := &packet{}
+			require.NoError(t, shutdownPacket.unmarshal(false, rawPackets[1]))
+			require.Len(t, shutdownPacket.chunks, 1)
+			require.IsType(t, test.expectedChunk, shutdownPacket.chunks[0])
+
+			assoc.onRetransmissionTimeout(timerReconfig, 1)
+			assoc.onRetransmissionTimeout(timerT2Shutdown, 1)
+			require.True(t, assoc.willRetransmitReconfig)
+
+			rawPackets, ok = assoc.gatherOutbound()
+			require.True(t, ok)
+			require.Len(t, rawPackets, 2)
+			assert.Equal(t, test.expectedState, assoc.getState())
+			assert.False(t, assoc.willRetransmitReconfig)
+
+			retransmittedShutdown := &packet{}
+			require.NoError(t, retransmittedShutdown.unmarshal(false, rawPackets[0]))
+			require.Len(t, retransmittedShutdown.chunks, 1)
+			require.IsType(t, test.expectedChunk, retransmittedShutdown.chunks[0])
+
+			retransmitted := &packet{}
+			require.NoError(t, retransmitted.unmarshal(false, rawPackets[1]))
+			require.Len(t, retransmitted.chunks, 1)
+			require.IsType(t, &chunkReconfig{}, retransmitted.chunks[0])
+		})
+	}
+}
+
+func TestAssociationShutdownSentRespondsToInvalidCumulativeTSNAck(t *testing.T) {
+	assoc := createTestAssociation(t, Config{})
+	assoc.setState(shutdownSent)
+	assoc.cumulativeTSNAckPoint = 99
+	assoc.willSendShutdown = true
+	require.True(t, assoc.t2Shutdown.start(1000))
+	t.Cleanup(assoc.t2Shutdown.close)
+
+	assoc.lock.Lock()
+	err := assoc.handleShutdown(&chunkShutdown{cumulativeTSNAck: 100})
+	assoc.lock.Unlock()
+
+	require.NoError(t, err)
+	assert.Equal(t, shutdownAckSent, assoc.getState())
+	assert.Equal(t, uint32(99), assoc.cumulativeTSNAckPoint)
+	assert.False(t, assoc.willSendShutdown)
+	assert.True(t, assoc.willSendShutdownAck)
+	assert.False(t, assoc.t2Shutdown.isRunning())
+
+	rawPackets, ok := assoc.gatherOutbound()
+	require.True(t, ok)
+	require.Len(t, rawPackets, 1)
+	assert.True(t, assoc.t2Shutdown.isRunning())
+
+	packet := &packet{}
+	require.NoError(t, packet.unmarshal(false, rawPackets[0]))
+	require.Len(t, packet.chunks, 1)
+	require.IsType(t, &chunkShutdownAck{}, packet.chunks[0])
 }
 
 func TestAssociationInterleavingProtocolViolationWrongForwardTSNChunkType(t *testing.T) {
@@ -1902,6 +2656,131 @@ func TestAssocUnreliable(t *testing.T) { //nolint:maintidx
 // A test for this PR https://github.com/pion/sctp/pull/341
 // We drop the first INIT ACK, and we expect the verification tag to be 0 on
 // retransmission.
+// maxRetransmits=N must allow N retransmissions: RFC 7496 Section 3.1 abandons
+// a message only when a retransmission "would exceed the provided limit", and
+// RFC 8832 Section 5.1 says messages "will not be retransmitted more times than
+// specified in the Reliability Parameter".
+func TestAssocUnreliableRexmitLimit(t *testing.T) {
+	for _, tc := range []struct {
+		limit     uint32
+		drops     int
+		sends     int
+		delivered bool
+	}{
+		{limit: 0, drops: 1, sends: 1, delivered: false},
+		{limit: 1, drops: 1, sends: 2, delivered: true},
+		{limit: 1, drops: 2, sends: 2, delivered: false},
+		{limit: 2, drops: 2, sends: 3, delivered: true},
+		{limit: 2, drops: 3, sends: 3, delivered: false},
+	} {
+		t.Run(fmt.Sprintf("limit %d drops %d", tc.limit, tc.drops), func(t *testing.T) {
+			sends, delivered := runRexmitLimit(t, tc.limit, tc.drops)
+			assert.Equal(t, tc.sends, sends, "unexpected number of transmissions")
+			assert.Equal(t, tc.delivered, delivered, "unexpected delivery")
+		})
+	}
+}
+
+// runRexmitLimit writes one message on an unordered stream limited to limit
+// retransmissions, discards the first drops copies of it on the wire, and
+// reports how many copies were sent and whether the message was delivered.
+func runRexmitLimit(t *testing.T, limit uint32, drops int) (int, bool) { //nolint:cyclop
+	t.Helper()
+
+	lim := test.TimeOut(time.Second * 10)
+	defer lim.Stop()
+
+	br := test.NewBridge()
+
+	a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, 0)
+	assert.NoError(t, err, "failed to create associations")
+
+	s0, s1, err := establishSessionPair(br, a0, a1, 1)
+	assert.NoError(t, err, "failed to establish session pair")
+	defer closeAssociationPair(br, a0, a1)
+
+	// Keep the T3-rtx retransmissions well inside the observation window.
+	a0.rtoMgr.setRTO(50.0, true)
+
+	s0.SetReliabilityParams(true, ReliabilityTypeRexmit, limit)
+
+	const msgSize = 1000
+	var (
+		mu        sync.Mutex
+		target    uint32
+		hasTarget bool
+		sends     int
+	)
+	br.Filter(0, func(raw []byte) bool {
+		p := &packet{}
+		if p.unmarshal(true, raw) != nil {
+			return true
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+
+		for _, c := range p.chunks {
+			data, ok := c.(*chunkPayloadData)
+			if !ok || len(data.userData) != msgSize {
+				continue
+			}
+			if !hasTarget {
+				target, hasTarget = data.tsn, true
+			}
+			if data.tsn == target {
+				sends++
+
+				return sends > drops
+			}
+		}
+
+		return true
+	})
+	countSends := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+
+		return sends
+	}
+
+	var delivered atomic.Int32
+	go func() {
+		buf := make([]byte, 2000)
+		for {
+			n, _, readErr := s1.ReadSCTP(buf)
+			if readErr != nil {
+				return
+			}
+			if n == msgSize {
+				delivered.Add(1)
+			}
+		}
+	}()
+
+	_, err = s0.WriteSCTP(make([]byte, msgSize), PayloadTypeWebRTCBinary)
+	assert.NoError(t, err)
+	for countSends() == 0 {
+		br.Tick()
+		time.Sleep(time.Millisecond)
+	}
+
+	// Followers, sent after the message, make the receiver report the gap.
+	for range 4 {
+		_, err = s0.WriteSCTP(make([]byte, 10), PayloadTypeWebRTCBinary)
+		assert.NoError(t, err)
+	}
+
+	// Long enough for every allowed retransmission, and for one more to show.
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		br.Tick()
+		time.Sleep(time.Millisecond)
+	}
+
+	return countSends(), delivered.Load() == 1
+}
+
 func TestInitVerificationTagIsZero(t *testing.T) { //nolint:cyclop
 	lim := test.TimeOut(time.Second * 10)
 	defer lim.Stop()
@@ -2153,6 +3032,73 @@ func TestCreateForwardTSN(t *testing.T) {
 		assert.True(t, si1OK, "si=1 should be present")
 		assert.True(t, si2OK, "si=2 should be present")
 	})
+
+	t.Run("omit unordered streams", func(t *testing.T) {
+		assoc := createTestAssociation(t, Config{
+			NetConn:       &dumbConn{},
+			LoggerFactory: loggerFactory,
+		})
+
+		assoc.cumulativeTSNAckPoint = 9
+		assoc.advancedPeerTSNAckPoint = 10
+		assoc.inflightQueue.pushNoCheck(&chunkPayloadData{
+			unordered:            true,
+			beginningFragment:    true,
+			endingFragment:       true,
+			tsn:                  10,
+			streamIdentifier:     1,
+			streamSequenceNumber: 42,
+			_abandoned:           true,
+			_allInflight:         true,
+		})
+
+		forwardTSN := assoc.createForwardTSN()
+
+		assert.Equal(t, uint32(10), forwardTSN.newCumulativeTSN)
+		assert.Empty(t, forwardTSN.streams, "unordered DATA has no valid stream sequence number")
+
+		raw, err := forwardTSN.marshal()
+		require.NoError(t, err)
+		assert.Len(t, raw, 8, "a FORWARD TSN without ordered streams only contains its fixed fields")
+
+		decoded := &chunkForwardTSN{}
+		require.NoError(t, decoded.unmarshal(raw))
+		assert.Equal(t, forwardTSN.newCumulativeTSN, decoded.newCumulativeTSN)
+		assert.Empty(t, decoded.streams)
+	})
+
+	t.Run("omit unordered DATA sharing an ordered stream identifier", func(t *testing.T) {
+		assoc := createTestAssociation(t, Config{
+			NetConn:       &dumbConn{},
+			LoggerFactory: loggerFactory,
+		})
+
+		assoc.cumulativeTSNAckPoint = 9
+		assoc.advancedPeerTSNAckPoint = 11
+		assoc.inflightQueue.pushNoCheck(&chunkPayloadData{
+			unordered:            true,
+			beginningFragment:    true,
+			endingFragment:       true,
+			tsn:                  10,
+			streamIdentifier:     1,
+			streamSequenceNumber: 42,
+			_abandoned:           true,
+			_allInflight:         true,
+		})
+		assoc.inflightQueue.pushNoCheck(&chunkPayloadData{
+			beginningFragment:    true,
+			endingFragment:       true,
+			tsn:                  11,
+			streamIdentifier:     1,
+			streamSequenceNumber: 3,
+			_abandoned:           true,
+			_allInflight:         true,
+		})
+
+		forwardTSN := assoc.createForwardTSN()
+
+		require.Equal(t, []chunkForwardTSNStream{{identifier: 1, sequence: 3}}, forwardTSN.streams)
+	})
 }
 
 func TestCreateIForwardTSN(t *testing.T) {
@@ -2188,7 +3134,7 @@ func TestCreateIForwardTSN(t *testing.T) {
 		}}, fwdtsn.streams, "should report the abandoned ordered MID")
 	})
 
-	t.Run("forward ordered and unordered with the same SI", func(t *testing.T) {
+	t.Run("retain ordered and unordered I-FORWARD TSN entries", func(t *testing.T) {
 		assoc := createTestAssociation(t, Config{
 			NetConn:       &dumbConn{},
 			LoggerFactory: loggerFactory,
@@ -2257,6 +3203,7 @@ func TestCreateIForwardTSN(t *testing.T) {
 		fwdtsn := assoc.createIForwardTSN()
 
 		assert.Equal(t, uint32(14), fwdtsn.newCumulativeTSN, "should set new cumulative TSN")
+		// RFC 8260 gives I-FORWARD TSN entries an ordered flag, so the FORWARD TSN exclusion does not apply.
 		assert.ElementsMatch(t, []chunkIForwardTSNStream{
 			{
 				identifier:        1,
@@ -3750,12 +4697,13 @@ func TestAssocAbort(t *testing.T) {
 }
 
 type fakeEchoConn struct {
-	echo     chan []byte
-	done     chan struct{}
-	closed   chan struct{}
-	once     sync.Once
-	errClose error
-	mu       sync.Mutex
+	echo      chan []byte
+	done      chan struct{}
+	closed    chan struct{}
+	once      sync.Once
+	closeOnce sync.Once
+	errClose  error
+	mu        sync.Mutex
 
 	bytesSent     uint64
 	bytesReceived uint64
@@ -3809,10 +4757,13 @@ func (c *fakeEchoConn) Write(b []byte) (int, error) {
 }
 
 func (c *fakeEchoConn) Close() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	close(c.echo)
-	close(c.closed)
+	c.closeOnce.Do(func() {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+
+		close(c.echo)
+		close(c.closed)
+	})
 
 	return c.errClose
 }
@@ -3935,8 +4886,87 @@ func TestAssocHandleInit(t *testing.T) {
 		handleInitTest(t, established, true)
 	})
 
-	t.Run("unexpected state shutdownAckSent", func(t *testing.T) {
-		handleInitTest(t, shutdownAckSent, true)
+	t.Run("shutdownAckSent matching ports retransmits shutdown ack", func(t *testing.T) {
+		assoc := createTestAssociation(t, Config{
+			NetConn:       &dumbConn{},
+			LoggerFactory: loggerFactory,
+		})
+		assoc.setState(shutdownAckSent)
+		assoc.sourcePort = 5002
+		assoc.destinationPort = 5001
+		assoc.willSendShutdown = true
+		require.True(t, assoc.t2Shutdown.start(1000))
+		t.Cleanup(assoc.t2Shutdown.close)
+
+		pkt := &packet{
+			sourcePort:      5001,
+			destinationPort: 5002,
+		}
+		init := &chunkInit{
+			chunkInitCommon: chunkInitCommon{
+				initialTSN:                     1234,
+				numOutboundStreams:             1001,
+				numInboundStreams:              1002,
+				initiateTag:                    5678,
+				advertisedReceiverWindowCredit: 512 * 1024,
+			},
+		}
+
+		packets, err := assoc.handleInit(pkt, init)
+		require.NoError(t, err)
+		assert.Empty(t, packets)
+		assert.Equal(t, shutdownAckSent, assoc.getState())
+		assert.False(t, assoc.willSendShutdown)
+		assert.True(t, assoc.willSendShutdownAck)
+		assert.False(t, assoc.t2Shutdown.isRunning())
+
+		rawPackets, ok := assoc.gatherOutbound()
+		require.True(t, ok)
+		require.Len(t, rawPackets, 1)
+		assert.True(t, assoc.t2Shutdown.isRunning())
+
+		shutdownAckPacket := &packet{}
+		require.NoError(t, shutdownAckPacket.unmarshal(false, rawPackets[0]))
+		require.Len(t, shutdownAckPacket.chunks, 1)
+		require.IsType(t, &chunkShutdownAck{}, shutdownAckPacket.chunks[0])
+	})
+
+	t.Run("shutdownAckSent mismatched ports does not retransmit shutdown ack", func(t *testing.T) {
+		assoc := createTestAssociation(t, Config{
+			NetConn:       &dumbConn{},
+			LoggerFactory: loggerFactory,
+		})
+		assoc.setState(shutdownAckSent)
+		assoc.sourcePort = 6002
+		assoc.destinationPort = 6001
+		require.True(t, assoc.t2Shutdown.start(1000))
+		t.Cleanup(assoc.t2Shutdown.close)
+
+		pkt := &packet{
+			sourcePort:      5001,
+			destinationPort: 5002,
+		}
+		init := &chunkInit{
+			chunkInitCommon: chunkInitCommon{
+				initialTSN:                     1234,
+				numOutboundStreams:             1001,
+				numInboundStreams:              1002,
+				initiateTag:                    5678,
+				advertisedReceiverWindowCredit: 512 * 1024,
+			},
+		}
+
+		packets, err := assoc.handleInit(pkt, init)
+		require.NoError(t, err)
+		assert.Empty(t, packets)
+		assert.Equal(t, shutdownAckSent, assoc.getState())
+		assert.False(t, assoc.willSendShutdown)
+		assert.False(t, assoc.willSendShutdownAck)
+		assert.True(t, assoc.t2Shutdown.isRunning())
+
+		rawPackets, ok := assoc.gatherOutbound()
+		assert.True(t, ok)
+		assert.Empty(t, rawPackets)
 	})
 
 	t.Run("unexpected state shutdownPending", func(t *testing.T) {
@@ -4432,6 +5462,105 @@ func TestAssociationAbortSetsWriteDeadline(t *testing.T) {
 	case <-time.After(300 * time.Millisecond):
 		require.FailNow(t, "Abort did not return promptly")
 	}
+}
+
+type writeErrorConn struct {
+	readStarted  chan struct{}
+	writeStarted chan struct{}
+	failWrite    chan struct{}
+	closed       chan struct{}
+	readOnce     sync.Once
+	writeOnce    sync.Once
+	closeOnce    sync.Once
+	closeCalls   atomic.Int32
+}
+
+func newWriteErrorConn() *writeErrorConn {
+	return &writeErrorConn{
+		readStarted:  make(chan struct{}),
+		writeStarted: make(chan struct{}),
+		failWrite:    make(chan struct{}),
+		closed:       make(chan struct{}),
+	}
+}
+
+func (c *writeErrorConn) Read(_ []byte) (int, error) {
+	c.readOnce.Do(func() { close(c.readStarted) })
+	<-c.closed
+
+	return 0, net.ErrClosed
+}
+
+func (c *writeErrorConn) Write(_ []byte) (int, error) {
+	c.writeOnce.Do(func() { close(c.writeStarted) })
+	<-c.failWrite
+
+	return 0, errConnWrite
+}
+
+func (c *writeErrorConn) Close() error {
+	c.closeCalls.Add(1)
+	c.closeOnce.Do(func() { close(c.closed) })
+
+	return nil
+}
+
+func (c *writeErrorConn) LocalAddr() net.Addr                { return &net.IPAddr{} }
+func (c *writeErrorConn) RemoteAddr() net.Addr               { return &net.IPAddr{} }
+func (c *writeErrorConn) SetDeadline(_ time.Time) error      { return nil }
+func (c *writeErrorConn) SetReadDeadline(_ time.Time) error  { return nil }
+func (c *writeErrorConn) SetWriteDeadline(_ time.Time) error { return nil }
+
+func TestAssociationWriteFailureClosesTransport(t *testing.T) { //nolint:cyclop
+	conn := newWriteErrorConn()
+	assoc := createTestAssociation(t, Config{
+		NetConn:       conn,
+		LoggerFactory: logging.NewDefaultLoggerFactory(),
+	})
+	assoc.initClient()
+
+	select {
+	case <-conn.readStarted:
+	case <-time.After(time.Second):
+		require.FailNow(t, "read loop did not start")
+	}
+	select {
+	case <-conn.writeStarted:
+	case <-time.After(time.Second):
+		require.FailNow(t, "write loop did not start")
+	}
+
+	stream, err := assoc.OpenStream(1, PayloadTypeWebRTCString)
+	require.NoError(t, err)
+
+	streamReadDone := make(chan error, 1)
+	go func() {
+		_, readErr := stream.Read(make([]byte, 1))
+		streamReadDone <- readErr
+	}()
+
+	close(conn.failWrite)
+
+	select {
+	case err = <-streamReadDone:
+		require.Error(t, err)
+	case <-time.After(time.Second):
+		require.FailNow(t, "stream read remained blocked after write failure")
+	}
+	select {
+	case <-assoc.readLoopCloseCh:
+	case <-time.After(time.Second):
+		require.FailNow(t, "association teardown remained blocked after write failure")
+	}
+	select {
+	case <-assoc.closeWriteLoopCh:
+	default:
+		require.FailNow(t, "association shutdown waiters were not released after write failure")
+	}
+
+	require.Equal(t, int32(1), conn.closeCalls.Load())
+	require.NoError(t, assoc.Close())
+	require.Equal(t, int32(1), conn.closeCalls.Load())
 }
 
 // readMyNextTSN uses a lock to read the myNextTSN field of the association.
@@ -5326,31 +6455,29 @@ func TestAssociation_BlockWrite(t *testing.T) {
 	// test write deadline
 	// a2's awnd is 0, so write should be blocked
 	require.NoError(t, s1.SetWriteDeadline(time.Now().Add(100*time.Millisecond)))
-	_, err = s1.WriteSCTP(data, PayloadTypeWebRTCBinary)
-	require.ErrorIs(t, err, context.DeadlineExceeded, err)
+	n, err = s1.WriteSCTP(data, PayloadTypeWebRTCBinary)
+	require.Zero(t, n)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
 
 	// test write deadline cancel
 	require.NoError(t, s1.SetWriteDeadline(time.Time{}))
 	var deadLineCanceled atomic.Bool
-	writeCanceled := make(chan struct{}, 2)
+	writeCanceled := make(chan error, 2)
 	// both write should be blocked and canceled by deadline
-	go func() {
-		_, err1 := s1.WriteSCTP(data, PayloadTypeWebRTCBinary)
-		require.ErrorIs(t, err, context.DeadlineExceeded, err1)
-		require.True(t, deadLineCanceled.Load())
-		writeCanceled <- struct{}{}
-	}()
-	go func() {
-		_, err1 := s1.WriteSCTP(data, PayloadTypeWebRTCBinary)
-		require.ErrorIs(t, err, context.DeadlineExceeded, err1)
-		require.True(t, deadLineCanceled.Load())
-		writeCanceled <- struct{}{}
-	}()
+	for range 2 {
+		go func() {
+			written, writeErr := s1.WriteSCTP(data, PayloadTypeWebRTCBinary)
+			assert.Zero(t, written)
+			assert.True(t, deadLineCanceled.Load())
+			writeCanceled <- writeErr
+		}()
+	}
 	time.Sleep(100 * time.Millisecond)
 	deadLineCanceled.Store(true)
 	require.NoError(t, s1.SetWriteDeadline(time.Now().Add(-1*time.Second)))
-	<-writeCanceled
-	<-writeCanceled
+	for range 2 {
+		require.ErrorIs(t, <-writeCanceled, context.DeadlineExceeded)
+	}
 	require.NoError(t, s1.SetWriteDeadline(time.Time{}))
 
 	rn, rerr := s2.Read(data)
@@ -5742,6 +6869,157 @@ func TestProcessSelectiveAck_GapBlockUint16Max(t *testing.T) {
 	assert.True(t, got.acked, "chunk should be marked as acked after SACK gap-block processing")
 }
 
+func TestProcessSelectiveAck_ValidationDoesNotMutateInflightQueue(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		inflightTSN []uint32
+		sack        chunkSelectiveAck
+		expectedErr error
+	}{
+		{
+			name:        "missing first cumulative TSN",
+			inflightTSN: []uint32{101},
+			sack:        chunkSelectiveAck{cumulativeTSNAck: 100},
+			expectedErr: ErrInflightQueueTSNPop,
+		},
+		{
+			name:        "missing last cumulative TSN",
+			inflightTSN: []uint32{100},
+			sack:        chunkSelectiveAck{cumulativeTSNAck: 101},
+			expectedErr: ErrInflightQueueTSNPop,
+		},
+		{
+			name:        "missing gap start",
+			inflightTSN: []uint32{100, 101},
+			sack: chunkSelectiveAck{
+				cumulativeTSNAck: 100,
+				gapAckBlocks:     []gapAckBlock{{start: 2, end: 2}},
+			},
+			expectedErr: ErrTSNRequestNotExist,
+		},
+		{
+			name:        "missing gap end",
+			inflightTSN: []uint32{100, 101},
+			sack: chunkSelectiveAck{
+				cumulativeTSNAck: 100,
+				gapAckBlocks:     []gapAckBlock{{start: 1, end: 2}},
+			},
+			expectedErr: ErrTSNRequestNotExist,
+		},
+		{
+			name:        "zero gap offset",
+			inflightTSN: []uint32{100, 101},
+			sack: chunkSelectiveAck{
+				cumulativeTSNAck: 100,
+				gapAckBlocks:     []gapAckBlock{{start: 0, end: 0}},
+			},
+			expectedErr: ErrTSNRequestNotExist,
+		},
+		{
+			name:        "reversed gap",
+			inflightTSN: []uint32{100, 101},
+			sack: chunkSelectiveAck{
+				cumulativeTSNAck: 99,
+				gapAckBlocks:     []gapAckBlock{{start: 2, end: 1}},
+			},
+			expectedErr: ErrTSNRequestNotExist,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			assoc := newRackTestAssoc(t)
+			chunks := make([]*chunkPayloadData, 0, len(test.inflightTSN))
+			for _, tsn := range test.inflightTSN {
+				chunk := mkChunk(tsn, time.Now())
+				chunks = append(chunks, chunk)
+				assoc.inflightQueue.pushNoCheck(chunk)
+			}
+
+			assoc.lock.Lock()
+			_, _, _, _, _, err := assoc.processSelectiveAck(&test.sack) //nolint:dogsled
+			assoc.lock.Unlock()
+
+			if test.expectedErr == nil {
+				require.NoError(t, err)
+			} else {
+				require.ErrorIs(t, err, test.expectedErr)
+			}
+			for i, tsn := range test.inflightTSN {
+				got, ok := assoc.inflightQueue.get(tsn)
+				require.Truef(t, ok, "TSN %d was removed", tsn)
+				assert.Same(t, chunks[i], got)
+			}
+		})
+	}
+}
+
+func TestHandleSack_ReversedGapDoesNotPartiallyProcess(t *testing.T) {
+	assoc := newRackTestAssoc(t)
+	first := mkChunk(100, time.Now())
+	second := mkChunk(101, time.Now())
+	assoc.inflightQueue.pushNoCheck(first)
+	assoc.inflightQueue.pushNoCheck(second)
+
+	const initialRWND = 1234
+	assoc.setRWND(initialRWND)
+	assoc.inFastRecovery = true
+	assoc.fastRecoverExitPoint = 101
+	require.False(t, assoc.t3RTX.isRunning())
+	defer assoc.t3RTX.stop()
+
+	sack := &chunkSelectiveAck{
+		cumulativeTSNAck:               100,
+		advertisedReceiverWindowCredit: 4096,
+		gapAckBlocks:                   []gapAckBlock{{start: 4, end: 3}},
+	}
+
+	assoc.lock.Lock()
+	err := assoc.handleSack(sack)
+	assoc.lock.Unlock()
+
+	require.ErrorIs(t, err, ErrTSNRequestNotExist)
+	assert.Equal(t, uint32(99), assoc.cumulativeTSNAckPoint)
+	assert.Equal(t, uint32(initialRWND), assoc.RWND())
+	assert.Equal(t, 2, assoc.inflightQueue.size())
+	assert.Equal(t, 2, assoc.inflightQueue.getNumBytes())
+
+	got, ok := assoc.inflightQueue.get(100)
+	require.True(t, ok)
+	assert.Same(t, first, got)
+	assert.False(t, got.acked)
+	assert.False(t, got.retransmit)
+	assert.Zero(t, got.missIndicator)
+
+	got, ok = assoc.inflightQueue.get(101)
+	require.True(t, ok)
+	assert.Same(t, second, got)
+	assert.False(t, got.acked)
+	assert.False(t, got.retransmit)
+	assert.Zero(t, got.missIndicator)
+
+	assert.True(t, assoc.inFastRecovery)
+	assert.Equal(t, uint32(101), assoc.fastRecoverExitPoint)
+	assert.False(t, assoc.willRetransmitFast)
+	assert.False(t, assoc.t3RTX.isRunning())
+}
+
+func TestProcessSelectiveAck_CumulativeTSNWrap(t *testing.T) {
+	assoc := newRackTestAssoc(t)
+	assoc.cumulativeTSNAckPoint = math.MaxUint32 - 1
+
+	for _, tsn := range []uint32{math.MaxUint32, 0, 1} {
+		assoc.inflightQueue.pushNoCheck(mkChunk(tsn, time.Now()))
+	}
+
+	assoc.lock.Lock()
+	_, _, _, _, _, err := assoc.processSelectiveAck(&chunkSelectiveAck{ //nolint:dogsled
+		cumulativeTSNAck: 1,
+	})
+	assoc.lock.Unlock()
+
+	require.NoError(t, err)
+	assert.Zero(t, assoc.inflightQueue.size())
+}
+
 func TestRTOClearsFastRecovery(t *testing.T) {
 	assoc := newRackTestAssoc(t)
 
@@ -5794,7 +7072,7 @@ func shutdownTLRAssociationForTest(a *Association, peer net.Conn) {
 func pushPendingFullPacketChunks(t *testing.T, a *Association, n int) {
 	t.Helper()
 
-	userLen := int(a.MTU()) - int(commonHeaderSize+dataChunkHeaderSize)
+	userLen := int(maxPayloadSizeForMTU(a.MTU(), false))
 	assert.True(t, userLen > 0)
 
 	for range n {
@@ -5810,7 +7088,7 @@ func pushPendingFullPacketChunks(t *testing.T, a *Association, n int) {
 func pushInflightRetransmitFullPacketChunks(t *testing.T, a *Association, startTSN uint32, n int) {
 	t.Helper()
 
-	userLen := int(a.MTU()) - int(commonHeaderSize+dataChunkHeaderSize)
+	userLen := int(maxPayloadSizeForMTU(a.MTU(), false))
 	assert.True(t, userLen > 0)
 
 	for i := range n {
@@ -6636,6 +7914,70 @@ func TestAssociationSNAPInterleavingNegotiationPayloadChunkType(t *testing.T) {
 			require.Equal(t, len(msg), n, "unexpected length of received data")
 			require.Equal(t, PayloadTypeWebRTCBinary, ppi, "unexpected ppi")
 			require.Equal(t, msg, string(buf[:n]))
+		})
+	}
+}
+
+func TestSelectiveAckMTU(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		mtu            uint32
+		gaps           int
+		duplicates     int
+		wantGaps       int
+		wantDuplicates int
+	}{
+		{"scattered loss", 1228, 4500, 0, 300, 0},
+		{"gaps take priority", 1228, 4500, 500, 300, 0},
+		{"duplicates fill remainder", 1228, 299, 500, 299, 1},
+		{"duplicates only", 1228, 0, 500, 0, 300},
+		{"exact fit", 1228, 300, 0, 300, 0},
+		{"unaligned MTU", 1191, 4500, 0, 290, 0},
+		{"small MTU", 36, 20, 20, 2, 0},
+		{"all entries fit", 1228, 3, 2, 3, 2},
+		{"empty", 1228, 0, 0, 0, 0},
+		{"chunk length limit", 100000, 0, 20000, 0, 16379},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			queue := newReceivePayloadQueue(16384)
+			cumulativeTSN := uint32(0xfffffff0)
+			queue.init(cumulativeTSN)
+			for i := 1; i <= tc.gaps; i++ {
+				require.True(t, queue.push(cumulativeTSN+uint32(2*i))) //nolint:gosec // G115
+			}
+			for i := 0; i < tc.duplicates; i++ {
+				require.False(t, queue.push(cumulativeTSN))
+			}
+			assoc := &Association{
+				mtu:                  tc.mtu,
+				payloadQueue:         queue,
+				maxReceiveBufferSize: 24 * 1024 * 1024,
+				ackState:             ackStateImmediate,
+				stats:                &associationStats{},
+				log:                  logging.NewDefaultLoggerFactory().NewLogger("sctp-test"),
+			}
+			rawPackets := assoc.gatherOutboundSackPackets(nil)
+			require.Len(t, rawPackets, 1)
+			require.LessOrEqual(t, len(rawPackets[0]), int(tc.mtu))
+			var decoded packet
+			require.NoError(t, decoded.unmarshal(true, rawPackets[0]))
+			require.Len(t, decoded.chunks, 1)
+			sack, ok := decoded.chunks[0].(*chunkSelectiveAck)
+			require.True(t, ok)
+			require.Len(t, sack.gapAckBlocks, tc.wantGaps)
+			require.Len(t, sack.duplicateTSN, tc.wantDuplicates)
+			require.Equal(t, cumulativeTSN, sack.cumulativeTSNAck)
+			require.Equal(t, assoc.maxReceiveBufferSize, sack.advertisedReceiverWindowCredit)
+			for i, block := range sack.gapAckBlocks {
+				offset := uint16(2 * (i + 1)) //nolint:gosec // G115
+				require.Equal(t, gapAckBlock{start: offset, end: offset}, block)
+			}
+			for _, duplicate := range sack.duplicateTSN {
+				require.Equal(t, cumulativeTSN, duplicate)
+			}
+			require.Empty(t, queue.popDuplicates())
+			require.Equal(t, tc.gaps, queue.size())
+			require.Len(t, queue.getGapAckBlocks(queue.size()), tc.gaps)
 		})
 	}
 }
