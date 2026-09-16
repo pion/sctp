@@ -5159,7 +5159,7 @@ func createAssocs() (*Association, *Association, error) { //nolint:cyclop
 	defer cancel()
 
 	go func() {
-		a, err2 := createClientWithContext(ctx, Config{
+		a, err2 := ClientContext(ctx, Config{
 			NetConn:       udp1,
 			LoggerFactory: loggerFactory,
 		})
@@ -5171,7 +5171,7 @@ func createAssocs() (*Association, *Association, error) { //nolint:cyclop
 	}()
 
 	go func() {
-		a, err2 := createClientWithContext(ctx, Config{
+		a, err2 := ClientContext(ctx, Config{
 			NetConn:       udp2,
 			LoggerFactory: loggerFactory,
 		})
@@ -5254,7 +5254,7 @@ func createAssociationPairWithConfig(
 		cfg := config
 		cfg.NetConn = udpConn1
 		cfg.LoggerFactory = loggerFactory
-		a, err2 := createClientWithContext(ctx, cfg)
+		a, err2 := ClientContext(ctx, cfg)
 		if err2 != nil {
 			a1Chan <- err2
 		} else {
@@ -5269,7 +5269,7 @@ func createAssociationPairWithConfig(
 		if cfg.MaxReceiveBufferSize == 0 {
 			cfg.MaxReceiveBufferSize = 100_000
 		}
-		a, err2 := createClientWithContext(ctx, cfg)
+		a, err2 := ClientContext(ctx, cfg)
 		if err2 != nil {
 			a2Chan <- err2
 		} else {
@@ -6093,68 +6093,219 @@ func TestAssociation_Abort(t *testing.T) {
 	assert.Error(t, err, "User Initiated Abort: 1234", "expected abort reason")
 }
 
-// TestAssociation_createClientWithContext tests that the client is closed when the context is canceled.
-func TestAssociation_createClientWithContext(t *testing.T) {
-	// Limit runtime in case of deadlocks
-	lim := test.TimeOut(time.Second * 5)
-	defer lim.Stop()
+// clientContextConn signals when the handshake starts and can block deadline updates.
+type clientContextConn struct {
+	net.Conn
+	writeStarted    chan struct{}
+	deadlineBlocked chan struct{}
+	writeOnce       sync.Once
+}
 
-	checkGoroutineLeaks(t)
+// Write signals that the client has started sending its handshake.
+func (c *clientContextConn) Write(packet []byte) (int, error) {
+	c.writeOnce.Do(func() { close(c.writeStarted) })
 
-	udp1, udp2 := createUDPConnPair()
+	return c.Conn.Write(packet)
+}
 
-	loggerFactory := logging.NewDefaultLoggerFactory()
-
-	errCh1 := make(chan error)
-	errCh2 := make(chan error)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-
-	go func() {
-		_, err2 := createClientWithContext(ctx, Config{
-			NetConn:       udp1,
-			LoggerFactory: loggerFactory,
-		})
-		if err2 != nil {
-			errCh1 <- err2
-		} else {
-			errCh1 <- nil
-		}
-	}()
-
-	go func() {
-		_, err2 := createClientWithContext(ctx, Config{
-			NetConn:       udp2,
-			LoggerFactory: loggerFactory,
-		})
-		if err2 != nil {
-			errCh2 <- err2
-		} else {
-			errCh2 <- nil
-		}
-	}()
-
-	// Cancel the context immediately
-	cancel()
-
-	var err1 error
-	var err2 error
-loop:
-	for {
-		select {
-		case err1 = <-errCh1:
-			if err1 != nil && err2 != nil {
-				break loop
-			}
-		case err2 = <-errCh2:
-			if err1 != nil && err2 != nil {
-				break loop
-			}
-		}
+// SetReadDeadline optionally waits before forwarding the deadline to the connection.
+func (c *clientContextConn) SetReadDeadline(deadline time.Time) error {
+	if c.deadlineBlocked != nil {
+		<-c.deadlineBlocked
 	}
 
-	assert.Error(t, err1, "context canceled")
-	assert.Error(t, err2, "context canceled")
+	return c.Conn.SetReadDeadline(deadline)
+}
+
+// clientContextLoggerFactory runs a callback at a deterministic point during setup.
+type clientContextLoggerFactory struct {
+	logging.LoggerFactory
+	onCreate func()
+}
+
+// NewLogger invokes the setup callback before creating the association logger.
+func (f clientContextLoggerFactory) NewLogger(scope string) logging.LeveledLogger {
+	f.onCreate()
+
+	return f.LoggerFactory.NewLogger(scope)
+}
+
+// requirePipeClosed observes library cleanup without causing a read timeout itself.
+func requirePipeClosed(t *testing.T, conn net.Conn) {
+	t.Helper()
+
+	require.Eventually(t, func() bool {
+		return errors.Is(conn.SetReadDeadline(time.Time{}), io.ErrClosedPipe)
+	}, time.Second, time.Millisecond, "ClientContext did not close the connection")
+}
+
+func TestClientContextAlreadyDone(t *testing.T) {
+	checkGoroutineLeaks(t)
+
+	init, err := GenerateOutOfBandToken(Config{})
+	require.NoError(t, err)
+
+	for _, snap := range []bool{false, true} {
+		t.Run(map[bool]string{false: "handshake", true: "SNAP"}[snap], func(t *testing.T) {
+			conn, peer := net.Pipe()
+			t.Cleanup(func() { assert.NoError(t, conn.Close()) })
+			t.Cleanup(func() { assert.NoError(t, peer.Close()) })
+
+			created := false
+			opts := []ClientOption{WithNetConn(conn), WithLoggerFactory(clientContextLoggerFactory{
+				LoggerFactory: logging.NewDefaultLoggerFactory(),
+				onCreate:      func() { created = true },
+			})}
+			if snap {
+				opts = append(opts, WithSNAP(init, init))
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			assoc, err := ClientContext(ctx, opts...)
+			assert.ErrorIs(t, err, context.Canceled)
+			assert.Nil(t, assoc)
+			assert.False(t, created, "a canceled context must not start an association")
+			assert.NoError(t, conn.SetReadDeadline(time.Now()), "the caller still owns the connection")
+		})
+	}
+}
+
+func TestClientContextCancelBlockingConnection(t *testing.T) {
+	for _, blockDeadline := range []bool{false, true} {
+		t.Run(map[bool]string{false: "Close", true: "SetReadDeadline"}[blockDeadline], func(t *testing.T) {
+			checkGoroutineLeaks(t)
+
+			underlying := newBlockingCloseConn()
+			t.Cleanup(func() { close(underlying.closeBlocked) })
+			conn := &clientContextConn{Conn: underlying, writeStarted: make(chan struct{})}
+			if blockDeadline {
+				conn.deadlineBlocked = make(chan struct{})
+				t.Cleanup(func() { close(conn.deadlineBlocked) })
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			result := make(chan error, 1)
+			optionCalls := 0
+			go func() {
+				assoc, err := ClientContext(ctx, WithNetConn(conn), sharedOption(func(*Config) error {
+					optionCalls++
+
+					return nil
+				}))
+				assert.Nil(t, assoc)
+				result <- err
+			}()
+
+			select {
+			case <-conn.writeStarted:
+			case <-time.After(time.Second):
+				require.FailNow(t, "the client did not start its handshake")
+			}
+			cancel()
+
+			select {
+			case err := <-result:
+				assert.ErrorIs(t, err, context.Canceled)
+				assert.Equal(t, 1, optionCalls, "client options must be applied once")
+			case <-time.After(time.Second):
+				require.FailNow(t, "ClientContext waited for a blocked connection")
+			}
+		})
+	}
+}
+
+// clientContextShutdownConn simulates a transport that sends a notification during Close.
+type clientContextShutdownConn struct {
+	net.Conn
+	shutdownResult chan error
+}
+
+// Close attempts the shutdown write before closing the underlying connection.
+func (c *clientContextShutdownConn) Close() error {
+	_, err := c.Conn.Write([]byte("close"))
+	c.shutdownResult <- err
+
+	return c.Conn.Close()
+}
+
+func TestClientContextCancelShutdownWrite(t *testing.T) {
+	checkGoroutineLeaks(t)
+
+	underlying, peer := net.Pipe()
+	t.Cleanup(func() { assert.NoError(t, underlying.Close()) })
+	t.Cleanup(func() { assert.NoError(t, peer.Close()) })
+	transport := &clientContextShutdownConn{Conn: underlying, shutdownResult: make(chan error, 1)}
+	conn := &clientContextConn{Conn: transport, writeStarted: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	result := make(chan error, 1)
+	go func() {
+		assoc, err := ClientContext(ctx, WithNetConn(conn))
+		assert.Nil(t, assoc)
+		result <- err
+	}()
+
+	// Keep the peer unread so both the handshake and shutdown writes would block.
+	select {
+	case <-conn.writeStarted:
+	case <-time.After(time.Second):
+		require.FailNow(t, "the client did not start its handshake")
+	}
+	cancel()
+	select {
+	case err := <-result:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(time.Second):
+		require.FailNow(t, "ClientContext waited for a blocked write")
+	}
+	select {
+	case err := <-transport.shutdownResult:
+		require.ErrorIs(t, err, os.ErrDeadlineExceeded)
+	case <-time.After(time.Second):
+		require.FailNow(t, "the shutdown write did not observe a write deadline")
+	}
+	requirePipeClosed(t, underlying)
+}
+
+func TestClientContextSNAPCanceledDuringSetup(t *testing.T) {
+	checkGoroutineLeaks(t)
+
+	init, err := GenerateOutOfBandToken(Config{})
+	require.NoError(t, err)
+	conn, peer := net.Pipe()
+	t.Cleanup(func() { assert.NoError(t, conn.Close()) })
+	t.Cleanup(func() { assert.NoError(t, peer.Close()) })
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	assoc, err := ClientContext(ctx, WithNetConn(conn), WithSNAP(init, init),
+		WithLoggerFactory(clientContextLoggerFactory{
+			LoggerFactory: logging.NewDefaultLoggerFactory(),
+			onCreate:      cancel,
+		}))
+	if assoc != nil {
+		t.Cleanup(func() { assert.NoError(t, assoc.Close()) })
+	}
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.Nil(t, assoc)
+	requirePipeClosed(t, conn)
+}
+
+func TestClientContextDeadlineExceeded(t *testing.T) {
+	checkGoroutineLeaks(t)
+
+	conn, peer := net.Pipe()
+	t.Cleanup(func() { assert.NoError(t, conn.Close()) })
+	t.Cleanup(func() { assert.NoError(t, peer.Close()) })
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	assoc, err := ClientContext(ctx, WithNetConn(conn))
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Nil(t, assoc)
+	requirePipeClosed(t, conn)
 }
 
 type customLogger struct {
@@ -7708,7 +7859,10 @@ func TestAssociationSNAP(t *testing.T) {
 	initB, err := GenerateOutOfBandToken(tokenConfig)
 	assert.NoError(t, err)
 
-	assocA, err := ClientWithOptions(
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	assocA, err := ClientContext(ctx,
 		WithName("a"),
 		WithNetConn(br.GetConn0()),
 		WithLoggerFactory(loggerFactory),
@@ -7723,6 +7877,9 @@ func TestAssociationSNAP(t *testing.T) {
 		WithSNAP(initB, initA))
 	assert.NoError(t, err)
 	assert.NotNil(t, assocB)
+
+	// The context only controls setup; established associations remain usable.
+	cancel()
 
 	const si uint16 = 1
 	const msg = "SNAP is snappy"
