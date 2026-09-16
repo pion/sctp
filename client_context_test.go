@@ -7,6 +7,8 @@ package sctp
 
 import (
 	"context"
+	"errors"
+	"io"
 	"net"
 	"sync"
 	"testing"
@@ -52,6 +54,15 @@ func (f clientContextLoggerFactory) NewLogger(scope string) logging.LeveledLogge
 	f.onCreate()
 
 	return f.LoggerFactory.NewLogger(scope)
+}
+
+// requirePipeClosed observes library cleanup without causing a read timeout itself.
+func requirePipeClosed(t *testing.T, conn net.Conn) {
+	t.Helper()
+
+	require.Eventually(t, func() bool {
+		return errors.Is(conn.SetReadDeadline(time.Time{}), io.ErrClosedPipe)
+	}, time.Second, time.Millisecond, "ClientContext did not close the connection")
 }
 
 func TestClientContextAlreadyDone(t *testing.T) {
@@ -152,6 +163,7 @@ func TestClientContextSNAPCanceledDuringSetup(t *testing.T) {
 	}
 	assert.ErrorIs(t, err, context.Canceled)
 	assert.Nil(t, assoc)
+	requirePipeClosed(t, conn)
 }
 
 func TestClientContextDeadlineExceeded(t *testing.T) {
@@ -166,4 +178,5 @@ func TestClientContextDeadlineExceeded(t *testing.T) {
 	assoc, err := ClientContext(ctx, WithNetConn(conn))
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
 	assert.Nil(t, assoc)
+	requirePipeClosed(t, conn)
 }
