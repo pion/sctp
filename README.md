@@ -23,6 +23,7 @@
 - [RFC 4895](https://www.rfc-editor.org/rfc/rfc4895.html) — Authenticated Chunks for the Stream Control Transmission Protocol (SCTP)
 - [RFC 8260](https://www.rfc-editor.org/rfc/rfc8260.html) — Stream Schedulers and User Message Interleaving for the Stream Control Transmission Protocol (SCTP)
 - [RFC 1982](https://www.rfc-editor.org/rfc/rfc1982.html) — Serial Number Arithmetic
+- [RFC 9653](https://www.rfc-editor.org/rfc/rfc9653.html) — Zero Checksum for the Stream Control Transmission Protocol
 
 ### Non-RFC / Draft RFC Implemented
 - [RACK (Tail Loss Probing)](https://duepublico2.uni-due.de/servlets/MCRFileNodeServlet/duepublico_derivate_00073893/Diss_Weinrank.pdf#page=97)
