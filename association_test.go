@@ -7147,6 +7147,80 @@ func TestHandleSack_ReversedGapDoesNotPartiallyProcess(t *testing.T) {
 	assert.False(t, assoc.t3RTX.isRunning())
 }
 
+func TestHandleSackCreditsOriginalStreamAfterIDReuse(t *testing.T) {
+	const streamID = 1
+
+	// newGeneration removes the stream that sent chunks 100 and 101 and
+	// reuses its identifier for a new stream with its own buffered bytes.
+	newGeneration := func(t *testing.T) (*Association, *Stream, *Stream) {
+		t.Helper()
+		assoc := newRackTestAssoc(t)
+		t.Cleanup(assoc.closeAllTimers)
+		assoc.setRWND(1024)
+
+		oldStream := assoc.createStream(streamID, false)
+		oldStream.bufferedAmount = 2
+		for _, tsn := range []uint32{100, 101} {
+			chunk := mkChunk(tsn, time.Now())
+			chunk.stream = oldStream
+			assoc.inflightQueue.pushNoCheck(chunk)
+		}
+
+		delete(assoc.streams, streamID)
+		newStream := assoc.createStream(streamID, false)
+		newStream.bufferedAmount = 7
+
+		return assoc, oldStream, newStream
+	}
+	sack := func(t *testing.T, assoc *Association, sack *chunkSelectiveAck) {
+		t.Helper()
+		sack.advertisedReceiverWindowCredit = 1024
+		assoc.lock.Lock()
+		err := assoc.handleSack(sack)
+		assoc.lock.Unlock()
+		require.NoError(t, err)
+	}
+
+	t.Run("cumulative ack", func(t *testing.T) {
+		assoc, oldStream, newStream := newGeneration(t)
+		sack(t, assoc, &chunkSelectiveAck{cumulativeTSNAck: 101})
+
+		assert.Zero(t, oldStream.BufferedAmount())
+		assert.Equal(t, uint64(7), newStream.BufferedAmount())
+	})
+
+	t.Run("gap ack block", func(t *testing.T) {
+		assoc, oldStream, newStream := newGeneration(t)
+		sack(t, assoc, &chunkSelectiveAck{
+			cumulativeTSNAck: 99,
+			gapAckBlocks:     []gapAckBlock{{start: 2, end: 2}},
+		})
+
+		assert.Equal(t, uint64(1), oldStream.BufferedAmount())
+		assert.Equal(t, uint64(7), newStream.BufferedAmount())
+	})
+
+	t.Run("sender stream no longer known", func(t *testing.T) {
+		assoc := newRackTestAssoc(t)
+		t.Cleanup(assoc.closeAllTimers)
+		assoc.setRWND(1024)
+		for _, tsn := range []uint32{100, 101, 102} {
+			assoc.inflightQueue.pushNoCheck(mkChunk(tsn, time.Now()))
+		}
+		other := assoc.createStream(streamID+1, false)
+		other.bufferedAmount = 7
+
+		sack(t, assoc, &chunkSelectiveAck{
+			cumulativeTSNAck: 100,
+			gapAckBlocks:     []gapAckBlock{{start: 2, end: 2}},
+		})
+		sack(t, assoc, &chunkSelectiveAck{cumulativeTSNAck: 102})
+
+		assert.Equal(t, uint64(7), other.BufferedAmount())
+		assert.Zero(t, assoc.inflightQueue.size())
+	})
+}
+
 func TestProcessSelectiveAck_CumulativeTSNWrap(t *testing.T) {
 	assoc := newRackTestAssoc(t)
 	assoc.cumulativeTSNAckPoint = math.MaxUint32 - 1
