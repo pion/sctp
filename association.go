@@ -19,7 +19,7 @@ import (
 
 	"github.com/pion/logging"
 	"github.com/pion/randutil"
-	"github.com/pion/transport/v4/deadline"
+	"github.com/pion/transport/v5/deadline"
 )
 
 // Port 5000 shows up in examples for SDPs used by WebRTC. Since this implementation
@@ -470,14 +470,17 @@ func Client(config Config) (*Association, error) {
 
 // ClientWithOptions opens a SCTP stream over a conn.
 func ClientWithOptions(opts ...ClientOption) (*Association, error) {
-	return createClientWithOptionsWithContext(context.Background(), opts...)
+	return ClientContext(context.Background(), opts...)
 }
 
-func createClientWithContext(ctx context.Context, config Config) (*Association, error) {
-	return createClientWithOptionsWithContext(ctx, config)
+// snapEnabled reports whether both SNAP tokens are present, i.e. the handshake was
+// negotiated out of band.
+func (c *Config) snapEnabled() bool {
+	return c.snapConfig != nil && len(c.snapConfig.remoteInit) != 0 && len(c.snapConfig.localInit) != 0
 }
 
-func createSNAPAssociation(config *Config) (*Association, error) {
+// createSNAPAssociation establishes an association using out-of-band handshake tokens.
+func createSNAPAssociation(ctx context.Context, config *Config) (*Association, error) {
 	// SNAP, aka sctp-init in the SDP.
 	remote := &chunkInit{}
 	err := remote.unmarshal(config.snapConfig.remoteInit)
@@ -491,21 +494,37 @@ func createSNAPAssociation(config *Config) (*Association, error) {
 	}
 	assoc := createAssociationFromConfigWithTsn(config, local.initialTSN)
 	if err = assoc.initWithOutOfBandTokens(local, remote); err != nil {
+		assoc.closeAsync()
+
+		return nil, err
+	}
+	if err = ctx.Err(); err != nil {
+		assoc.closeAsync()
+
 		return nil, err
 	}
 
 	return assoc, nil
 }
 
-func createClientWithOptionsWithContext(ctx context.Context, opts ...ClientOption) (*Association, error) {
+// ClientContext opens a SCTP stream over a conn.
+// The context controls establishment only; canceling it after this function
+// returns successfully does not close the association.
+// If ctx is already done, no association is started and the conn is left open.
+// If ctx is done during establishment, ctx.Err() is returned and the association
+// is closed in the background so a blocking conn cannot stall the caller.
+func ClientContext(ctx context.Context, opts ...ClientOption) (*Association, error) {
 	config, err := buildClientConfig(opts...)
 	if err != nil {
 		return nil, err
 	}
-	if config.snapConfig != nil && len(config.snapConfig.remoteInit) != 0 && len(config.snapConfig.localInit) != 0 {
-		return createSNAPAssociation(config)
+	if err = ctx.Err(); err != nil {
+		return nil, err
 	}
-	assoc, err := createClientAssociation(opts...)
+	if config.snapEnabled() {
+		return createSNAPAssociation(ctx, config)
+	}
+	assoc, err := createAssociationFromConfig(config)
 	if err != nil {
 		return nil, err
 	}
@@ -515,7 +534,7 @@ func createClientWithOptionsWithContext(ctx context.Context, opts ...ClientOptio
 	select {
 	case <-ctx.Done():
 		assoc.log.Errorf("[%s] client handshake canceled: state=%s", assoc.name, getAssociationStateString(assoc.getState()))
-		assoc.Close() // nolint:errcheck,gosec
+		assoc.closeAsync()
 
 		return nil, ctx.Err()
 	case err := <-assoc.handshakeCompletedCh:
@@ -644,15 +663,6 @@ func buildServerConfig(opts ...ServerOption) (*Config, error) {
 	}
 
 	return cfg, nil
-}
-
-func createClientAssociation(opts ...ClientOption) (*Association, error) {
-	cfg, err := buildClientConfig(opts...)
-	if err != nil {
-		return nil, err
-	}
-
-	return createAssociationFromConfig(cfg)
 }
 
 func (a *Association) initClient() {
@@ -1056,6 +1066,20 @@ func (a *Association) Close() error {
 	a.log.Debugf("[%s] stats nFastRetrans: %d", a.name, a.stats.getNumFastRetrans())
 
 	return err
+}
+
+// closeAsync closes the association without waiting for the underlying connection.
+// The deadlines unblock pending I/O and shutdown writes performed by Close.
+func (a *Association) closeAsync() {
+	go func() {
+		deadline := time.Now()
+		_ = a.netConn.SetReadDeadline(deadline)
+		_ = a.netConn.SetWriteDeadline(deadline)
+
+		if err := a.Close(); err != nil {
+			a.log.Warnf("[%s] failed to close association: %v", a.name, err)
+		}
+	}()
 }
 
 func (a *Association) close() error {
@@ -2068,6 +2092,18 @@ func (a *Association) handleInit(pkt *packet, initChunk *chunkInit) ([]*packet, 
 	// original INIT chunk (including its Initiate Tag, unchanged).  When
 	// responding, the endpoint MUST send the INIT ACK back to the same
 	// address that the original INIT (sent by this endpoint) was sent.
+
+	if state == established &&
+		a.sourcePort == pkt.destinationPort &&
+		a.destinationPort == pkt.sourcePort &&
+		a.peerVerificationTag == initChunk.initiateTag {
+		// An INIT retransmitted by the peer can arrive after its COOKIE ECHO
+		// established this association. It belongs to the current handshake,
+		// so it must not tear down or mutate the live TCB.
+		a.log.Debugf("[%s] ignoring duplicate INIT for established association", a.name)
+
+		return nil, nil
+	}
 
 	if state != closed && state != cookieWait && state != cookieEchoed {
 		// 5.2.2.  Unexpected INIT in States Other than CLOSED, COOKIE-ECHOED,
@@ -3350,11 +3386,19 @@ func (a *Association) handleShutdownComplete(_ *chunkShutdownComplete) error {
 
 func (a *Association) handleAbort(c *chunkAbort) error {
 	var errStr strings.Builder
+	hasUserInitiatedAbort := false
 	for _, e := range c.errorCauses {
 		fmt.Fprintf(&errStr, "(%s)", e)
+		if e.errorCauseCode() == userInitiatedAbort {
+			hasUserInitiatedAbort = true
+		}
 	}
 
 	_ = a.close()
+
+	if hasUserInitiatedAbort {
+		return fmt.Errorf("[%s] %w: %w: %s", a.name, ErrChunk, ErrUserInitiatedAbort, errStr.String())
+	}
 
 	return fmt.Errorf("[%s] %w: %s", a.name, ErrChunk, errStr.String())
 }
@@ -3928,7 +3972,7 @@ func (a *Association) sendPayloadData(ctx context.Context, chunks []*chunkPayloa
 			a.lock.Unlock()
 			select {
 			case <-ctx.Done():
-				return ctx.Err()
+				return context.Cause(ctx)
 			case <-writeNotify:
 			}
 			a.lock.Lock()
@@ -3974,7 +4018,10 @@ func (a *Association) checkPartialReliabilityStatus(chunkPayload *chunkPayloadDa
 	if stream, ok := a.streams[chunkPayload.streamIdentifier]; ok { //nolint:nestif
 		stream.lock.RLock()
 		if stream.reliabilityType == ReliabilityTypeRexmit {
-			if chunkPayload.nSent >= stream.reliabilityValue {
+			// nSent counts transmissions, the first one included. Once it exceeds
+			// the limit, every allowed retransmission has been used, and the next
+			// one "would exceed the provided limit" (RFC 7496 Sec 3.1).
+			if chunkPayload.nSent > stream.reliabilityValue {
 				chunkPayload.setAbandoned(true)
 				a.rackRemove(chunkPayload)
 				a.log.Tracef(
