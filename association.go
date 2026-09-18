@@ -273,9 +273,10 @@ type Association struct {
 	abortSentCh        chan struct{}
 
 	// Reconfig
-	myNextRSN        uint32
-	reconfigs        map[uint32]*chunkReconfig
-	reconfigRequests map[uint32]*paramOutgoingResetRequest
+	myNextRSN           uint32
+	reconfigs           map[uint32]*chunkReconfig
+	pendingStreamResets []uint16
+	reconfigRequests    map[uint32]*paramOutgoingResetRequest
 
 	// Non-RFC internal data
 	sourcePort              uint16
@@ -1411,6 +1412,7 @@ func (a *Association) gatherOutboundDataAndReconfigPackets(
 	// Pop unsent data chunks from the pending queue to send as much as
 	// cwnd and rwnd allow.
 	chunks, sisToReset := a.popPendingDataChunksToSend(budgetUnits, consumed)
+	a.pendingStreamResets = append(a.pendingStreamResets, sisToReset...)
 
 	if len(chunks) > 0 {
 		// Start timer. (noop if already started)
@@ -1429,10 +1431,16 @@ func (a *Association) gatherOutboundDataAndReconfigPackets(
 		a.schedulePTOAfterSendLocked()
 	}
 
-	if len(sisToReset) > 0 || a.willRetransmitReconfig { //nolint:nestif
+	if len(a.pendingStreamResets) > 0 || a.willRetransmitReconfig { //nolint:nestif
 		rawPackets = a.gatherOutboundReconfigPackets(rawPackets)
 
-		if len(sisToReset) > 0 {
+		// RFC 6525 permits only one request in flight. Sending the next RSN
+		// before its predecessor is acknowledged lets packet reordering turn
+		// otherwise valid resets into permanent Bad Sequence Number failures.
+		if len(a.pendingStreamResets) > 0 && len(a.reconfigs) == 0 {
+			count := min(len(a.pendingStreamResets), 128)
+			sisToReset = append([]uint16(nil), a.pendingStreamResets[:count]...)
+			a.pendingStreamResets = a.pendingStreamResets[count:]
 			rsn := a.generateNextRSN()
 			tsn := a.myNextTSN - 1
 			c := &chunkReconfig{
@@ -3718,6 +3726,9 @@ func (a *Association) handleReconfigParam(raw param) (*packet, error) {
 		delete(a.reconfigs, par.reconfigResponseSequenceNumber)
 		if len(a.reconfigs) == 0 {
 			a.tReconfig.stop()
+			if len(a.pendingStreamResets) > 0 {
+				a.awakeWriteLoop()
+			}
 		}
 
 		return nil, nil //nolint:nilnil
