@@ -1,12 +1,15 @@
 // SPDX-FileCopyrightText: 2026 The Pion community <https://pion.ly>
 // SPDX-License-Identifier: MIT
 
+//go:build go1.25
+
 package sctp
 
 import (
 	"math"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -115,271 +118,314 @@ func (o *testTimerObserver) onRetransmissionFailure(id int) {
 	o.onRtxFailure(id)
 }
 
-func TestRtxTimer(t *testing.T) { //nolint:maintidx
+func TestRtxTimer(t *testing.T) { //nolint:cyclop,maintidx
 	t.Run("callback interval", func(t *testing.T) {
-		timerID := 0
-		var nCbs int32
-		rt := newRTXTimer(timerID, &testTimerObserver{
-			onRTO: func(id int, _ uint) {
-				atomic.AddInt32(&nCbs, 1)
-				// 30 : 1 (30)
-				// 60 : 2 (90)
-				// 120: 3 (210)
-				// 240: 4 (550) <== expected in 650 msec
-				assert.Equalf(t, timerID, id, "unexpted timer ID: %d", id)
-			},
-			onRtxFailure: func(_ int) {},
-		}, pathMaxRetrans, 0)
+		synctest.Test(t, func(t *testing.T) {
+			timerID := 0
+			rtoCh := make(chan int, 4)
+			rt := newRTXTimer(timerID, &testTimerObserver{
+				onRTO: func(id int, _ uint) {
+					// 30 : 1
+					// 60 : 2
+					// 120: 3
+					// 240: 4
+					assert.Equalf(t, timerID, id, "unexpted timer ID: %d", id)
+					rtoCh <- id
+				},
+				onRtxFailure: func(_ int) {},
+			}, pathMaxRetrans, 0)
 
-		assert.False(t, rt.isRunning(), "should not be running")
+			assert.False(t, rt.isRunning(), "should not be running")
 
-		// since := time.Now()
-		ok := rt.start(30)
-		assert.True(t, ok, "should be true")
-		assert.True(t, rt.isRunning(), "should be running")
+			ok := rt.start(30)
+			assert.True(t, ok, "should be true")
+			assert.True(t, rt.isRunning(), "should be running")
 
-		time.Sleep(650 * time.Millisecond)
-		rt.stop()
-		assert.False(t, rt.isRunning(), "should not be running")
+			for range 4 {
+				select {
+				case <-rtoCh:
+				case <-time.After(300 * time.Millisecond):
+					assert.Fail(t, "expected RTO callback")
 
-		assert.Equal(t, int32(4), atomic.LoadInt32(&nCbs), "should be called 4 times")
+					return
+				}
+			}
+			rt.stop()
+			assert.False(t, rt.isRunning(), "should not be running")
+
+			select {
+			case <-rtoCh:
+				assert.Fail(t, "should be called 4 times")
+			default:
+			}
+		})
 	})
 
 	t.Run("last start wins", func(t *testing.T) {
-		timerID := 3
-		var nCbs int32
+		synctest.Test(t, func(t *testing.T) {
+			timerID := 3
+			rtoCh := make(chan int, 1)
 
-		rt := newRTXTimer(timerID, &testTimerObserver{
-			onRTO: func(id int, _ uint) {
-				atomic.AddInt32(&nCbs, 1)
-				assert.Equalf(t, timerID, id, "unexpted timer ID: %d", id)
-			},
-			onRtxFailure: func(_ int) {},
-		}, pathMaxRetrans, 0)
+			rt := newRTXTimer(timerID, &testTimerObserver{
+				onRTO: func(id int, _ uint) {
+					assert.Equalf(t, timerID, id, "unexpted timer ID: %d", id)
+					rtoCh <- id
+				},
+				onRtxFailure: func(_ int) {},
+			}, pathMaxRetrans, 0)
 
-		interval := float64(30.0)
-		ok := rt.start(interval)
-		assert.True(t, ok, "should be accepted")
-		ok = rt.start(interval * 99) // should ignored
-		assert.False(t, ok, "should be ignored")
-		ok = rt.start(interval * 99) // should ignored
-		assert.False(t, ok, "should be ignored")
+			interval := float64(30.0)
+			ok := rt.start(interval)
+			assert.True(t, ok, "should be accepted")
+			ok = rt.start(interval * 99) // should ignored
+			assert.False(t, ok, "should be ignored")
+			ok = rt.start(interval * 99) // should ignored
+			assert.False(t, ok, "should be ignored")
 
-		time.Sleep(time.Duration(interval*1.5) * time.Millisecond)
-		rt.stop()
-
-		assert.False(t, rt.isRunning(), "should not be running")
-		assert.Equal(t, int32(1), atomic.LoadInt32(&nCbs), "must be called once")
+			select {
+			case <-rtoCh:
+			case <-time.After(time.Duration(interval*3) * time.Millisecond):
+				assert.Fail(t, "must be called once")
+			}
+			rt.stop()
+			assert.False(t, rt.isRunning(), "should not be running")
+		})
 	})
 
 	t.Run("stop right afeter start", func(t *testing.T) {
-		timerID := 3
-		var nCbs int32
+		synctest.Test(t, func(t *testing.T) {
+			timerID := 3
+			rtoCh := make(chan int, 1)
 
-		rt := newRTXTimer(timerID, &testTimerObserver{
-			onRTO: func(id int, _ uint) {
-				atomic.AddInt32(&nCbs, 1)
-				assert.Equalf(t, timerID, id, "unexpted timer ID: %d", id)
-			},
-			onRtxFailure: func(_ int) {},
-		}, pathMaxRetrans, 0)
+			rt := newRTXTimer(timerID, &testTimerObserver{
+				onRTO: func(id int, _ uint) {
+					assert.Equalf(t, timerID, id, "unexpted timer ID: %d", id)
+					rtoCh <- id
+				},
+				onRtxFailure: func(_ int) {},
+			}, pathMaxRetrans, 0)
 
-		interval := float64(30.0)
-		ok := rt.start(interval)
-		assert.True(t, ok, "should be accepted")
-		rt.stop()
+			interval := float64(30.0)
+			ok := rt.start(interval)
+			assert.True(t, ok, "should be accepted")
+			rt.stop()
 
-		time.Sleep(time.Duration(interval*1.5) * time.Millisecond)
-		rt.stop()
+			select {
+			case <-rtoCh:
+				assert.Fail(t, "no callback should be made")
+			case <-time.After(time.Duration(interval*1.5) * time.Millisecond):
+			}
+			rt.stop()
 
-		assert.False(t, rt.isRunning(), "should not be running")
-		assert.Equal(t, int32(0), atomic.LoadInt32(&nCbs), "no callback should be made")
+			assert.False(t, rt.isRunning(), "should not be running")
+		})
 	})
 
 	t.Run("start, stop then start", func(t *testing.T) {
-		timerID := 1
-		var nCbs int32
-		rt := newRTXTimer(timerID, &testTimerObserver{
-			onRTO: func(id int, _ uint) {
-				atomic.AddInt32(&nCbs, 1)
-				assert.Equalf(t, timerID, id, "unexpted timer ID: %d", id)
-			},
-			onRtxFailure: func(_ int) {},
-		}, pathMaxRetrans, 0)
+		synctest.Test(t, func(t *testing.T) {
+			timerID := 1
+			rtoCh := make(chan int, 1)
+			rt := newRTXTimer(timerID, &testTimerObserver{
+				onRTO: func(id int, _ uint) {
+					assert.Equalf(t, timerID, id, "unexpted timer ID: %d", id)
+					rtoCh <- id
+				},
+				onRtxFailure: func(_ int) {},
+			}, pathMaxRetrans, 0)
 
-		interval := float64(30.0)
-		ok := rt.start(interval)
-		assert.True(t, ok, "should be accepted")
-		rt.stop()
-		assert.False(t, rt.isRunning(), "should NOT be running")
-		ok = rt.start(interval)
-		assert.True(t, ok, "should be accepted")
-		assert.True(t, rt.isRunning(), "should be running")
+			interval := float64(30.0)
+			ok := rt.start(interval)
+			assert.True(t, ok, "should be accepted")
+			rt.stop()
+			assert.False(t, rt.isRunning(), "should NOT be running")
+			ok = rt.start(interval)
+			assert.True(t, ok, "should be accepted")
+			assert.True(t, rt.isRunning(), "should be running")
 
-		time.Sleep(time.Duration(interval*1.5) * time.Millisecond)
-		rt.stop()
-		assert.False(t, rt.isRunning(), "should NOT be running")
-		assert.Equal(t, int32(1), atomic.LoadInt32(&nCbs), "must be called once")
+			select {
+			case <-rtoCh:
+			case <-time.After(time.Duration(interval*1.5) * time.Millisecond):
+				assert.Fail(t, "must be called once")
+			}
+			rt.stop()
+			assert.False(t, rt.isRunning(), "should NOT be running")
+		})
 	})
 
 	t.Run("start and stop in a tight loop", func(t *testing.T) {
-		timerID := 2
-		var nCbs int32
-		rt := newRTXTimer(timerID, &testTimerObserver{
-			onRTO: func(id int, _ uint) {
-				atomic.AddInt32(&nCbs, 1)
-				t.Log("onRTO() called")
-				assert.Equalf(t, timerID, id, "unexpted timer ID: %d", id)
-			},
-			onRtxFailure: func(_ int) {},
-		}, pathMaxRetrans, 0)
+		synctest.Test(t, func(t *testing.T) {
+			timerID := 2
+			rtoCh := make(chan int, 1)
+			rt := newRTXTimer(timerID, &testTimerObserver{
+				onRTO: func(id int, _ uint) {
+					t.Log("onRTO() called")
+					assert.Equalf(t, timerID, id, "unexpted timer ID: %d", id)
+					rtoCh <- id
+				},
+				onRtxFailure: func(_ int) {},
+			}, pathMaxRetrans, 0)
 
-		for range 1000 {
-			ok := rt.start(30)
-			assert.True(t, ok, "should be accepted")
-			assert.True(t, rt.isRunning(), "should be running")
-			rt.stop()
-			assert.False(t, rt.isRunning(), "should NOT be running")
-		}
-
-		assert.Equal(t, int32(0), atomic.LoadInt32(&nCbs), "no callback should be made")
+			for range 1000 {
+				ok := rt.start(30)
+				assert.True(t, ok, "should be accepted")
+				assert.True(t, rt.isRunning(), "should be running")
+				rt.stop()
+				assert.False(t, rt.isRunning(), "should NOT be running")
+			}
+			select {
+			case <-rtoCh:
+				assert.Fail(t, "no callback should be made")
+			default:
+			}
+		})
 	})
 
 	t.Run("timer should stop after rtx failure", func(t *testing.T) {
-		timerID := 4
-		var nCbs int32
-		doneCh := make(chan bool)
+		synctest.Test(t, func(t *testing.T) {
+			timerID := 4
+			var nCbs int32
+			doneCh := make(chan bool)
 
-		since := time.Now()
-		var elapsed float64 // in seconds
-		rt := newRTXTimer(timerID, &testTimerObserver{
-			onRTO: func(id int, nRtos uint) {
-				assert.Equal(t, timerID, id, "unexpted timer ID: %d", id)
-				t.Logf("onRTO: n=%d elapsed=%.03f\n", nRtos, time.Since(since).Seconds())
-				atomic.AddInt32(&nCbs, 1)
-			},
-			onRtxFailure: func(id int) {
-				assert.Equal(t, timerID, id, "unexpted timer ID: %d", id)
-				elapsed = time.Since(since).Seconds()
-				t.Logf("onRtxFailure: elapsed=%.03f\n", elapsed)
-				doneCh <- true
-			},
-		}, pathMaxRetrans, 0)
+			since := time.Now()
+			var elapsed float64 // in seconds
+			rt := newRTXTimer(timerID, &testTimerObserver{
+				onRTO: func(id int, nRtos uint) {
+					assert.Equal(t, timerID, id, "unexpted timer ID: %d", id)
+					t.Logf("onRTO: n=%d elapsed=%.03f\n", nRtos, time.Since(since).Seconds())
+					atomic.AddInt32(&nCbs, 1)
+				},
+				onRtxFailure: func(id int) {
+					assert.Equal(t, timerID, id, "unexpted timer ID: %d", id)
+					elapsed = time.Since(since).Seconds()
+					t.Logf("onRtxFailure: elapsed=%.03f\n", elapsed)
+					doneCh <- true
+				},
+			}, pathMaxRetrans, 0)
 
-		// RTO(msec) Total(msec)
-		//  10          10    1st RTO
-		//  20          30    2nd RTO
-		//  40          70    3rd RTO
-		//  80         150    4th RTO
-		// 160         310    5th RTO (== Path.Max.Retrans)
-		// 320         630    Failure
+			// RTO(msec) Total(msec)
+			//  10          10    1st RTO
+			//  20          30    2nd RTO
+			//  40          70    3rd RTO
+			//  80         150    4th RTO
+			// 160         310    5th RTO (== Path.Max.Retrans)
+			// 320         630    Failure
 
-		interval := float64(10.0)
-		ok := rt.start(interval)
-		assert.True(t, ok, "should be accepted")
-		assert.True(t, rt.isRunning(), "should be running")
+			interval := float64(10.0)
+			ok := rt.start(interval)
+			assert.True(t, ok, "should be accepted")
+			assert.True(t, rt.isRunning(), "should be running")
 
-		<-doneCh
+			<-doneCh
 
-		assert.False(t, rt.isRunning(), "should not be running")
-		assert.Equal(t, int32(5), atomic.LoadInt32(&nCbs), "should be called 5 times")
-		assert.True(t, elapsed > 0.600, "must have taken more than 600 msec")
-		assert.True(t, elapsed < 0.700, "must fail in less than 700 msec")
+			assert.False(t, rt.isRunning(), "should not be running")
+			assert.Equal(t, int32(5), atomic.LoadInt32(&nCbs), "should be called 5 times")
+			assert.True(t, elapsed > 0.600, "must have taken more than 600 msec")
+			assert.True(t, elapsed < 0.700, "must fail in less than 700 msec")
+		})
 	})
 
 	t.Run("timer should not stop if maxRetrans is 0", func(t *testing.T) {
-		timerID := 4
-		maxRtos := uint(6)
-		var nCbs int32
-		doneCh := make(chan bool)
+		synctest.Test(t, func(t *testing.T) {
+			timerID := 4
+			maxRtos := uint(6)
+			var nCbs int32
+			doneCh := make(chan bool)
 
-		since := time.Now()
-		var elapsed float64 // in seconds
-		rt := newRTXTimer(timerID, &testTimerObserver{
-			onRTO: func(id int, nRtos uint) {
-				assert.Equal(t, timerID, id, "unexpted timer ID: %d", id)
-				elapsed = time.Since(since).Seconds()
-				t.Logf("onRTO: n=%d elapsed=%.03f\n", nRtos, elapsed)
-				atomic.AddInt32(&nCbs, 1)
-				if nRtos == maxRtos {
-					doneCh <- true
-				}
-			},
-			onRtxFailure: func(_ int) {
-				assert.Fail(t, "timer should not fail")
-			},
-		}, 0, 0)
+			since := time.Now()
+			var elapsed float64 // in seconds
+			rt := newRTXTimer(timerID, &testTimerObserver{
+				onRTO: func(id int, nRtos uint) {
+					assert.Equal(t, timerID, id, "unexpted timer ID: %d", id)
+					elapsed = time.Since(since).Seconds()
+					t.Logf("onRTO: n=%d elapsed=%.03f\n", nRtos, elapsed)
+					atomic.AddInt32(&nCbs, 1)
+					if nRtos == maxRtos {
+						doneCh <- true
+					}
+				},
+				onRtxFailure: func(_ int) {
+					assert.Fail(t, "timer should not fail")
+				},
+			}, 0, 0)
 
-		// RTO(msec) Total(msec)
-		//  10          10    1st RTO
-		//  20          30    2nd RTO
-		//  40          70    3rd RTO
-		//  80         150    4th RTO
-		// 160         310    5th RTO
-		// 320         630    6th RTO => exit test (timer should still be running)
+			// RTO(msec) Total(msec)
+			//  10          10    1st RTO
+			//  20          30    2nd RTO
+			//  40          70    3rd RTO
+			//  80         150    4th RTO
+			// 160         310    5th RTO
+			// 320         630    6th RTO => exit test (timer should still be running)
 
-		interval := float64(10.0)
-		ok := rt.start(interval)
-		assert.True(t, ok, "should be accepted")
-		assert.True(t, rt.isRunning(), "should be running")
+			interval := float64(10.0)
+			ok := rt.start(interval)
+			assert.True(t, ok, "should be accepted")
+			assert.True(t, rt.isRunning(), "should be running")
 
-		<-doneCh
+			<-doneCh
 
-		assert.True(t, rt.isRunning(), "should still be running")
-		assert.Equal(t, int32(6), atomic.LoadInt32(&nCbs), "should be called 6 times")
-		assert.True(t, elapsed > 0.600, "must have taken more than 600 msec")
-		assert.True(t, elapsed < 0.700, "must fail in less than 700 msec")
+			assert.True(t, rt.isRunning(), "should still be running")
+			assert.Equal(t, int32(6), atomic.LoadInt32(&nCbs), "should be called 6 times")
+			assert.True(t, elapsed > 0.600, "must have taken more than 600 msec")
+			assert.True(t, elapsed < 0.700, "must fail in less than 700 msec")
 
-		rt.stop()
+			rt.stop()
+		})
 	})
 
 	t.Run("stop timer that is not running is noop", func(t *testing.T) {
-		timerID := 5
-		doneCh := make(chan bool)
+		synctest.Test(t, func(t *testing.T) {
+			timerID := 5
+			doneCh := make(chan bool)
 
-		rt := newRTXTimer(timerID, &testTimerObserver{
-			onRTO: func(id int, _ uint) {
-				assert.Equal(t, timerID, id, "unexpted timer ID: %d", id)
-				doneCh <- true
-			},
-			onRtxFailure: func(_ int) {},
-		}, pathMaxRetrans, 0)
+			rt := newRTXTimer(timerID, &testTimerObserver{
+				onRTO: func(id int, _ uint) {
+					assert.Equal(t, timerID, id, "unexpted timer ID: %d", id)
+					doneCh <- true
+				},
+				onRtxFailure: func(_ int) {},
+			}, pathMaxRetrans, 0)
 
-		for range 10 {
+			for range 10 {
+				rt.stop()
+			}
+
+			ok := rt.start(20)
+			assert.True(t, ok, "should be accepted")
+			assert.True(t, rt.isRunning(), "must be running")
+
+			<-doneCh
 			rt.stop()
-		}
-
-		ok := rt.start(20)
-		assert.True(t, ok, "should be accepted")
-		assert.True(t, rt.isRunning(), "must be running")
-
-		<-doneCh
-		rt.stop()
-		assert.False(t, rt.isRunning(), "must be false")
+			assert.False(t, rt.isRunning(), "must be false")
+		})
 	})
 
 	t.Run("closed timer won't start", func(t *testing.T) {
-		var rtoCount int
-		timerID := 6
-		rt := newRTXTimer(timerID, &testTimerObserver{
-			onRTO: func(_ int, _ uint) {
-				rtoCount++
-			},
-			onRtxFailure: func(_ int) {},
-		}, pathMaxRetrans, 0)
+		synctest.Test(t, func(t *testing.T) {
+			rtoCh := make(chan int, 1)
+			timerID := 6
+			rt := newRTXTimer(timerID, &testTimerObserver{
+				onRTO: func(_ int, _ uint) {
+					rtoCh <- 1
+				},
+				onRtxFailure: func(_ int) {},
+			}, pathMaxRetrans, 0)
 
-		ok := rt.start(20)
-		assert.True(t, ok, "should be accepted")
-		assert.True(t, rt.isRunning(), "must be running")
+			ok := rt.start(20)
+			assert.True(t, ok, "should be accepted")
+			assert.True(t, rt.isRunning(), "must be running")
 
-		rt.close()
-		assert.False(t, rt.isRunning(), "must be false")
+			rt.close()
+			assert.False(t, rt.isRunning(), "must be false")
 
-		ok = rt.start(20)
-		assert.False(t, ok, "should not start")
-		assert.False(t, rt.isRunning(), "must not be running")
+			ok = rt.start(20)
+			assert.False(t, ok, "should not start")
+			assert.False(t, rt.isRunning(), "must not be running")
 
-		time.Sleep(100 * time.Millisecond)
-		assert.Equal(t, 0, rtoCount, "RTO should not occur")
+			select {
+			case <-rtoCh:
+				assert.Fail(t, "RTO should not occur")
+			case <-time.After(100 * time.Millisecond):
+			}
+		})
 	})
 }
