@@ -5,6 +5,7 @@
 package sctp
 
 import (
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -25,11 +26,11 @@ func (o *testAckTimerObserver) onAckTimeout() {
 func TestAckTimer(t *testing.T) {
 	t.Run("start and close", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			timedOut := make(chan struct{}, 1)
+			var nCbs uint32
 			rt := newAckTimer(&testAckTimerObserver{
 				onAckTO: func() {
 					t.Log("ack timed out")
-					timedOut <- struct{}{}
+					atomic.AddUint32(&nCbs, 1)
 				},
 			})
 
@@ -44,17 +45,12 @@ func TestAckTimer(t *testing.T) {
 				assert.False(t, ok, "start() should NOT succeed once closed")
 				assert.True(t, rt.isRunning(), "should be running")
 
-				select {
-				case <-timedOut:
-				case <-time.After(ackInterval * 2):
-					assert.Fail(t, "should be called once")
-				}
+				time.Sleep(ackInterval*2 + 50*time.Millisecond)
+				synctest.Wait()
 
-				select {
-				case <-timedOut:
-					assert.Fail(t, "should be called once")
-				case <-time.After(ackInterval * 2):
-				}
+				assert.Equalf(t, uint32(1), atomic.LoadUint32(&nCbs),
+					"should be called once (actual: %d)", atomic.LoadUint32(&nCbs))
+				atomic.StoreUint32(&nCbs, 0)
 			}
 
 			// should close ok
@@ -70,11 +66,11 @@ func TestAckTimer(t *testing.T) {
 
 	t.Run("start and stop", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			timedOut := make(chan struct{}, 1)
+			var nCbs uint32
 			rt := newAckTimer(&testAckTimerObserver{
 				onAckTO: func() {
 					t.Log("ack timed out")
-					timedOut <- struct{}{}
+					atomic.AddUint32(&nCbs, 1)
 				},
 			})
 
@@ -88,11 +84,10 @@ func TestAckTimer(t *testing.T) {
 				rt.stop()
 				assert.False(t, rt.isRunning(), "should not be running")
 			}
-			select {
-			case <-timedOut:
-				assert.Fail(t, "shoud not be timed out")
-			case <-time.After(ackInterval + 50*time.Millisecond):
-			}
+			time.Sleep(ackInterval + 50*time.Millisecond)
+			synctest.Wait()
+			assert.Equalf(t, uint32(0), atomic.LoadUint32(&nCbs),
+				"should not be timed out (actual: %d)", atomic.LoadUint32(&nCbs))
 
 			// can start again
 			ok := rt.start()
