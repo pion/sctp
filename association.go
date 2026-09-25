@@ -170,7 +170,6 @@ const (
 
 // other constants.
 const (
-	acceptChSize = 16
 	// avgChunkSize is an estimate of the average chunk size. There is no theory behind
 	// this estimate.
 	avgChunkSize = 500
@@ -348,8 +347,13 @@ type Association struct {
 	storedInit       *chunkInit
 	storedCookieEcho *chunkCookieEcho
 
-	streams              map[uint16]*Stream
-	acceptCh             chan *Stream
+	streams map[uint16]*Stream
+	// Incoming streams waiting for AcceptStream, protected by lock.
+	// acceptCond is bound to lock; signaling it never blocks, so the read
+	// loop can queue streams while holding lock (see pion/sctp#30).
+	acceptQueue          []*Stream
+	acceptCond           *sync.Cond
+	acceptClosed         bool
 	readLoopCloseCh      chan struct{}
 	awakeWriteLoopCh     chan struct{}
 	closeWriteLoopCh     chan struct{}
@@ -841,7 +845,6 @@ func createAssociationFromConfigWithTsn(cfg *Config, tsn uint32) *Association {
 		streams:                 map[uint16]*Stream{},
 		reconfigs:               map[uint32]*chunkReconfig{},
 		reconfigRequests:        map[uint32]*paramOutgoingResetRequest{},
-		acceptCh:                make(chan *Stream, acceptChSize),
 		readLoopCloseCh:         make(chan struct{}),
 		awakeWriteLoopCh:        make(chan struct{}, 1),
 		closeWriteLoopCh:        make(chan struct{}),
@@ -878,6 +881,7 @@ func createAssociationFromConfigWithTsn(cfg *Config, tsn uint32) *Association {
 	go assoc.timerLoop()
 
 	assoc.rack.rackReoWndFloor = cfg.rack.rackReoWndFloor // optional floor; usually 0
+	assoc.acceptCond = sync.NewCond(&assoc.lock)
 	assoc.rackKeepInflatedRecoveries = 0
 
 	if assoc.name == "" {
@@ -1172,8 +1176,11 @@ func (a *Association) readLoop() {
 			a.unregisterStream(s, closeErr)
 		}
 		a.unblockPendingWrites()
+		// Queued streams stay acceptable; AcceptStream returns io.EOF once
+		// the queue drains.
+		a.acceptClosed = true
+		a.acceptCond.Broadcast()
 		a.lock.Unlock()
-		close(a.acceptCh)
 		close(a.readLoopCloseCh)
 
 		a.log.Debugf("[%s] association closed", a.name)
@@ -2510,14 +2517,6 @@ func (a *Association) handleData(chunkPayload *chunkPayloadData) []*packet {
 // The caller should hold the lock.
 func (a *Association) acceptPayloadData(chunkPayload *chunkPayloadData) bool {
 	stream := a.getOrCreateStream(chunkPayload.streamIdentifier, true, PayloadTypeUnknown)
-	if stream == nil {
-		// silently discard the data. (sender will retry on T3-rtx timeout)
-		// see pion/sctp#30
-		a.log.Debugf("[%s] discard %d", a.name, chunkPayload.streamSequenceNumber)
-
-		return false
-	}
-
 	if a.getMyReceiverWindowCredit() > 0 {
 		// Pass the new chunk to stream level as soon as it arrives
 		return a.pushPayloadDataToStream(stream, chunkPayload)
@@ -2639,12 +2638,25 @@ func (a *Association) OpenStream(
 
 // AcceptStream accepts a stream.
 func (a *Association) AcceptStream() (*Stream, error) {
-	s, ok := <-a.acceptCh
-	if !ok {
-		return nil, io.EOF // no more incoming streams
+	a.lock.Lock()
+	defer a.lock.Unlock()
+
+	for len(a.acceptQueue) == 0 {
+		if a.acceptClosed {
+			return nil, io.EOF // no more incoming streams
+		}
+		a.acceptCond.Wait()
 	}
 
-	return s, nil
+	stream := a.acceptQueue[0]
+	a.acceptQueue[0] = nil
+	a.acceptQueue = a.acceptQueue[1:]
+	if len(a.acceptQueue) > 0 {
+		// Pass the wakeup on in case several callers are waiting.
+		a.acceptCond.Signal()
+	}
+
+	return stream, nil
 }
 
 // createStream creates a stream. The caller should hold the lock and check no stream exists for this id.
@@ -2663,20 +2675,14 @@ func (a *Association) createStream(streamIdentifier uint16, accept bool) *Stream
 
 	stream.readNotifier = sync.NewCond(&stream.lock)
 
+	a.streams[streamIdentifier] = stream
 	if accept {
-		select {
-		case a.acceptCh <- stream:
-			a.streams[streamIdentifier] = stream
-			a.log.Debugf("[%s] accepted a new stream (streamIdentifier: %d)",
-				a.name, streamIdentifier)
-		default:
-			a.log.Debugf("[%s] dropped a new stream (acceptCh size: %d)",
-				a.name, len(a.acceptCh))
-
-			return nil
-		}
-	} else {
-		a.streams[streamIdentifier] = stream
+		// Never block here: the caller holds a.lock, which AcceptStream's
+		// caller may need before it can accept (see pion/sctp#30).
+		a.acceptQueue = append(a.acceptQueue, stream)
+		a.acceptCond.Signal()
+		a.log.Debugf("[%s] accepted a new stream (streamIdentifier: %d)",
+			a.name, streamIdentifier)
 	}
 
 	return stream
@@ -2695,9 +2701,7 @@ func (a *Association) getOrCreateStream(
 	}
 
 	s := a.createStream(streamIdentifier, accept)
-	if s != nil {
-		s.SetDefaultPayloadType(defaultPayloadType)
-	}
+	s.SetDefaultPayloadType(defaultPayloadType)
 
 	return s
 }

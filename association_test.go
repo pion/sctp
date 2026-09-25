@@ -1057,21 +1057,25 @@ func TestAssociationDataAcknowledgedInShutdownSent(t *testing.T) {
 	assert.True(t, sackFound)
 	assert.True(t, shutdownFound)
 
+	// Streams nobody has accepted yet must not cause DATA for another new
+	// stream to be discarded.
 	assoc.handleChunksStart()
-	for streamID := uint16(2); streamID <= acceptChSize; streamID++ {
+	const pendingStreams = 16
+	for streamID := uint16(2); streamID <= pendingStreams; streamID++ {
 		require.NotNil(t, assoc.createStream(streamID, true))
 	}
 	packets = assoc.handleData(&chunkPayloadData{
 		beginningFragment: true,
 		endingFragment:    true,
 		tsn:               2,
-		streamIdentifier:  acceptChSize + 1,
+		streamIdentifier:  pendingStreams + 1,
 		payloadType:       PayloadTypeWebRTCBinary,
-		userData:          []byte("no room for another stream"),
+		userData:          []byte("another new stream"),
 	})
 
 	require.Nil(t, packets)
-	assert.Equal(t, uint32(1), assoc.peerLastTSN(), "discarded DATA must not advance the cumulative TSN")
+	assert.Contains(t, assoc.streams, uint16(pendingStreams+1))
+	assert.Equal(t, uint32(2), assoc.peerLastTSN(), "DATA for a new stream must advance the cumulative TSN")
 	assert.True(t, assoc.immediateAckTriggered)
 	assert.True(t, assoc.willSendShutdown)
 	assert.False(t, assoc.t2Shutdown.isRunning())
@@ -3948,35 +3952,138 @@ func TestAssocT1CookieTimer(t *testing.T) { //nolint:cyclop
 func TestAssocCreateNewStream(t *testing.T) {
 	loggerFactory := logging.NewDefaultLoggerFactory()
 
-	t.Run("acceptChSize", func(t *testing.T) {
+	t.Run("accept backlog", func(t *testing.T) {
 		assoc := createTestAssociation(t, Config{
 			NetConn:       &dumbConn{},
 			LoggerFactory: loggerFactory,
 		})
 		assoc.setState(established)
 
-		for i := range acceptChSize {
-			s := assoc.createStream(uint16(i), true) //nolint:gosec
-			_, ok := assoc.streams[s.streamIdentifier]
-			assert.True(t, ok, "should be in a.streams map")
+		// Far more streams than the former fixed accept backlog of 16.
+		const pendingStreams = 64
+		for i := range uint16(pendingStreams) {
+			s := assoc.createStream(i, true)
+			require.NotNil(t, s)
+			assert.Contains(t, assoc.streams, s.streamIdentifier, "should be in a.streams map")
 		}
 
-		newSI := uint16(acceptChSize)
-		s := assoc.createStream(newSI, true)
-		assert.Nil(t, s, "should be nil")
-		_, ok := assoc.streams[newSI]
-		assert.False(t, ok, "should NOT be in a.streams map")
-
-		toBeIgnored := &chunkPayloadData{
+		newSI := uint16(pendingStreams)
+		tsn := assoc.peerLastTSN() + 1
+		p := assoc.handleData(&chunkPayloadData{
 			beginningFragment: true,
 			endingFragment:    true,
-			tsn:               assoc.peerLastTSN() + 1,
+			tsn:               tsn,
 			streamIdentifier:  newSI,
 			userData:          []byte("ABC"),
-		}
-
-		p := assoc.handleData(toBeIgnored)
+		})
 		assert.Nil(t, p, "should be nil")
+		assert.Contains(t, assoc.streams, newSI, "should be in a.streams map")
+		assert.Equal(t, tsn, assoc.peerLastTSN(), "DATA for a new stream must be accepted")
+
+		for i := range uint16(pendingStreams + 1) {
+			s, err := assoc.AcceptStream()
+			require.NoError(t, err)
+			assert.Equal(t, i, s.StreamIdentifier(), "streams are accepted in arrival order")
+		}
+	})
+}
+
+// A burst of new streams that the application has not accepted yet must be
+// acknowledged right away instead of being left to T3-rtx retransmission.
+func TestAssocAcceptBacklogBurst(t *testing.T) {
+	lim := test.TimeOut(10 * time.Second)
+	defer lim.Stop()
+
+	const numStreams = 64
+	br := test.NewBridge()
+	client, server, err := createNewAssociationPair(br, ackModeNoDelay, 0)
+	require.NoError(t, err)
+	defer closeAssociationPair(br, client, server)
+
+	message := func(id uint16) string { return fmt.Sprintf("stream %d", id) }
+	start := time.Now()
+	for id := range uint16(numStreams) {
+		stream, openErr := client.OpenStream(id, PayloadTypeWebRTCBinary)
+		require.NoError(t, openErr)
+		_, writeErr := stream.WriteSCTP([]byte(message(id)), PayloadTypeWebRTCBinary)
+		require.NoError(t, writeErr)
+	}
+
+	// Nobody accepts on the server yet; all DATA must still be acknowledged.
+	for client.BufferedAmount() > 0 {
+		require.Less(t, time.Since(start), 5*time.Second, "DATA for unaccepted streams was not acknowledged")
+		br.Tick()
+		time.Sleep(time.Millisecond)
+	}
+
+	seen := map[uint16]bool{}
+	buf := make([]byte, 64)
+	for range numStreams {
+		stream, acceptErr := server.AcceptStream()
+		require.NoError(t, acceptErr)
+		n, _, readErr := stream.ReadSCTP(buf)
+		require.NoError(t, readErr)
+		assert.Equal(t, message(stream.StreamIdentifier()), string(buf[:n]))
+		seen[stream.StreamIdentifier()] = true
+	}
+	elapsed := time.Since(start)
+
+	assert.Len(t, seen, numStreams)
+	assert.Zero(t, client.stats.getNumT3Timeouts(), "new streams must not wait for T3-rtx")
+	assert.Less(t, elapsed, 500*time.Millisecond, "should finish well within the 1s initial RTO")
+}
+
+func TestAssocAcceptStreamAfterClose(t *testing.T) {
+	lim := test.TimeOut(10 * time.Second)
+	defer lim.Stop()
+
+	t.Run("queued streams then EOF", func(t *testing.T) {
+		br := test.NewBridge()
+		client, server, err := createNewAssociationPair(br, ackModeNoDelay, 0)
+		require.NoError(t, err)
+
+		const numStreams = 3
+		for id := range uint16(numStreams) {
+			stream, openErr := client.OpenStream(id, PayloadTypeWebRTCBinary)
+			require.NoError(t, openErr)
+			_, writeErr := stream.WriteSCTP([]byte("hello"), PayloadTypeWebRTCBinary)
+			require.NoError(t, writeErr)
+		}
+		flushBuffers(br, client, server)
+		closeAssociationPair(br, client, server)
+
+		for id := range uint16(numStreams) {
+			stream, acceptErr := server.AcceptStream()
+			require.NoError(t, acceptErr, "queued streams must still be returned after close")
+			assert.Equal(t, id, stream.StreamIdentifier())
+		}
+		_, err = server.AcceptStream()
+		assert.ErrorIs(t, err, io.EOF)
+	})
+
+	t.Run("close wakes waiting callers", func(t *testing.T) {
+		br := test.NewBridge()
+		client, server, err := createNewAssociationPair(br, ackModeNoDelay, 0)
+		require.NoError(t, err)
+
+		const waiters = 2
+		errs := make(chan error, waiters)
+		for range waiters {
+			go func() {
+				_, acceptErr := server.AcceptStream()
+				errs <- acceptErr
+			}()
+		}
+		closeAssociationPair(br, client, server)
+
+		for range waiters {
+			select {
+			case acceptErr := <-errs:
+				assert.ErrorIs(t, acceptErr, io.EOF)
+			case <-time.After(time.Second):
+				require.FailNow(t, "AcceptStream was not woken by close")
+			}
+		}
 	})
 }
 
