@@ -78,6 +78,7 @@ type Stream struct {
 	bufferedAmountLow   uint64
 	onBufferedAmountLow func()
 	state               StreamState
+	discardInbound      bool // inbound data is dropped after a local Close
 	log                 logging.LeveledLogger
 	name                string
 }
@@ -203,6 +204,10 @@ func (s *Stream) SetReadDeadline(deadline time.Time) error {
 func (s *Stream) handleData(pd *chunkPayloadData) error {
 	s.lock.Lock()
 	defer s.lock.Unlock()
+
+	if s.discardInbound {
+		return nil
+	}
 
 	var readable bool
 	complete, err := s.reassemblyQueue.pushWithError(pd)
@@ -449,12 +454,28 @@ func (s *Stream) packetize(raw []byte, ppi PayloadProtocolIdentifier) ([]*chunkP
 
 // Close closes the write-direction of the stream.
 // Future calls to Write are not permitted after calling Close.
+// With WithDiscardInboundAfterClose, Close also discards the stream's inbound
+// data; reads then block until the peer resets the stream.
 func (s *Stream) Close() error {
+	discarded := false
+	defer func() {
+		if discarded {
+			s.association.onReceiveWindowOpened()
+		}
+	}()
+
 	if sid, resetOutbound := func() (uint16, bool) {
 		s.lock.Lock()
 		defer s.lock.Unlock()
 
 		s.log.Debugf("[%s] Close: state=%s", s.name, s.state.String())
+
+		if s.association.discardInboundAfterClose && !s.discardInbound {
+			s.discardInbound = true
+			n := s.reassemblyQueue.discardAll()
+			discarded = n > 0
+			s.log.Debugf("[%s] discarded %d unread bytes", s.name, n)
+		}
 
 		if s.state == StreamStateOpen {
 			if s.readErr == nil {
