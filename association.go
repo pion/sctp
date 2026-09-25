@@ -2483,7 +2483,7 @@ func (a *Association) handleData(chunkPayload *chunkPayloadData) []*packet {
 	if canPush {
 		if !a.acceptPayloadData(chunkPayload) {
 			if state == shutdownSent {
-				return a.handlePeerLastTSNAndAcknowledgement(true)
+				return a.handlePeerLastTSNAndAcknowledgement(true, false)
 			}
 
 			return nil
@@ -2504,7 +2504,7 @@ func (a *Association) handleData(chunkPayload *chunkPayloadData) []*packet {
 		sackNow = true
 	}
 
-	return a.handlePeerLastTSNAndAcknowledgement(sackNow)
+	return a.handlePeerLastTSNAndAcknowledgement(sackNow, false)
 }
 
 // The caller should hold the lock.
@@ -2554,9 +2554,13 @@ func (a *Association) pushPayloadDataToStream(stream *Stream, chunkPayload *chun
 	return true
 }
 
-// A common routine for handleData and handleForwardTSN routines
+// A common routine for handleData and handleForwardTSN routines.
+// cumulativeTSNAdvanced reports that the caller already advanced the
+// cumulative TSN point (FORWARD-TSN / I-FORWARD-TSN).
 // The caller should hold the lock.
-func (a *Association) handlePeerLastTSNAndAcknowledgement(sackImmediately bool) []*packet { //nolint:cyclop
+func (a *Association) handlePeerLastTSNAndAcknowledgement( //nolint:cyclop
+	sackImmediately, cumulativeTSNAdvanced bool,
+) []*packet {
 	var reply []*packet
 
 	// Try to advance peerLastTSN
@@ -2566,17 +2570,17 @@ func (a *Association) handlePeerLastTSNAndAcknowledgement(sackImmediately bool) 
 	//   if possible
 	// Meaning, if peerLastTSN+1 points to a chunk that is received,
 	// advance peerLastTSN until peerLastTSN+1 points to unreceived chunk.
-	for {
-		if popOk := a.payloadQueue.pop(false); !popOk {
-			break
-		}
+	for a.payloadQueue.pop(false) {
+		cumulativeTSNAdvanced = true
+	}
 
+	// Pending incoming reset requests wait for the cumulative TSN to reach
+	// their senderLastTSN, which may happen via DATA or via FORWARD-TSN.
+	if cumulativeTSNAdvanced {
 		for _, rstReq := range a.reconfigRequests {
 			resp := a.resetStreamsIfAny(rstReq)
-			if resp != nil {
-				a.log.Debugf("[%s] RESET RESPONSE: %+v", a.name, resp)
-				reply = append(reply, resp)
-			}
+			a.log.Debugf("[%s] RESET RESPONSE: %+v", a.name, resp)
+			reply = append(reply, resp)
 		}
 	}
 
@@ -3612,7 +3616,7 @@ func (a *Association) handleForwardTSN(chunkTSN *chunkForwardTSN) []*packet {
 		s.handleForwardTSNForUnordered(chunkTSN.newCumulativeTSN)
 	}
 
-	return a.handlePeerLastTSNAndAcknowledgement(false)
+	return a.handlePeerLastTSNAndAcknowledgement(false, true)
 }
 
 // The caller should hold the lock.
@@ -3648,7 +3652,7 @@ func (a *Association) handleIForwardTSN(chunkTSN *chunkIForwardTSN) []*packet {
 		}
 	}
 
-	return a.handlePeerLastTSNAndAcknowledgement(false)
+	return a.handlePeerLastTSNAndAcknowledgement(false, true)
 }
 
 func (a *Association) sendResetRequest(streamIdentifier uint16) error {
