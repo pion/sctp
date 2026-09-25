@@ -879,6 +879,8 @@ func TestAssociationMetadataJSON(t *testing.T) {
 	metadata := AssociationMetadata{
 		MessageInterleavingEnabled:   true,
 		PartialReliabilityMode:       PartialReliabilityModeIForwardTSN,
+		NumInboundStreams:            10,
+		NumOutboundStreams:           20,
 		ZeroChecksumSendingEnabled:   true,
 		ZeroChecksumReceivingEnabled: true,
 	}
@@ -889,7 +891,9 @@ func TestAssociationMetadataJSON(t *testing.T) {
 		"messageInterleavingEnabled": true,
 		"partialReliabilityMode": 2,
 		"zeroChecksumSendingEnabled": true,
-		"zeroChecksumReceivingEnabled": true
+		"zeroChecksumReceivingEnabled": true,
+		"numInboundStreams": 10,
+		"numOutboundStreams": 20
 	}`, string(raw))
 }
 
@@ -4874,8 +4878,8 @@ func TestAssocHandleInit(t *testing.T) {
 		}
 		assert.NoError(t, err, "should succeed")
 		assert.Equal(t, init.initialTSN-1, assoc.peerLastTSN(), "should match")
-		assert.Equal(t, uint16(1001), assoc.myMaxNumOutboundStreams, "should match")
-		assert.Equal(t, uint16(1002), assoc.myMaxNumInboundStreams, "should match")
+		assert.Equal(t, uint16(1001), assoc.peerOutboundStreams, "should match")
+		assert.Equal(t, uint16(1002), assoc.peerInboundStreams, "should match")
 		assert.Equal(t, uint32(5678), assoc.peerVerificationTag, "should match")
 		assert.Equal(t, pkt.sourcePort, assoc.destinationPort, "should match")
 		assert.Equal(t, pkt.destinationPort, assoc.sourcePort, "should match")
