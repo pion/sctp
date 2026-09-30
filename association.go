@@ -139,6 +139,17 @@ type AssociationMetadata struct {
 	ZeroChecksumReceivingEnabled bool `json:"zeroChecksumReceivingEnabled"`
 }
 
+// AssociationRestartEvent describes an authenticated peer restart.
+// RetainedStreams is a snapshot of the open stream objects preserved by the
+// restart; closing streams and pending resets from the old association are
+// discarded. Streams opened after this snapshot have Generation or newer.
+type AssociationRestartEvent struct {
+	Generation         uint64
+	NumInboundStreams  uint16
+	NumOutboundStreams uint16
+	RetainedStreams    []*Stream
+}
+
 // association state enums.
 const (
 	closed uint32 = iota
@@ -284,31 +295,32 @@ type Association struct {
 	reconfigRequests map[uint32]*paramOutgoingResetRequest
 
 	// Non-RFC internal data
-	sourcePort              uint16
-	destinationPort         uint16
-	myMaxNumInboundStreams  uint16
-	myMaxNumOutboundStreams uint16
-	myCookie                *paramStateCookie
-	restartCookieKey        []byte
-	restartGeneration       uint64
-	payloadQueue            *receivePayloadQueue
-	inflightQueue           *payloadQueue
-	pendingQueue            *pendingQueue
-	controlQueue            *controlQueue
-	mtu                     uint32
-	maxPayloadSize          uint32       // max DATA chunk payload size
-	srtt                    atomic.Value // type float64
-	cumulativeTSNAckPoint   uint32
-	advancedPeerTSNAckPoint uint32
-	useForwardTSN           bool
-	useIForwardTSN          bool
-	useInterleaving         bool
-	localInterleaving       bool
-	peerInterleaving        bool
-	peerForwardTSN          bool
-	peerIForwardTSN         bool
-	sendZeroChecksum        bool
-	recvZeroChecksum        bool
+	sourcePort                  uint16
+	destinationPort             uint16
+	myMaxNumInboundStreams      uint16
+	myMaxNumOutboundStreams     uint16
+	myCookie                    *paramStateCookie
+	restartCookieKey            []byte
+	restartGeneration           uint64
+	onAssociationRestartHandler func(AssociationRestartEvent)
+	payloadQueue                *receivePayloadQueue
+	inflightQueue               *payloadQueue
+	pendingQueue                *pendingQueue
+	controlQueue                *controlQueue
+	mtu                         uint32
+	maxPayloadSize              uint32       // max DATA chunk payload size
+	srtt                        atomic.Value // type float64
+	cumulativeTSNAckPoint       uint32
+	advancedPeerTSNAckPoint     uint32
+	useForwardTSN               bool
+	useIForwardTSN              bool
+	useInterleaving             bool
+	localInterleaving           bool
+	peerInterleaving            bool
+	peerForwardTSN              bool
+	peerIForwardTSN             bool
+	sendZeroChecksum            bool
+	recvZeroChecksum            bool
 
 	// Congestion control parameters
 	maxReceiveBufferSize      uint32
@@ -2265,6 +2277,7 @@ func (a *Association) restartAssociation(candidate restartCookie, init *chunkIni
 
 	a.restartGeneration++
 	var callbacks []func()
+	var retainedStreams []*Stream
 	for sid, stream := range a.streams {
 		stream.lock.Lock()
 		// Reset protocol state without closing the application's open stream.
@@ -2283,6 +2296,8 @@ func (a *Association) restartAssociation(candidate restartCookie, init *chunkIni
 			stream.readErr = io.EOF
 			stream.readNotifier.Broadcast()
 			delete(a.streams, sid)
+		} else if a.onAssociationRestartHandler != nil {
+			retainedStreams = append(retainedStreams, stream)
 		}
 		stream.lock.Unlock()
 	}
@@ -2325,6 +2340,19 @@ func (a *Association) restartAssociation(candidate restartCookie, init *chunkIni
 	a.tlrBurstFirstRTTUnits, a.tlrBurstLaterRTTUnits = tlrBurstDefaultFirstRTT, tlrBurstDefaultLaterRTT
 
 	err := a.establish("restart")
+	if handler := a.onAssociationRestartHandler; err == nil && handler != nil {
+		event := AssociationRestartEvent{
+			Generation:         a.restartGeneration,
+			NumInboundStreams:  a.myMaxNumInboundStreams,
+			NumOutboundStreams: a.myMaxNumOutboundStreams,
+			RetainedStreams:    retainedStreams,
+		}
+		// Notify before buffered-amount callbacks can open new channels. The
+		// association lock must be released: observers may query metadata.
+		a.lock.Unlock()
+		handler(event)
+		a.lock.Lock()
+	}
 	if len(callbacks) != 0 {
 		a.lock.Unlock()
 		for _, callback := range callbacks {
@@ -4683,6 +4711,16 @@ func (a *Association) MaxMessageSize() uint32 {
 // SetMaxMessageSize sets the maximum message size you can send.
 func (a *Association) SetMaxMessageSize(maxMsgSize uint32) {
 	atomic.StoreUint32(&a.maxMessageSize, maxMsgSize)
+}
+
+// OnAssociationRestart sets a handler called synchronously after an
+// authenticated peer restart, before its COOKIE ACK is sent. The handler runs
+// without the association lock and may inspect the association. It must return
+// promptly so the read loop can resume. Passing nil removes the handler.
+func (a *Association) OnAssociationRestart(f func(AssociationRestartEvent)) {
+	a.lock.Lock()
+	defer a.lock.Unlock()
+	a.onAssociationRestartHandler = f
 }
 
 // completeHandshake sends the given error to  handshakeCompletedCh unless the read/write
