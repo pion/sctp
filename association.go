@@ -420,6 +420,9 @@ type Config struct {
 	MaxMessageSize       uint32
 	// RTOMax is the maximum retransmission timeout in milliseconds
 	RTOMax float64
+	// HandshakeRTOMax is the maximum retransmission timeout in milliseconds for
+	// T1-init and T1-cookie. Zero inherits RTOMax.
+	HandshakeRTOMax float64
 	// Minimum congestion window
 	MinCwnd uint32
 	// Send window for fast retransmit
@@ -632,6 +635,9 @@ func (c Config) applyServer(cfg *Config) error { //nolint:dupl,cyclop
 	if c.RTOMax != 0 {
 		cfg.RTOMax = c.RTOMax
 	}
+	if c.HandshakeRTOMax != 0 {
+		cfg.HandshakeRTOMax = c.HandshakeRTOMax
+	}
 	if c.MinCwnd != 0 {
 		cfg.MinCwnd = c.MinCwnd
 	}
@@ -742,6 +748,9 @@ func (c Config) applyClient(cfg *Config) error { //nolint:dupl,cyclop
 	if c.RTOMax != 0 {
 		cfg.RTOMax = c.RTOMax
 	}
+	if c.HandshakeRTOMax != 0 {
+		cfg.HandshakeRTOMax = c.HandshakeRTOMax
+	}
 	if c.MinCwnd != 0 {
 		cfg.MinCwnd = c.MinCwnd
 	}
@@ -815,6 +824,7 @@ func createAssociationFromConfigWithTsn(cfg *Config, tsn uint32) *Association {
 	}
 
 	rtoMax := cfg.RTOMax
+	handshakeRTOMax := effectiveHandshakeRTOMax(rtoMax, cfg.HandshakeRTOMax)
 	interleaving := cfg.interleaving
 	if interleaving == nil {
 		interleaving = &interleavingSettings{}
@@ -897,14 +907,22 @@ func createAssociationFromConfigWithTsn(cfg *Config, tsn uint32) *Association {
 		assoc.name, assoc.CWND(), assoc.ssthresh, assoc.inflightQueue.getNumBytes())
 
 	assoc.srtt.Store(float64(0))
-	assoc.t1Init = newRTXTimer(timerT1Init, assoc, maxInitRetrans, rtoMax)
-	assoc.t1Cookie = newRTXTimer(timerT1Cookie, assoc, maxInitRetrans, rtoMax)
+	assoc.t1Init = newRTXTimer(timerT1Init, assoc, maxInitRetrans, handshakeRTOMax)
+	assoc.t1Cookie = newRTXTimer(timerT1Cookie, assoc, maxInitRetrans, handshakeRTOMax)
 	assoc.t2Shutdown = newRTXTimer(timerT2Shutdown, assoc, noMaxRetrans, rtoMax)
 	assoc.t3RTX = newRTXTimer(timerT3RTX, assoc, noMaxRetrans, rtoMax)
 	assoc.tReconfig = newRTXTimer(timerReconfig, assoc, noMaxRetrans, rtoMax)
 	assoc.ackTimer = newAckTimer(assoc)
 
 	return assoc
+}
+
+func effectiveHandshakeRTOMax(rtoMax, handshakeRTOMax float64) float64 {
+	if handshakeRTOMax == 0 {
+		return rtoMax
+	}
+
+	return handshakeRTOMax
 }
 
 func (a *Association) initWithOutOfBandTokens(localInit *chunkInit, remoteInit *chunkInit) error {
