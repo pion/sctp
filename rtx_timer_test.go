@@ -15,6 +15,9 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+// Path.Max.Retrans.
+const pathMaxRetrans uint = 5
+
 func TestRTOManager(t *testing.T) {
 	t.Run("initial values", func(t *testing.T) {
 		m := newRTOManager(0)

@@ -23,6 +23,14 @@ func (o *testAckTimerObserver) onAckTimeout() {
 	o.onAckTO()
 }
 
+// isRunning tests if the timer is running.
+func (t *ackTimer) isRunning() bool {
+	t.mutex.Lock()
+	defer t.mutex.Unlock()
+
+	return t.state == ackTimerStarted
+}
+
 func TestAckTimer(t *testing.T) {
 	t.Run("start and close", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
