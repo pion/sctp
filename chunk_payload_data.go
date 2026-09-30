@@ -48,7 +48,8 @@ a multi-fragment user message, as summarized in the following table:
 */
 type chunkPayloadData struct {
 	chunkHeader
-	stream *Stream
+	stream                *Stream
+	associationGeneration uint64
 
 	unordered         bool
 	beginningFragment bool

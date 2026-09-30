@@ -95,12 +95,3 @@ func (t *ackTimer) close() {
 	}
 	t.state = ackTimerClosed
 }
-
-// isRunning tests if the timer is running.
-// Debug purpose only.
-func (t *ackTimer) isRunning() bool {
-	t.mutex.Lock()
-	defer t.mutex.Unlock()
-
-	return t.state == ackTimerStarted
-}
