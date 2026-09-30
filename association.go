@@ -6,6 +6,9 @@ package sctp
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -66,6 +69,9 @@ var (
 	ErrHandshakeInitAck           = errors.New("handshake failed (INIT ACK)")
 	ErrHandshakeCookieEcho        = errors.New("handshake failed (COOKIE ECHO)")
 	ErrTooManyReconfigRequests    = errors.New("too many outstanding reconfig requests")
+
+	// ErrAssociationRestarted reports a write interrupted by a peer restart.
+	ErrAssociationRestarted = errors.New("remote SCTP association restarted")
 )
 
 const (
@@ -283,6 +289,8 @@ type Association struct {
 	myMaxNumInboundStreams  uint16
 	myMaxNumOutboundStreams uint16
 	myCookie                *paramStateCookie
+	restartCookieKey        []byte
+	restartGeneration       uint64
 	payloadQueue            *receivePayloadQueue
 	inflightQueue           *payloadQueue
 	pendingQueue            *pendingQueue
@@ -920,18 +928,14 @@ func (a *Association) initWithOutOfBandTokens(localInit *chunkInit, remoteInit *
 	go a.readLoop()
 	go a.writeLoop()
 
-	a.payloadQueue.init(remoteInit.initialTSN - 1)
 	a.myMaxNumInboundStreams = min16(localInit.numInboundStreams, remoteInit.numInboundStreams)
 	a.myMaxNumOutboundStreams = min16(localInit.numOutboundStreams, remoteInit.numOutboundStreams)
-	a.setRWND(remoteInit.advertisedReceiverWindowCredit)
-	a.peerVerificationTag = remoteInit.initiateTag
 	a.sourcePort = defaultSCTPSrcDstPort
 	a.destinationPort = defaultSCTPSrcDstPort
 
 	localExtensions := getSupportedExtensions(localInit.params)
 	a.localInterleaving = localExtensions.interleaving
-	a.setPeerSupportedExtensions(getSupportedExtensions(remoteInit.params))
-	a.setSendZeroChecksum(remoteInit.params)
+	a.setPeerInit(&remoteInit.chunkInitCommon)
 
 	a.ssthresh = a.RWND()
 
@@ -942,18 +946,27 @@ func (a *Association) initWithOutOfBandTokens(localInit *chunkInit, remoteInit *
 	return nil
 }
 
-func (a *Association) setPeerSupportedExtensions(extensions supportedExtensions) {
+func (a *Association) setPeerInit(init *chunkInitCommon) {
+	a.peerVerificationTag = init.initiateTag
+	a.payloadQueue.init(init.initialTSN - 1)
+	a.setRWND(init.advertisedReceiverWindowCredit)
+	a.log.Debugf("[%s] initial rwnd=%d", a.name, a.RWND())
+	extensions := getSupportedExtensions(init.params)
 	a.peerForwardTSN = extensions.forwardTSN
 	a.peerInterleaving = extensions.interleaving
 	a.peerIForwardTSN = extensions.iForwardTSN
+	a.sendZeroChecksum = supportsZeroChecksum(init.params)
 }
 
-func (a *Association) setSendZeroChecksum(params []param) {
+func supportsZeroChecksum(params []param) bool {
+	var supported bool
 	for _, param := range params {
 		if zeroChecksum, ok := param.(*paramZeroChecksumAcceptable); ok {
-			a.sendZeroChecksum = zeroChecksum.edmid == dtlsErrorDetectionMethod
+			supported = zeroChecksum.edmid == dtlsErrorDetectionMethod
 		}
 	}
+
+	return supported
 }
 
 func (a *Association) logNegotiatedExtensions(stage string) {
@@ -973,6 +986,10 @@ func (a *Association) logNegotiatedExtensions(stage string) {
 // establish finalizes negotiated options and transitions the association to ESTABLISHED.
 // The caller should hold the lock.
 func (a *Association) establish(stage string) error {
+	a.t1Init.stop()
+	a.t1Cookie.stop()
+	a.storedInit, a.storedCookieEcho = nil, nil
+
 	if err := a.updateInterleavingState(); err != nil {
 		return err
 	}
@@ -1339,9 +1356,10 @@ func chunkMandatoryChecksum(cc []chunk) bool {
 }
 
 func (a *Association) marshalPacket(p *packet) ([]byte, error) {
-	// RFC 9653: decide whether this packet should carry a real CRC32c checksum.
-	// INIT / COOKIE ECHO always require a real CRC32c (even when zero-checksum mode is enabled).
-	return p.marshal(!a.sendZeroChecksum || chunkMandatoryChecksum(p.chunks))
+	// Replies to a restarting peer cannot use the old peer's checksum negotiation.
+	// INIT and COOKIE ECHO also always carry a real CRC32c checksum.
+	// https://www.rfc-editor.org/rfc/rfc9653.html#section-5.2
+	return p.marshal(p.verificationTag != a.peerVerificationTag || !a.sendZeroChecksum || chunkMandatoryChecksum(p.chunks))
 }
 
 func (a *Association) unmarshalPacket(raw []byte) (*packet, error) {
@@ -2043,14 +2061,11 @@ func supportedExtensionsFromChunkTypes(chunkTypes []chunkType) supportedExtensio
 
 func (a *Association) updateInterleavingState() error {
 	useInterleaving := a.localInterleaving && a.peerInterleaving
-	if useInterleaving != a.useInterleaving {
-		if err := a.pendingQueue.setInterleaving(useInterleaving); err != nil {
-			return err
-		}
-
-		a.useInterleaving = useInterleaving
-		a.maxPayloadSize = maxPayloadSizeForMTU(a.mtu, useInterleaving)
+	if err := a.pendingQueue.setInterleaving(useInterleaving); err != nil {
+		return err
 	}
+	a.useInterleaving = useInterleaving
+	a.maxPayloadSize = maxPayloadSizeForMTU(a.mtu, useInterleaving)
 
 	if useInterleaving {
 		a.useIForwardTSN = a.peerIForwardTSN && a.localInterleaving
@@ -2126,6 +2141,10 @@ func (a *Association) handleInit(pkt *packet, initChunk *chunkInit) ([]*packet, 
 		return nil, nil
 	}
 
+	if state == established || state == shutdownPending || state == shutdownSent || state == shutdownReceived {
+		return a.handleRestartInit(pkt, initChunk)
+	}
+
 	if state != closed && state != cookieWait && state != cookieEchoed {
 		// 5.2.2.  Unexpected INIT in States Other than CLOSED, COOKIE-ECHOED,
 		//        COOKIE-WAIT, and SHUTDOWN-ACK-SENT
@@ -2138,62 +2157,15 @@ func (a *Association) handleInit(pkt *packet, initChunk *chunkInit) ([]*packet, 
 	//  https://www.rfc-editor.org/rfc/rfc9260#sec_handle_stream_parameters
 	a.myMaxNumInboundStreams = min16(initChunk.numInboundStreams, a.myMaxNumInboundStreams)
 	a.myMaxNumOutboundStreams = min16(initChunk.numOutboundStreams, a.myMaxNumOutboundStreams)
-	a.peerVerificationTag = initChunk.initiateTag
 	a.sourcePort = pkt.destinationPort
 	a.destinationPort = pkt.sourcePort
 
-	// 13.2 This is the last TSN received in sequence.  This value
-	// is set initially by taking the peer's initial TSN,
-	// received in the INIT or INIT ACK chunk, and
-	// subtracting one from it.
-	a.payloadQueue.init(initChunk.initialTSN - 1)
-
-	a.setRWND(initChunk.advertisedReceiverWindowCredit)
-	a.log.Debugf("[%s] initial rwnd=%d", a.name, a.RWND())
-
-	a.peerInterleaving = false
-	a.peerForwardTSN = false
-	a.peerIForwardTSN = false
-
-	for _, param := range initChunk.params {
-		switch val := param.(type) { // nolint:gocritic
-		case *paramSupportedExtensions:
-			extensions := supportedExtensionsFromChunkTypes(val.ChunkTypes)
-			a.peerForwardTSN = a.peerForwardTSN || extensions.forwardTSN
-			a.peerInterleaving = a.peerInterleaving || extensions.interleaving
-			a.peerIForwardTSN = a.peerIForwardTSN || extensions.iForwardTSN
-		case *paramZeroChecksumAcceptable:
-			a.sendZeroChecksum = val.edmid == dtlsErrorDetectionMethod
-		}
-	}
+	a.setPeerInit(&initChunk.chunkInitCommon)
 
 	if err := a.updateInterleavingState(); err != nil {
 		return nil, err
 	}
-	if a.useInterleaving { //nolint:nestif,gocritic
-		a.log.Debugf("[%s] use interleaving (on init)", a.name)
-		if !a.useIForwardTSN {
-			a.log.Warnf("[%s] not using I-ForwardTSN (on init)", a.name)
-		}
-	} else if a.useForwardTSN {
-		a.log.Debugf("[%s] use ForwardTSN (on init)", a.name)
-	} else {
-		a.log.Warnf("[%s] not using ForwardTSN (on init)", a.name)
-	}
-
-	outbound := &packet{}
-	outbound.verificationTag = a.peerVerificationTag
-	outbound.sourcePort = a.sourcePort
-	outbound.destinationPort = a.destinationPort
-
-	initAck := &chunkInitAck{}
-	a.log.Debug("sending INIT ACK")
-
-	initAck.initialTSN = a.myNextTSN
-	initAck.numOutboundStreams = a.myMaxNumOutboundStreams
-	initAck.numInboundStreams = a.myMaxNumInboundStreams
-	initAck.initiateTag = a.myVerificationTag
-	initAck.advertisedReceiverWindowCredit = a.maxReceiveBufferSize
+	a.logNegotiatedExtensions("init")
 
 	if a.myCookie == nil {
 		var err error
@@ -2204,18 +2176,201 @@ func (a *Association) handleInit(pkt *packet, initChunk *chunkInit) ([]*packet, 
 		}
 	}
 
-	initAck.params = []param{a.myCookie}
+	return pack(a.createInitAck(a.peerVerificationTag, chunkInitCommon{
+		initialTSN: a.myNextTSN, initiateTag: a.myVerificationTag,
+		numInboundStreams: a.myMaxNumInboundStreams, numOutboundStreams: a.myMaxNumOutboundStreams,
+	}, a.myCookie)), nil
+}
 
+// Build INIT ACK identically for an initial handshake and a peer restart.
+func (a *Association) createInitAck(peerTag uint32, local chunkInitCommon, cookie *paramStateCookie) *packet {
+	local.advertisedReceiverWindowCredit = a.maxReceiveBufferSize
+	local.params = []param{cookie}
 	if a.recvZeroChecksum {
-		initAck.params = append(initAck.params, &paramZeroChecksumAcceptable{edmid: dtlsErrorDetectionMethod})
+		local.params = append(local.params, &paramZeroChecksumAcceptable{edmid: dtlsErrorDetectionMethod})
 	}
-	a.log.Debugf("[%s] sendZeroChecksum=%t (on init)", a.name, a.sendZeroChecksum)
+	setSupportedExtensions(&local, a.localInterleaving)
 
-	setSupportedExtensions(&initAck.chunkInitCommon, a.localInterleaving)
+	return &packet{
+		sourcePort: a.sourcePort, destinationPort: a.destinationPort, verificationTag: peerTag,
+		chunks: []chunk{&chunkInitAck{chunkInitCommon: local}},
+	}
+}
 
-	outbound.chunks = []chunk{initAck}
+const restartCookieLifetime = time.Minute
 
-	return pack(outbound), nil
+// restartCookie precedes the peer's wire-format INIT in an authenticated cookie.
+// Tie-tags bind it to the current association until COOKIE ECHO confirms restart.
+// https://www.rfc-editor.org/rfc/rfc9260.html#section-5.2.2
+// https://www.rfc-editor.org/rfc/rfc9260.html#section-5.2.4
+type restartCookie struct {
+	IssuedAt                int64
+	LocalTieTag, PeerTieTag uint32
+	LocalTag, LocalTSN      uint32
+}
+
+//nolint:cyclop
+func (a *Association) handleRestartInit(pkt *packet, init *chunkInit) ([]*packet, error) {
+	if pkt.destinationPort != a.sourcePort || pkt.sourcePort != a.destinationPort {
+		return nil, ErrHandleInitState
+	}
+	// This single-transport implementation does not negotiate additional SCTP
+	// addresses. Reject attempts to add them during restart.
+	// https://www.rfc-editor.org/rfc/rfc9260.html#section-5.2.2
+	for _, p := range init.unrecognizedParams {
+		if p.typ == ipV4Addr || p.typ == ipV6Addr || p.typ == hostNameAddr {
+			return pack(&packet{
+				sourcePort: a.sourcePort, destinationPort: a.destinationPort,
+				verificationTag: init.initiateTag, chunks: []chunk{&chunkAbort{errorCauses: []errorCause{
+					&errorCauseHeader{code: restartOfAnAssociationWithNewAddresses},
+				}}},
+			}), nil
+		}
+	}
+	if a.restartCookieKey == nil {
+		a.restartCookieKey = make([]byte, sha256.Size)
+		if _, err := rand.Read(a.restartCookieKey); err != nil {
+			a.restartCookieKey = nil
+
+			return nil, err
+		}
+	}
+	tag := generateInitiateTag()
+	for tag == a.myVerificationTag {
+		tag = generateInitiateTag()
+	}
+	candidate := restartCookie{
+		IssuedAt: time.Now().UnixNano(), LocalTieTag: a.myVerificationTag, PeerTieTag: a.peerVerificationTag,
+		LocalTag: tag, LocalTSN: a.myNextTSN,
+	}
+	raw, err := binary.Append(nil, binary.BigEndian, candidate)
+	if err != nil {
+		return nil, err
+	}
+	peerInit, err := init.chunkInitCommon.marshal()
+	if err != nil {
+		return nil, err
+	}
+	raw = append(raw, peerInit...)
+	mac := hmac.New(sha256.New, a.restartCookieKey)
+	_, _ = mac.Write(raw)
+	cookie := &paramStateCookie{cookie: mac.Sum(raw)}
+
+	return pack(a.createInitAck(init.initiateTag, chunkInitCommon{
+		initiateTag: candidate.LocalTag, initialTSN: candidate.LocalTSN,
+		numInboundStreams:  min16(a.myMaxNumInboundStreams, init.numOutboundStreams),
+		numOutboundStreams: min16(a.myMaxNumOutboundStreams, init.numInboundStreams),
+	}, cookie)), nil
+}
+
+func (a *Association) restartAssociation(candidate restartCookie, init *chunkInitCommon, cookie []byte) error {
+	// Validate the new scheduler before discarding the live association state.
+	pending := newPendingQueue(a.pendingQueue.newStreamScheduler)
+	if err := pending.setInterleaving(a.localInterleaving && getSupportedExtensions(init.params).interleaving); err != nil {
+		return err
+	}
+
+	a.t2Shutdown.stop()
+	a.t3RTX.stop()
+	a.tReconfig.stop()
+	a.ackTimer.stop()
+	a.stopRackTimer()
+	a.stopPTOTimer()
+
+	a.restartGeneration++
+	var callbacks []func()
+	for sid, stream := range a.streams {
+		stream.lock.Lock()
+		// Reset protocol state without closing the application's open stream.
+		// https://www.rfc-editor.org/rfc/rfc9260.html#section-5.2.4
+		// https://www.rfc-editor.org/rfc/rfc9260.html#section-6.5
+		stream.reassemblyQueue = newReassemblyQueue(stream.streamIdentifier, a.maxReassemblyQueueEntries)
+		stream.sequenceNumber, stream.nextOrderedMID, stream.nextUnorderedMID = 0, 0, 0
+		stream.associationGeneration = a.restartGeneration
+		if stream.bufferedAmount > stream.bufferedAmountLow && stream.onBufferedAmountLow != nil {
+			callbacks = append(callbacks, stream.onBufferedAmountLow)
+		}
+		stream.bufferedAmount = 0
+		if stream.state != StreamStateOpen {
+			// A pending stream reset belongs to the previous association.
+			stream.state = StreamStateClosed
+			stream.readErr = io.EOF
+			stream.readNotifier.Broadcast()
+			delete(a.streams, sid)
+		}
+		stream.lock.Unlock()
+	}
+
+	a.unblockPendingWrites()
+	a.payloadQueue = newReceivePayloadQueue(getMaxTSNOffset(a.maxReceiveBufferSize))
+	a.inflightQueue = newPayloadQueue()
+	a.pendingQueue = pending
+	a.controlQueue = newControlQueue()
+	clear(a.reconfigs)
+	clear(a.reconfigRequests)
+
+	a.myVerificationTag = candidate.LocalTag
+	a.initialTSN, a.myNextTSN = candidate.LocalTSN, candidate.LocalTSN
+	a.myNextRSN, a.minTSN2MeasureRTT = candidate.LocalTSN, candidate.LocalTSN
+	a.cumulativeTSNAckPoint, a.advancedPeerTSNAckPoint = candidate.LocalTSN-1, candidate.LocalTSN-1
+	a.myMaxNumInboundStreams = min16(a.myMaxNumInboundStreams, init.numOutboundStreams)
+	a.myMaxNumOutboundStreams = min16(a.myMaxNumOutboundStreams, init.numInboundStreams)
+	a.myCookie = &paramStateCookie{cookie: append([]byte(nil), cookie...)}
+	a.willSendForwardTSN, a.willRetransmitFast, a.willRetransmitReconfig = false, false, false
+	a.willSendShutdown, a.willSendShutdownAck = false, false
+	a.willSendShutdownComplete, a.shutdownCompletePending = false, false
+	a.ackState, a.delayedAckTriggered, a.immediateAckTriggered = ackStateIdle, false, false
+
+	a.setPeerInit(init)
+
+	a.rtoMgr.reset()
+	a.srtt.Store(float64(0))
+	a.setCWND(min32(4*a.MTU(), max32(2*a.MTU(), 4380)))
+	a.ssthresh = a.RWND()
+	a.partialBytesAcked, a.fastRecoverExitPoint, a.inFastRecovery = 0, 0, false
+
+	a.rackHead, a.rackTail = nil, nil
+	a.rackReoWnd, a.rackMinRTT, a.rackKeepInflatedRecoveries = 0, 0, 0
+	a.rackDeliveredTime, a.rackHighestDeliveredOrigTSN, a.rackReorderingSeen = time.Time{}, 0, false
+	a.rack.rackMinRTTWnd = newWindowedMin(a.rack.rackMinRTTWnd.rackMinRTTWnd)
+
+	a.tlrActive, a.tlrFirstRTT, a.tlrHadAdditionalLoss = false, false, false
+	a.tlrEndTSN, a.tlrGoodOps, a.tlrStartTime = 0, 0, time.Time{}
+	a.tlrBurstFirstRTTUnits, a.tlrBurstLaterRTTUnits = tlrBurstDefaultFirstRTT, tlrBurstDefaultLaterRTT
+
+	err := a.establish("restart")
+	if len(callbacks) != 0 {
+		a.lock.Unlock()
+		for _, callback := range callbacks {
+			callback()
+		}
+		a.lock.Lock()
+	}
+
+	return err
+}
+
+// Reflected tags are permitted on ABORT and SHUTDOWN COMPLETE.
+// https://www.rfc-editor.org/rfc/rfc9260.html#section-8.5.1
+func (a *Association) validRestartPacket(pkt *packet, received chunk) bool {
+	if pkt.sourcePort != a.destinationPort || pkt.destinationPort != a.sourcePort {
+		return false
+	}
+	expected := a.myVerificationTag
+	switch received := received.(type) {
+	case *chunkInit, *chunkCookieEcho:
+		return true // INIT uses zero.
+	case *chunkAbort:
+		if received.flags&1 != 0 {
+			expected = a.peerVerificationTag
+		}
+	case *chunkShutdownComplete:
+		if received.flags&1 != 0 {
+			expected = a.peerVerificationTag
+		}
+	}
+
+	return pkt.verificationTag == expected
 }
 
 // The caller should hold the lock.
@@ -2234,8 +2389,6 @@ func (a *Association) handleInitAck(pkt *packet, initChunkAck *chunkInitAck) err
 
 	a.myMaxNumInboundStreams = min16(initChunkAck.numInboundStreams, a.myMaxNumInboundStreams)
 	a.myMaxNumOutboundStreams = min16(initChunkAck.numOutboundStreams, a.myMaxNumOutboundStreams)
-	a.peerVerificationTag = initChunkAck.initiateTag
-	a.payloadQueue.init(initChunkAck.initialTSN - 1)
 	if a.sourcePort != pkt.destinationPort ||
 		a.destinationPort != pkt.sourcePort {
 		a.log.Warnf("[%s] handleInitAck: port mismatch", a.name)
@@ -2243,8 +2396,7 @@ func (a *Association) handleInitAck(pkt *packet, initChunkAck *chunkInitAck) err
 		return nil
 	}
 
-	a.setRWND(initChunkAck.advertisedReceiverWindowCredit)
-	a.log.Debugf("[%s] initial rwnd=%d", a.name, a.RWND())
+	a.setPeerInit(&initChunkAck.chunkInitCommon)
 
 	// RFC 4960 Sec 7.2.1
 	//  o  The initial value of ssthresh MAY be arbitrarily high (for
@@ -2257,39 +2409,18 @@ func (a *Association) handleInitAck(pkt *packet, initChunkAck *chunkInitAck) err
 	a.t1Init.stop()
 	a.storedInit = nil
 
-	a.peerInterleaving = false
-	a.peerForwardTSN = false
-	a.peerIForwardTSN = false
-
-	var cookieParam *paramStateCookie
-	for _, param := range initChunkAck.params {
-		switch val := param.(type) {
-		case *paramStateCookie:
-			cookieParam = val
-		case *paramSupportedExtensions:
-			extensions := supportedExtensionsFromChunkTypes(val.ChunkTypes)
-			a.peerForwardTSN = a.peerForwardTSN || extensions.forwardTSN
-			a.peerInterleaving = a.peerInterleaving || extensions.interleaving
-			a.peerIForwardTSN = a.peerIForwardTSN || extensions.iForwardTSN
-		case *paramZeroChecksumAcceptable:
-			a.sendZeroChecksum = val.edmid == dtlsErrorDetectionMethod
-		}
-	}
-
 	a.log.Debugf("[%s] sendZeroChecksum=%t (on initAck)", a.name, a.sendZeroChecksum)
 
 	if err := a.updateInterleavingState(); err != nil {
 		return err
 	}
-	if a.useInterleaving { //nolint:gocritic
-		a.log.Tracef("[%s] use interleaving (on initAck)", a.name)
-		if !a.useIForwardTSN {
-			a.log.Warnf("[%s] not using I-ForwardTSN (on initAck)", a.name)
+	a.logNegotiatedExtensions("initAck")
+
+	var cookieParam *paramStateCookie
+	for _, param := range initChunkAck.params {
+		if cookie, ok := param.(*paramStateCookie); ok {
+			cookieParam = cookie
 		}
-	} else if a.useForwardTSN {
-		a.log.Tracef("[%s] use ForwardTSN (on initAck)", a.name)
-	} else {
-		a.log.Warnf("[%s] not using ForwardTSN (on initAck)", a.name)
 	}
 	if cookieParam == nil {
 		return ErrInitAckNoCookie
@@ -2384,53 +2515,104 @@ func (a *Association) handleHeartbeatAck(c *chunkHeartbeatAck) {
 }
 
 // The caller should hold the lock.
-func (a *Association) handleCookieEcho(cookieEcho *chunkCookieEcho) []*packet {
+//
+//nolint:cyclop
+func (a *Association) handleCookieEcho(pkt *packet, echo *chunkCookieEcho) []*packet {
+	if a.willSendAbort {
+		return nil
+	}
 	state := a.getState()
 	a.log.Debugf("[%s] COOKIE-ECHO received in state '%s'", a.name, getAssociationStateString(state))
 
-	if a.myCookie == nil {
-		a.log.Debugf("[%s] COOKIE-ECHO received before initialization", a.name)
+	if a.myCookie != nil && bytes.Equal(a.myCookie.cookie, echo.cookie) {
+		// A completed restart uses a new verification tag, including on retransmissions.
+		if a.restartGeneration != 0 && (state == closed ||
+			pkt.verificationTag != a.myVerificationTag ||
+			pkt.sourcePort != a.destinationPort || pkt.destinationPort != a.sourcePort) {
+			return nil
+		}
+		switch state {
+		case established:
+		case closed, cookieWait, cookieEchoed:
+			if err := a.establish("cookieEcho"); err != nil {
+				a.completeHandshake(err)
 
+				return nil
+			}
+			if !a.completeHandshake(nil) {
+				return nil
+			}
+		default:
+			return nil
+		}
+
+		return pack(a.createPacket([]chunk{&chunkCookieAck{}}))
+	}
+
+	var candidate restartCookie
+	size := binary.Size(candidate)
+	if len(echo.cookie) < size+initChunkMinLength+sha256.Size || a.restartCookieKey == nil {
 		return nil
 	}
 	switch state {
+	case established, shutdownPending, shutdownSent, shutdownReceived, shutdownAckSent:
 	default:
 		return nil
-	case established:
-		if !bytes.Equal(a.myCookie.cookie, cookieEcho.cookie) {
-			return nil
-		}
-	case closed, cookieWait, cookieEchoed:
-		if !bytes.Equal(a.myCookie.cookie, cookieEcho.cookie) {
-			return nil
-		}
+	}
+	raw := echo.cookie[:len(echo.cookie)-sha256.Size]
+	mac := hmac.New(sha256.New, a.restartCookieKey)
+	_, _ = mac.Write(raw)
+	if !hmac.Equal(mac.Sum(nil), echo.cookie[len(raw):]) {
+		return nil
+	}
+	if _, err := binary.Decode(raw, binary.BigEndian, &candidate); err != nil {
+		return nil
+	}
+	var init chunkInitCommon
+	if err := init.unmarshal(raw[size:]); err != nil {
+		return nil
+	}
+	if pkt.verificationTag != candidate.LocalTag ||
+		pkt.destinationPort != a.sourcePort || pkt.sourcePort != a.destinationPort {
+		return nil
+	}
+	// Only Action A: both verification tags differ and both tie-tags match.
+	// https://www.rfc-editor.org/rfc/rfc9260.html#section-5.2.4
+	// Old cookies, including cookies from competing INITs, cannot roll back state.
+	if candidate.LocalTieTag != a.myVerificationTag || candidate.PeerTieTag != a.peerVerificationTag ||
+		candidate.LocalTag == a.myVerificationTag || init.initiateTag == a.peerVerificationTag {
+		return nil
+	}
+	response := a.createPacket(nil)
+	response.verificationTag = init.initiateTag
+	age := time.Since(time.Unix(0, candidate.IssuedAt))
+	if age < 0 || age > restartCookieLifetime {
+		stale := make([]byte, 4)
+		staleness := min(max((age-restartCookieLifetime).Microseconds(), 0), math.MaxUint32)
+		binary.BigEndian.PutUint32(stale, uint32(staleness)) //nolint:gosec // clamped to uint32 above.
 
-		// RFC wise, these do not seem to belong here, but removing them
-		// causes TestCookieEchoRetransmission to break
-		a.t1Init.stop()
-		a.storedInit = nil
+		response.chunks = []chunk{&chunkError{errorCauses: []errorCause{
+			&errorCauseHeader{code: staleCookieError, raw: stale},
+		}}}
 
-		a.t1Cookie.stop()
-		a.storedCookieEcho = nil
+		return pack(response)
+	}
+	if state == shutdownAckSent {
+		a.retransmitShutdownAck()
 
-		if err := a.establish("cookieEcho"); err != nil {
-			a.completeHandshake(err)
+		response.chunks = []chunk{&chunkError{errorCauses: []errorCause{
+			&errorCauseHeader{code: cookieReceivedWhileShuttingDown},
+		}}}
 
-			return nil
-		}
-		if !a.completeHandshake(nil) {
-			return nil
-		}
+		return pack(response)
+	}
+	if err := a.restartAssociation(candidate, &init, echo.cookie); err != nil {
+		a.log.Errorf("Failed to restart association: %v", err)
+
+		return nil
 	}
 
-	p := &packet{
-		verificationTag: a.peerVerificationTag,
-		sourcePort:      a.sourcePort,
-		destinationPort: a.destinationPort,
-		chunks:          []chunk{&chunkCookieAck{}},
-	}
-
-	return pack(p)
+	return pack(a.createPacket([]chunk{&chunkCookieAck{}}))
 }
 
 // The caller should hold the lock.
@@ -2444,9 +2626,6 @@ func (a *Association) handleCookieAck() {
 		//   discard a received COOKIE ACK chunk.
 		return
 	}
-
-	a.t1Cookie.stop()
-	a.storedCookieEcho = nil
 
 	if err := a.establish("cookieAck"); err != nil {
 		a.completeHandshake(err)
@@ -2683,8 +2862,9 @@ func (a *Association) AcceptStream() (*Stream, error) {
 // createStream creates a stream. The caller should hold the lock and check no stream exists for this id.
 func (a *Association) createStream(streamIdentifier uint16, accept bool) *Stream {
 	stream := &Stream{
-		association:      a,
-		streamIdentifier: streamIdentifier,
+		association:           a,
+		associationGeneration: a.restartGeneration,
+		streamIdentifier:      streamIdentifier,
 		reassemblyQueue: newReassemblyQueue(
 			streamIdentifier,
 			a.maxReassemblyQueueEntries,
@@ -3994,37 +4174,44 @@ func (a *Association) bundleDataChunksIntoPackets(chunks []*chunkPayloadData) []
 	return packets
 }
 
+// validatePayloadData checks whether chunks can be sent.
+func (a *Association) validatePayloadData(chunks []*chunkPayloadData) error {
+	if state := a.getState(); state != established {
+		return fmt.Errorf("%w: state=%s", ErrPayloadDataStateNotExist,
+			getAssociationStateString(state))
+	}
+	for _, c := range chunks {
+		if c.associationGeneration != a.restartGeneration {
+			return ErrAssociationRestarted
+		}
+	}
+
+	return nil
+}
+
 // sendPayloadData sends the data chunks.
 func (a *Association) sendPayloadData(ctx context.Context, chunks []*chunkPayloadData) error {
 	a.lock.Lock()
 
-	state := a.getState()
-	if state != established {
-		a.lock.Unlock()
-
-		return fmt.Errorf("%w: state=%s", ErrPayloadDataStateNotExist,
-			getAssociationStateString(state))
-	}
-
-	if a.blockWrite {
-		for a.writePending {
-			writeNotify := a.writeNotify
+	for {
+		if err := a.validatePayloadData(chunks); err != nil {
 			a.lock.Unlock()
-			select {
-			case <-ctx.Done():
-				return context.Cause(ctx)
-			case <-writeNotify:
-			}
-			a.lock.Lock()
 
-			state = a.getState()
-			if state != established {
-				a.lock.Unlock()
-
-				return fmt.Errorf("%w: state=%s", ErrPayloadDataStateNotExist,
-					getAssociationStateString(state))
-			}
+			return err
 		}
+		if !a.blockWrite || !a.writePending {
+			break
+		}
+		writeNotify := a.writeNotify
+		a.lock.Unlock()
+		select {
+		case <-ctx.Done():
+			return context.Cause(ctx)
+		case <-writeNotify:
+		}
+		a.lock.Lock()
+	}
+	if a.blockWrite {
 		a.writePending = true
 	}
 
@@ -4237,6 +4424,10 @@ func (a *Association) handleChunk(receivedPacket *packet, receivedChunk chunk) e
 	a.lock.Lock()
 	defer a.lock.Unlock()
 
+	if a.restartGeneration != 0 && !a.validRestartPacket(receivedPacket, receivedChunk) {
+		return nil
+	}
+
 	var packets []*packet
 	var err error
 
@@ -4282,7 +4473,7 @@ func (a *Association) handleChunk(receivedPacket *packet, receivedChunk chunk) e
 		a.handleHeartbeatAck(receivedChunk)
 
 	case *chunkCookieEcho:
-		packets = a.handleCookieEcho(receivedChunk)
+		packets = a.handleCookieEcho(receivedPacket, receivedChunk)
 
 	case *chunkCookieAck:
 		a.handleCookieAck()

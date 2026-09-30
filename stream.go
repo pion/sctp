@@ -58,6 +58,8 @@ var (
 
 // Stream represents an SCTP stream.
 type Stream struct {
+	associationGeneration uint64
+
 	association         *Association
 	lock                sync.RWMutex
 	streamIdentifier    uint16
@@ -329,23 +331,11 @@ func (s *Stream) WriteSCTP(payload []byte, ppi PayloadProtocolIdentifier) (int, 
 	if s.association.isBlockWrite() {
 		s.writeLock.Lock()
 	}
-	useInterleaving := s.association.useInterleaving
 	chunks, unordered := s.packetize(payload, ppi)
 	n := len(payload)
 	err := s.association.sendPayloadData(s.writeDeadline.Context(), chunks)
-	if err != nil { //nolint:nestif
-		s.lock.Lock()
-		s.bufferedAmount -= uint64(n)
-		if useInterleaving {
-			if unordered {
-				s.nextUnorderedMID--
-			} else {
-				s.nextOrderedMID--
-			}
-		} else if !unordered {
-			s.sequenceNumber--
-		}
-		s.lock.Unlock()
+	if err != nil {
+		s.rollbackWrite(chunks, unordered, uint64(len(payload)))
 		n = 0
 	}
 	if s.association.isBlockWrite() {
@@ -353,6 +343,27 @@ func (s *Stream) WriteSCTP(payload []byte, ppi PayloadProtocolIdentifier) (int, 
 	}
 
 	return n, err
+}
+
+// rollbackWrite only undoes counters if the write still belongs to this association generation.
+func (s *Stream) rollbackWrite(chunks []*chunkPayloadData, unordered bool, size uint64) {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+
+	// The restart discarded this write and reset the counters.
+	if len(chunks) > 0 && chunks[0].associationGeneration != s.associationGeneration {
+		return
+	}
+	s.bufferedAmount -= size
+	if len(chunks) > 0 && chunks[0].isIData() {
+		if unordered {
+			s.nextUnorderedMID--
+		} else {
+			s.nextOrderedMID--
+		}
+	} else if !unordered {
+		s.sequenceNumber--
+	}
 }
 
 // SetWriteDeadline sets the write deadline in an identical way to net.Conn,
@@ -373,7 +384,10 @@ func (s *Stream) SetDeadline(t time.Time) error {
 }
 
 func (s *Stream) packetize(raw []byte, ppi PayloadProtocolIdentifier) ([]*chunkPayloadData, bool) {
+	s.association.lock.RLock()
+	useInterleaving, maxPayloadSize := s.association.useInterleaving, s.association.maxPayloadSize
 	s.lock.Lock()
+	s.association.lock.RUnlock()
 	defer s.lock.Unlock()
 
 	offset := uint32(0)
@@ -384,7 +398,6 @@ func (s *Stream) packetize(raw []byte, ppi PayloadProtocolIdentifier) ([]*chunkP
 	//   ordered delivery and reliable transmission.
 	unordered := ppi != PayloadTypeWebRTCDCEP && s.unordered
 
-	useInterleaving := s.association.useInterleaving
 	var mid uint32
 	if useInterleaving {
 		if unordered {
@@ -400,7 +413,7 @@ func (s *Stream) packetize(raw []byte, ppi PayloadProtocolIdentifier) ([]*chunkP
 	var head *chunkPayloadData
 	fsn := uint32(0)
 	for remaining != 0 {
-		fragmentSize := min32(s.association.maxPayloadSize, remaining)
+		fragmentSize := min32(maxPayloadSize, remaining)
 
 		// Copy the userdata since we'll have to store it until acked
 		// and the caller may re-use the buffer in the mean time
@@ -408,6 +421,7 @@ func (s *Stream) packetize(raw []byte, ppi PayloadProtocolIdentifier) ([]*chunkP
 		copy(userData, raw[offset:offset+fragmentSize])
 
 		chunk := &chunkPayloadData{
+			associationGeneration:  s.associationGeneration,
 			stream:                 s,
 			streamIdentifier:       s.streamIdentifier,
 			userData:               userData,
