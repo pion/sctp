@@ -82,3 +82,20 @@ func TestStreamResetCompleteNotifiesBothAssociations(t *testing.T) {
 	require.Empty(t, serverCompleted, "server reported completion after one direction")
 	require.Empty(t, clientCompleted, "client reported completion after one direction")
 }
+
+func TestStreamResetCompletionAfterPeerRestart(t *testing.T) {
+	a := newRackTestAssoc(t)
+	t.Cleanup(a.closeAllTimers)
+	completions := 0
+	a.OnStreamResetComplete(func(uint16) { completions++ })
+	a.lock.Lock()
+	defer a.lock.Unlock()
+
+	a.completeStreamResetDirection(7, streamResetOutbound)
+	require.NoError(t, a.restartAssociation(restartCookie{LocalTag: 2, LocalTSN: 200},
+		&chunkInitCommon{initiateTag: 3, initialTSN: 500}, nil))
+	a.completeStreamResetDirection(7, streamResetInbound)
+	require.Zero(t, completions, "reset directions must belong to the same association generation")
+	a.completeStreamResetDirection(7, streamResetOutbound)
+	require.Equal(t, 1, completions)
+}

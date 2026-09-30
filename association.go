@@ -2297,6 +2297,7 @@ func (a *Association) restartAssociation(candidate restartCookie, init *chunkIni
 	a.controlQueue = newControlQueue()
 	clear(a.reconfigs)
 	clear(a.reconfigRequests)
+	clear(a.streamResetStates)
 
 	a.myVerificationTag = candidate.LocalTag
 	a.initialTSN, a.myNextTSN = candidate.LocalTSN, candidate.LocalTSN
