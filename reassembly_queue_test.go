@@ -8,7 +8,21 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+func TestReassemblyQueueMessageByteLimit(t *testing.T) {
+	r := newReassemblyQueue(1, 0)
+	r.maxMessageBytes = 4
+	first := &chunkPayloadData{streamIdentifier: 1, tsn: 1, beginningFragment: true, userData: []byte("1234")}
+	_, err := r.pushWithError(first)
+	require.NoError(t, err)
+	duplicate := *first
+	_, err = r.pushWithError(&duplicate)
+	require.NoError(t, err)
+	_, err = r.pushWithError(&chunkPayloadData{streamIdentifier: 1, tsn: 2, endingFragment: true, userData: []byte("5")})
+	require.ErrorIs(t, err, errInboundMessageLimitExceeded)
+}
 
 func TestReassemblyQueue(t *testing.T) { //nolint:maintidx,cyclop
 	t.Run("ordered fragments", func(t *testing.T) {
