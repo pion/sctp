@@ -8,82 +8,121 @@ import (
 	"fmt"
 )
 
-// https://tools.ietf.org/html/rfc6525#section-3.1
+// https://www.rfc-editor.org/rfc/rfc6525#section-3.1
 // chunkReconfig represents an SCTP Chunk used to reconfigure streams.
 //
 //  0                   1                   2                   3
 //  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-// | Type = 130    |  Chunk Flags  |      Chunk Length             |
+// |   Type=130    |  Chunk Flags  |        Chunk Length           |
 // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 // \                                                               \
-// /                  Re-configuration Parameter                   /
-// \                                                               \
-// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-// \                                                               \
-// /             Re-configuration Parameter (optional)             /
-// \                                                               \
+// /                 Re-configuration Parameter(s)                 /
+// \                     (one or more TLVs)                        /
 // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 
 type chunkReconfig struct {
 	chunkHeader
 	paramA param
 	paramB param
+	// Additional TLVs (RFC 6525 allows multiple).
+	extras []param
 }
 
 // Reconfigure chunk errors.
 var (
-	ErrChunkParseParamTypeFailed        = errors.New("failed to parse param type")
-	ErrChunkMarshalParamAReconfigFailed = errors.New("unable to marshal parameter A for reconfig")
-	ErrChunkMarshalParamBReconfigFailed = errors.New("unable to marshal parameter B for reconfig")
+	ErrChunkParseParamTypeFailed             = errors.New("failed to parse param type")
+	ErrChunkMarshalParamAReconfigFailed      = errors.New("unable to marshal parameter A for reconfig")
+	ErrChunkMarshalParamBReconfigFailed      = errors.New("unable to marshal parameter B for reconfig")
+	ErrChunkMarshalParamExtrasReconfigFailed = errors.New("unable to marshal parameter extras for reconfig")
 )
 
 func (c *chunkReconfig) unmarshal(raw []byte) error {
 	if err := c.chunkHeader.unmarshal(raw); err != nil {
 		return err
 	}
-	pType, err := parseParamType(c.raw)
-	if err != nil {
-		return fmt.Errorf("%w: %v", ErrChunkParseParamTypeFailed, err) //nolint:errorlint
-	}
-	a, err := buildParam(pType, c.raw)
-	if err != nil {
-		return err
-	}
-	c.paramA = a
 
-	padding := getPadding(a.length())
-	offset := a.length() + padding
-	if len(c.raw) > offset {
-		pType, err := parseParamType(c.raw[offset:])
-		if err != nil {
-			return fmt.Errorf("%w: %v", ErrChunkParseParamTypeFailed, err) //nolint:errorlint
+	c.paramA = nil
+	c.paramB = nil
+	c.extras = nil
+
+	data := c.raw
+	// RFC 6525 requires one or more TLVs inside RE-CONFIG.
+	// If there's nothing after the chunk header then fail.
+	if len(data) < 4 { // need at least a param header (type,len)
+		return fmt.Errorf("%w: empty RECONFIG body", ErrChunkParseParamTypeFailed)
+	}
+
+	offset := 0
+	idx := 0
+
+	for offset < len(data) {
+		// Ensure we have a complete TLV header before parsing.
+		if len(data)-offset < 4 {
+			return fmt.Errorf("%w: truncated param header", ErrChunkParseParamTypeFailed)
 		}
-		b, err := buildParam(pType, c.raw[offset:])
+
+		pType, err := parseParamType(data[offset:])
+		if err != nil {
+			return fmt.Errorf("%w: %w", ErrChunkParseParamTypeFailed, err)
+		}
+
+		par, err := buildParam(pType, data[offset:])
 		if err != nil {
 			return err
 		}
-		c.paramB = b
+
+		switch idx {
+		case 0:
+			c.paramA = par
+		case 1:
+			c.paramB = par
+		default:
+			c.extras = append(c.extras, par)
+		}
+		idx++
+
+		l := par.length()
+		offset += l + getPadding(l)
 	}
 
 	return nil
 }
 
 func (c *chunkReconfig) marshal() ([]byte, error) {
-	out, err := c.paramA.marshal()
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrChunkMarshalParamAReconfigFailed, err) //nolint:errorlint
+	var list []param
+	if c.paramA != nil {
+		list = append(list, c.paramA)
 	}
+
 	if c.paramB != nil {
-		// Pad param A
-		out = padByte(out, getPadding(len(out)))
+		list = append(list, c.paramB)
+	}
 
-		outB, err := c.paramB.marshal()
+	if len(c.extras) > 0 {
+		list = append(list, c.extras...)
+	}
+
+	out := make([]byte, 0)
+	for i, p := range list {
+		b, err := p.marshal()
 		if err != nil {
-			return nil, fmt.Errorf("%w: %v", ErrChunkMarshalParamBReconfigFailed, err) //nolint:errorlint
-		}
+			// Preserve legacy error types for API stability.
+			if i == 0 {
+				return nil, fmt.Errorf("%w: %w", ErrChunkMarshalParamAReconfigFailed, err)
+			}
 
-		out = append(out, outB...)
+			if i == 1 {
+				return nil, fmt.Errorf("%w: %w", ErrChunkMarshalParamBReconfigFailed, err)
+			}
+
+			return nil, fmt.Errorf("%w: %w", ErrChunkMarshalParamExtrasReconfigFailed, err)
+		}
+		out = append(out, b...)
+		// Pad between TLVs (no need to pad after the last one)
+		if i != len(list)-1 {
+			out = padByte(out, getPadding(len(b)))
+		}
 	}
 
 	c.typ = ctReconfig
@@ -93,18 +132,31 @@ func (c *chunkReconfig) marshal() ([]byte, error) {
 }
 
 func (c *chunkReconfig) check() (abort bool, err error) {
-	// nolint:godox
-	// TODO: check allowed combinations:
-	// https://tools.ietf.org/html/rfc6525#section-3.1
+	// Combinations/semantics are validated when handling individual params.
 	return true, nil
 }
 
 // String makes chunkReconfig printable.
 func (c *chunkReconfig) String() string {
-	res := fmt.Sprintf("Param A:\n %s", c.paramA)
-	if c.paramB != nil {
-		res += fmt.Sprintf("Param B:\n %s", c.paramB)
-	}
+	switch {
+	case c.paramA == nil && c.paramB == nil && len(c.extras) == 0:
+		return "RECONFIG: <no params>"
+	default:
+		res := "RECONFIG params:\n"
+		i := 0
+		if c.paramA != nil {
+			res += fmt.Sprintf("  [%d] %s\n", i, c.paramA)
+			i++
+		}
+		if c.paramB != nil {
+			res += fmt.Sprintf("  [%d] %s\n", i, c.paramB)
+			i++
+		}
+		for _, p := range c.extras {
+			res += fmt.Sprintf("  [%d] %s\n", i, p)
+			i++
+		}
 
-	return res
+		return res
+	}
 }
