@@ -28,9 +28,6 @@ const (
 	// Max.Init.Retransmits.
 	maxInitRetrans uint = 8
 
-	// Path.Max.Retrans.
-	pathMaxRetrans uint = 5
-
 	noMaxRetrans uint = 0
 )
 
