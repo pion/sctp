@@ -84,18 +84,21 @@ func TestStreamResetCompleteNotifiesBothAssociations(t *testing.T) {
 }
 
 func TestStreamResetCompletionAfterPeerRestart(t *testing.T) {
-	a := newRackTestAssoc(t)
-	t.Cleanup(a.closeAllTimers)
+	assoc := newRackTestAssoc(t)
+	t.Cleanup(func() {
+		assoc.closeAllTimers()
+		assoc.closeWriteLoopOnce.Do(func() { close(assoc.closeWriteLoopCh) })
+	})
 	completions := 0
-	a.OnStreamResetComplete(func(uint16) { completions++ })
-	a.lock.Lock()
-	defer a.lock.Unlock()
+	assoc.OnStreamResetComplete(func(uint16) { completions++ })
+	assoc.lock.Lock()
+	defer assoc.lock.Unlock()
 
-	a.completeStreamResetDirection(7, streamResetOutbound)
-	require.NoError(t, a.restartAssociation(restartCookie{LocalTag: 2, LocalTSN: 200},
+	assoc.completeStreamResetDirection(7, streamResetOutbound)
+	require.NoError(t, assoc.restartAssociation(restartCookie{LocalTag: 2, LocalTSN: 200},
 		&chunkInitCommon{initiateTag: 3, initialTSN: 500}, nil))
-	a.completeStreamResetDirection(7, streamResetInbound)
+	assoc.completeStreamResetDirection(7, streamResetInbound)
 	require.Zero(t, completions, "reset directions must belong to the same association generation")
-	a.completeStreamResetDirection(7, streamResetOutbound)
+	assoc.completeStreamResetDirection(7, streamResetOutbound)
 	require.Equal(t, 1, completions)
 }
