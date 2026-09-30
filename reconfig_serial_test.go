@@ -91,13 +91,16 @@ func TestStreamResetBatchFitsMTU(t *testing.T) {
 }
 
 func TestPendingStreamResetsDiscardedOnPeerRestart(t *testing.T) {
-	a := newRackTestAssoc(t)
-	t.Cleanup(a.closeAllTimers)
-	a.lock.Lock()
-	defer a.lock.Unlock()
+	assoc := newRackTestAssoc(t)
+	t.Cleanup(func() {
+		assoc.closeAllTimers()
+		assoc.closeWriteLoopOnce.Do(func() { close(assoc.closeWriteLoopCh) })
+	})
+	assoc.lock.Lock()
+	defer assoc.lock.Unlock()
 
-	a.pendingStreamResets = []uint16{7}
-	require.NoError(t, a.restartAssociation(restartCookie{LocalTag: 2, LocalTSN: 200},
+	assoc.pendingStreamResets = []uint16{7}
+	require.NoError(t, assoc.restartAssociation(restartCookie{LocalTag: 2, LocalTSN: 200},
 		&chunkInitCommon{initiateTag: 3, initialTSN: 500}, nil))
-	require.Empty(t, a.pendingStreamResets, "old resets must not close streams in the restarted association")
+	require.Empty(t, assoc.pendingStreamResets, "old resets must not close streams in the restarted association")
 }
