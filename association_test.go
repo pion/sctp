@@ -6,6 +6,7 @@
 package sctp
 
 import (
+	"bytes"
 	"context"
 	cryptoRand "crypto/rand"
 	"encoding/binary"
@@ -971,7 +972,7 @@ func TestAssociationInterleavingFinalizedOnEstablishedTransition(t *testing.T) {
 		assoc.peerIForwardTSN = true
 		assoc.setState(cookieEchoed)
 
-		packets := assoc.handleCookieEcho(&chunkCookieEcho{cookie: []byte("cookie")})
+		packets := assoc.handleCookieEcho(&packet{}, &chunkCookieEcho{cookie: []byte("cookie")})
 
 		require.NotEmpty(t, packets)
 		require.Equal(t, established, assoc.getState())
@@ -8208,5 +8209,110 @@ func TestSelectiveAckMTU(t *testing.T) {
 			require.Equal(t, tc.gaps, queue.size())
 			require.Len(t, queue.getGapAckBlocks(queue.size()), tc.gaps)
 		})
+	}
+}
+
+// Replace one endpoint on the same UDP port while retaining the other
+// Association object.
+func TestAssociationPeerRestartEndToEnd(t *testing.T) {
+	persistent, peer, err := associationWithClientServerOptions(t, pipeDump,
+		[]ClientOption{WithEnableInterleaving(true), WithEnableZeroChecksum(true), WithBlockWrite(true), WithNumStreams(3, 4)},
+		[]ServerOption{WithEnableInterleaving(true), WithEnableZeroChecksum(true), WithBlockWrite(true), WithNumStreams(11, 12)})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = persistent.Close() })
+	t.Cleanup(func() { _ = peer.Close() })
+	var previous *Stream
+	for generation, interleaving := range []bool{true, true, false, true} {
+		zeroChecksum := generation == 0 || generation == 3
+		if generation != 0 {
+			require.Eventually(t, func() bool { return previous.BufferedAmount() == 0 }, time.Second, time.Millisecond)
+			persistent.lock.Lock()
+			persistent.writePending = true
+			persistent.lock.Unlock()
+			released := make(chan uint64, 1)
+			previous.OnBufferedAmountLow(func() { released <- previous.BufferedAmount() })
+			interrupted := make(chan error, 1)
+			go func() {
+				_, writeErr := previous.Write([]byte("interrupted by restart"))
+				interrupted <- writeErr
+			}()
+			require.Eventually(t, func() bool { return previous.BufferedAmount() != 0 }, time.Second, time.Millisecond)
+			local, ok := peer.netConn.LocalAddr().(*net.UDPAddr)
+			require.True(t, ok)
+			remote, ok := peer.netConn.RemoteAddr().(*net.UDPAddr)
+			require.True(t, ok)
+			require.NoError(t, peer.Close())
+			conn, err := net.DialUDP("udp4", local, remote)
+			require.NoError(t, err)
+			require.NoError(t, conn.SetReadDeadline(time.Now().Add(5*time.Second)))
+			replacement, err := ClientWithOptions(WithNetConn(conn),
+				WithEnableInterleaving(interleaving), WithEnableZeroChecksum(zeroChecksum), WithNumStreams(11, 12))
+			require.NoError(t, err)
+			peer = replacement
+			require.NoError(t, conn.SetReadDeadline(time.Time{}))
+			select {
+			case writeErr := <-interrupted:
+				require.ErrorIs(t, writeErr, ErrAssociationRestarted)
+			case <-time.After(5 * time.Second):
+				require.FailNow(t, "old write did not unblock on restart")
+			}
+			select {
+			case amount := <-released:
+				require.Zero(t, amount)
+			case <-time.After(time.Second):
+				require.FailNow(t, "discarded data did not release the buffered amount")
+			}
+			previous.OnBufferedAmountLow(nil)
+			require.Zero(t, previous.BufferedAmount())
+			require.Equal(t, StreamStateOpen, previous.State())
+		}
+		metadata, ok := persistent.Metadata()
+		require.True(t, ok)
+		require.Equal(t, uint16(3), metadata.NumInboundStreams)
+		require.Equal(t, uint16(4), metadata.NumOutboundStreams)
+		peerMetadata, ok := peer.Metadata()
+		require.True(t, ok)
+		require.Equal(t, metadata.NumOutboundStreams, peerMetadata.NumInboundStreams)
+		require.Equal(t, metadata.NumInboundStreams, peerMetadata.NumOutboundStreams)
+		outbound, err := peer.OpenStream(0, PayloadTypeWebRTCBinary)
+		require.NoError(t, err)
+		inbound, err := persistent.OpenStream(0, PayloadTypeWebRTCBinary)
+		require.NoError(t, err)
+		require.NoError(t, outbound.SetReadDeadline(time.Now().Add(5*time.Second)))
+		require.NoError(t, inbound.SetReadDeadline(time.Now().Add(5*time.Second)))
+		require.NoError(t, inbound.SetWriteDeadline(time.Now().Add(5*time.Second)))
+		if previous != nil {
+			require.Same(t, previous, inbound)
+		}
+		payload := bytes.Repeat([]byte{byte(generation), 42}, 1536)
+		for _, pair := range [][2]*Stream{{outbound, inbound}, {inbound, outbound}} {
+			_, err = pair[0].Write(payload)
+			require.NoError(t, err)
+			received := make([]byte, len(payload))
+			n, err := pair[1].Read(received)
+			require.NoError(t, err)
+			require.Equal(t, payload, received[:n])
+		}
+		previous = inbound
+	}
+}
+
+func TestAssociationRestartRejectsStaleWriteWhileBlocked(t *testing.T) {
+	a := &Association{
+		state: established, blockWrite: true, restartGeneration: 1,
+		writePending: true, writeNotify: make(chan struct{}, 1),
+	}
+	notify := a.writeNotify
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	err := a.sendPayloadData(ctx, []*chunkPayloadData{{associationGeneration: 0}})
+	require.ErrorIs(t, err, ErrAssociationRestarted)
+	require.True(t, a.writePending, "the new write must remain pending")
+	require.Equal(t, notify, a.writeNotify)
+	select {
+	case <-notify:
+		assert.Fail(t, "rejecting an old write must not unblock new writes")
+	default:
 	}
 }
