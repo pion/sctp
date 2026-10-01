@@ -74,3 +74,13 @@ func (q *payloadQueue) getNumBytes() int {
 func (q *payloadQueue) size() int {
 	return q.chunks.Len()
 }
+
+func (q *payloadQueue) earliestOutstanding() *chunkPayloadData {
+	for i := 0; i < q.chunks.Len(); i++ {
+		if c := q.chunks.At(i); !c.acked {
+			return c
+		}
+	}
+
+	return nil
+}

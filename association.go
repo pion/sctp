@@ -901,6 +901,7 @@ func createAssociationFromConfigWithTsn(cfg *Config, tsn uint32) *Association {
 	assoc.t1Cookie = newRTXTimer(timerT1Cookie, assoc, maxInitRetrans, rtoMax)
 	assoc.t2Shutdown = newRTXTimer(timerT2Shutdown, assoc, noMaxRetrans, rtoMax)
 	assoc.t3RTX = newRTXTimer(timerT3RTX, assoc, noMaxRetrans, rtoMax)
+	assoc.t3RTX.rtoMgr = assoc.rtoMgr
 	assoc.tReconfig = newRTXTimer(timerReconfig, assoc, noMaxRetrans, rtoMax)
 	assoc.ackTimer = newAckTimer(assoc)
 
@@ -2895,6 +2896,8 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 ) {
 	bytesAckedPerStream = map[*Stream]int{}
 	now := time.Now() // capture the time for this SACK
+	earliest := a.inflightQueue.earliestOutstanding()
+	stopT3 := earliest != nil && sna32LTE(earliest.tsn, selectiveAckChunk.cumulativeTSNAck)
 
 	// Validate that full range exists in the inflight queue to prevent partial pops
 	// left over from an invalid SACK that causes the cumulativeTSNAckPoint to be updated
@@ -2919,6 +2922,11 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 				fmt.Errorf("%w: invalid Gap Ack Block %d-%d", ErrTSNRequestNotExist, gap.start, gap.end)
 		}
 
+		if earliest != nil {
+			offset := earliest.tsn - selectiveAckChunk.cumulativeTSNAck
+			stopT3 = stopT3 || (offset >= uint32(gap.start) && offset <= uint32(gap.end))
+		}
+
 		firstTSN := selectiveAckChunk.cumulativeTSNAck + uint32(gap.start)
 		if _, ok := a.inflightQueue.get(firstTSN); !ok {
 			return nil, 0, time.Time{}, 0, false, fmt.Errorf("%w: %v", ErrTSNRequestNotExist, firstTSN)
@@ -2930,6 +2938,12 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 					fmt.Errorf("%w: %v", ErrTSNRequestNotExist, lastTSN)
 			}
 		}
+	}
+
+	// RFC 9260 section 6.3.2 R3: cancel the old deadline before updating RTT.
+	// After processing this valid SACK, the caller restarts T3 if DATA remains.
+	if stopT3 {
+		a.t3RTX.stop()
 	}
 
 	// New ack point, so pop all ACKed packets from inflightQueue
@@ -2945,16 +2959,6 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 		a.rackRemove(chunkPayload)
 
 		if !chunkPayload.acked { //nolint:nestif
-			// RFC 4960 sec 6.3.2.  Retransmission Timer Rules
-			//   R3)  Whenever a SACK is received that acknowledges the DATA chunk
-			//        with the earliest outstanding TSN for that address, restart the
-			//        T3-rtx timer for that address with its current RTO (if there is
-			//        still outstanding data on that address).
-			if idx == a.cumulativeTSNAckPoint+1 {
-				// T3 timer needs to be reset. Stop it for now.
-				a.t3RTX.stop()
-			}
-
 			nBytesAcked := len(chunkPayload.userData)
 
 			// Sum acknowledged bytes against the stream generation that sent
@@ -2964,32 +2968,7 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 				bytesAckedPerStream[stream] += nBytesAcked
 			}
 
-			// RFC 4960 sec 6.3.1.  RTO Calculation
-			//   C4)  When data is in flight and when allowed by rule C5 below, a new
-			//        RTT measurement MUST be made each round trip.  Furthermore, new
-			//        RTT measurements SHOULD be made no more than once per round trip
-			//        for a given destination transport address.
-			//   C5)  Karn's algorithm: RTT measurements MUST NOT be made using
-			//        packets that were retransmitted (and thus for which it is
-			//        ambiguous whether the reply was for the first instance of the
-			//        chunk or for a later instance)
-			if sna32GTE(chunkPayload.tsn, a.minTSN2MeasureRTT) {
-				// Only original transmissions for classic RTT measurement (Karn's rule)
-				if chunkPayload.nSent == 1 {
-					a.minTSN2MeasureRTT = a.myNextTSN
-					rtt := now.Sub(chunkPayload.since).Seconds() * 1000.0
-					srtt := a.rtoMgr.setNewRTT(rtt)
-					a.srtt.Store(srtt)
-
-					// use a window to determine minRtt instead of a global min
-					// as the RTT can fluctuate, which can cause problems if going from a
-					// high RTT to a low RTT.
-					a.rack.rackMinRTTWnd.Push(now, now.Sub(chunkPayload.since))
-
-					a.log.Tracef("[%s] SACK: measured-rtt=%f srtt=%f new-rto=%f",
-						a.name, rtt, srtt, a.rtoMgr.getRTO())
-				}
-			}
+			a.measureRTT(chunkPayload, now)
 
 			// RFC 8985 (RACK) sec 5.2: RACK.segment is the most recently sent
 			// segment that has been delivered, including retransmissions.
@@ -3031,21 +3010,7 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 
 				a.log.Tracef("[%s] tsn=%d has been sacked", a.name, chunkPayload.tsn)
 
-				// RTT / RTO and RACK updates
-				if sna32GTE(chunkPayload.tsn, a.minTSN2MeasureRTT) {
-					// Only original transmissions for classic RTT measurement
-					if chunkPayload.nSent == 1 {
-						a.minTSN2MeasureRTT = a.myNextTSN
-						rtt := now.Sub(chunkPayload.since).Seconds() * 1000.0
-						srtt := a.rtoMgr.setNewRTT(rtt)
-						a.srtt.Store(srtt)
-
-						a.rack.rackMinRTTWnd.Push(now, now.Sub(chunkPayload.since))
-
-						a.log.Tracef("[%s] SACK: measured-rtt=%f srtt=%f new-rto=%f",
-							a.name, rtt, srtt, a.rtoMgr.getRTO())
-					}
-				}
+				a.measureRTT(chunkPayload, now)
 
 				if chunkPayload.since.After(newestDeliveredSendTime) {
 					newestDeliveredSendTime = chunkPayload.since
@@ -3061,6 +3026,22 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 	}
 
 	return bytesAckedPerStream, htna, newestDeliveredSendTime, newestDeliveredOrigTSN, deliveredFound, nil
+}
+
+// measureRTT applies RFC 9260 section 6.3.1 C4/C5: sample once per round trip
+// and exclude retransmitted DATA (Karn's algorithm). The caller holds the lock.
+func (a *Association) measureRTT(c *chunkPayloadData, now time.Time) {
+	if c.nSent != 1 || sna32LT(c.tsn, a.minTSN2MeasureRTT) {
+		return
+	}
+	a.minTSN2MeasureRTT = a.myNextTSN
+	rtt := now.Sub(c.since)
+	srtt := a.rtoMgr.setNewRTT(rtt.Seconds() * 1000)
+	a.srtt.Store(srtt)
+	// Keep a windowed minimum so RACK can adapt when the path RTT changes.
+	a.rack.rackMinRTTWnd.Push(now, rtt)
+	a.log.Tracef("[%s] SACK: measured-rtt=%f srtt=%f new-rto=%f",
+		a.name, rtt.Seconds()*1000, srtt, a.rtoMgr.getRTO())
 }
 
 // The caller should hold the association lock.
@@ -4659,6 +4640,10 @@ func (a *Association) onRetransmissionFailure(id int) {
 func (a *Association) onAckTimeout() {
 	a.lock.Lock()
 	defer a.lock.Unlock()
+
+	if a.ackState != ackStateDelay {
+		return
+	}
 
 	a.log.Tracef("[%s] ack timed out (ackState: %d)", a.name, a.ackState)
 	a.stats.incAckTimeouts()

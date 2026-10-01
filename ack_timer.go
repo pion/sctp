@@ -9,11 +9,10 @@ import (
 	"time"
 )
 
-const (
-	ackInterval time.Duration = 200 * time.Millisecond
-)
+// RFC 9260 sections 6.2 and 16: SACK.Delay defaults to 200 ms and must not exceed 500 ms.
+const ackInterval time.Duration = 200 * time.Millisecond
 
-// ackTimerObserver is the inteface to an ack timer observer.
+// ackTimerObserver is the interface to an ack timer observer.
 type ackTimerObserver interface {
 	onAckTimeout()
 }
@@ -26,7 +25,7 @@ const (
 	ackTimerClosed
 )
 
-// ackTimer provides the retnransmission timer conforms with RFC 4960 Sec 6.3.1.
+// ackTimer implements delayed acknowledgements according to RFC 9260 section 6.2.
 type ackTimer struct {
 	timer    *time.Timer
 	observer ackTimerObserver
@@ -70,8 +69,7 @@ func (t *ackTimer) start() bool {
 	return true
 }
 
-// stops the timer. this is similar to stop() but subsequent start() call
-// will fail (the timer is no longer usable).
+// stop stops the timer and keeps it reusable.
 func (t *ackTimer) stop() {
 	t.mutex.Lock()
 	defer t.mutex.Unlock()

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type onAckTO func()
@@ -106,5 +107,35 @@ func TestAckTimer(t *testing.T) {
 			rt.close()
 			assert.False(t, rt.isRunning(), "should not be running")
 		})
+	})
+}
+
+func TestAssociationSACKDelay(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		assoc := newTimerTestAssociation(t, Config{})
+		assoc.handleChunksStart()
+		assoc.lock.Lock()
+		assoc.handleData(&chunkPayloadData{
+			tsn: 1, beginningFragment: true, endingFragment: true,
+			payloadType: PayloadTypeWebRTCBinary, userData: []byte("data"),
+		})
+		assoc.lock.Unlock()
+		assoc.handleChunksEnd()
+
+		time.Sleep(200*time.Millisecond - time.Nanosecond)
+		synctest.Wait()
+		packets, _ := assoc.gatherOutbound()
+		require.Empty(t, packets, "SACK must not be sent before its deadline")
+		time.Sleep(time.Nanosecond)
+		synctest.Wait()
+		packets, _ = assoc.gatherOutbound()
+		require.Len(t, packets, 1)
+		pkt := &packet{}
+		require.NoError(t, pkt.unmarshal(false, packets[0]))
+		require.Len(t, pkt.chunks, 1)
+		sack, ok := pkt.chunks[0].(*chunkSelectiveAck)
+		require.True(t, ok)
+		assert.Equal(t, uint32(1), sack.cumulativeTSNAck)
+		assert.Equal(t, uint64(1), assoc.stats.getNumAckTimeouts())
 	})
 }

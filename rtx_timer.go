@@ -32,7 +32,7 @@ const (
 )
 
 // rtoManager manages Rtx timeout values.
-// This is an implementation of RFC 4960 sec 6.3.1.
+// This is an implementation of RFC 9260 sec 6.3.1.
 type rtoManager struct {
 	srtt     float64
 	rttvar   float64
@@ -73,6 +73,10 @@ func (m *rtoManager) setNewRTT(rtt float64) float64 {
 		m.rttvar = (1-rtoBeta)*m.rttvar + rtoBeta*(math.Abs(m.srtt-rtt))
 		m.srtt = (1-rtoAlpha)*m.srtt + rtoAlpha*rtt
 	}
+	// RFC 9260 section 6.3.1 G1, with clock granularity of 1 ms.
+	if m.rttvar == 0 {
+		m.rttvar = 1
+	}
 	m.rto = math.Min(math.Max(m.srtt+4*m.rttvar, rtoMin), m.rtoMax)
 
 	return m.srtt
@@ -84,6 +88,14 @@ func (m *rtoManager) getRTO() float64 {
 	defer m.mutex.RUnlock()
 
 	return m.rto
+}
+
+// backoff retains T3 expiration backoff until a fresh RTT measurement or reset.
+func (m *rtoManager) backoff() {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	m.rto = math.Min(2*m.rto, m.rtoMax)
 }
 
 // reset resets the RTO variables to the initial values.
@@ -109,7 +121,7 @@ func (m *rtoManager) setRTO(rto float64, noUpdate bool) {
 	m.noUpdate = noUpdate
 }
 
-// rtxTimerObserver is the inteface to a timer observer.
+// rtxTimerObserver is the interface to a timer observer.
 // NOTE: Observers MUST NOT call start() or stop() method on rtxTimer
 // from within these callbacks.
 type rtxTimerObserver interface {
@@ -125,13 +137,14 @@ const (
 	rtxTimerClosed
 )
 
-// rtxTimer provides the retnransmission timer conforms with RFC 4960 Sec 6.3.1.
+// rtxTimer implements retransmission timing according to RFC 9260 section 6.3.
 type rtxTimer struct {
 	timer      *time.Timer
 	observer   rtxTimerObserver
 	id         int
 	maxRetrans uint
 	rtoMax     float64
+	rtoMgr     *rtoManager // T3 shares the destination RTO, including backoff.
 	mutex      sync.Mutex
 	rto        float64
 	nRtos      uint
@@ -161,15 +174,21 @@ func newRTXTimer(id int, observer rtxTimerObserver, maxRetrans uint,
 }
 
 func (t *rtxTimer) calculateNextTimeout() time.Duration {
-	timeout := calculateNextTimeout(t.rto, t.nRtos, t.rtoMax)
+	rto, nRtos := t.rto, t.nRtos
+	if t.rtoMgr != nil {
+		rto, nRtos = t.rtoMgr.getRTO(), 0
+	}
 
-	return time.Duration(timeout) * time.Millisecond
+	return time.Duration(calculateNextTimeout(rto, nRtos, t.rtoMax)) * time.Millisecond
 }
 
 func (t *rtxTimer) timeout() {
 	t.mutex.Lock()
 	if t.pending--; t.pending == 0 && t.state == rtxTimerStarted {
 		if t.nRtos++; t.maxRetrans == 0 || t.nRtos <= t.maxRetrans {
+			if t.rtoMgr != nil {
+				t.rtoMgr.backoff()
+			}
 			t.timer.Reset(t.calculateNextTimeout())
 			t.pending++
 			defer t.observer.onRetransmissionTimeout(t.id, t.nRtos)
@@ -239,11 +258,7 @@ func (t *rtxTimer) isRunning() bool {
 }
 
 func calculateNextTimeout(rto float64, nRtos uint, rtoMax float64) float64 {
-	// RFC 4096 sec 6.3.3.  Handle T3-rtx Expiration
-	//   E2)  For the destination address for which the timer expires, set RTO
-	//        <- RTO * 2 ("back off the timer").  The maximum value discussed
-	//        in rule C7 above (RTO.max) may be used to provide an upper bound
-	//        to this doubling operation.
+	// RFC 9260 section 6.3.3 E2: double RTO, bounded by RTO.Max.
 	if nRtos < 31 {
 		m := 1 << nRtos
 

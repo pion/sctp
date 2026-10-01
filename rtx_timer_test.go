@@ -6,6 +6,7 @@
 package sctp
 
 import (
+	"encoding/binary"
 	"math"
 	"sync/atomic"
 	"testing"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // Path.Max.Retrans.
@@ -411,4 +413,78 @@ func TestRtxTimer(t *testing.T) { //nolint: maintidx
 			assert.Equal(t, int32(0), atomic.LoadInt32(&rtoCount), "RTO should not occur")
 		})
 	})
+}
+
+func TestRTOManagerGranularity(t *testing.T) {
+	for _, srtt := range []float64{0, 2000} {
+		m := newRTOManager(0)
+		m.srtt = srtt
+		m.setNewRTT(srtt)
+		assert.Equal(t, float64(1), m.rttvar)
+		assert.Equal(t, math.Max(rtoMin, srtt+4), m.getRTO())
+	}
+}
+
+func newTimerTestAssociation(t *testing.T, cfg Config) *Association {
+	t.Helper()
+	cfg.applyDefaults()
+	assoc := createAssociationFromConfigWithTsn(&cfg, 100)
+	t.Cleanup(assoc.closeAllTimers)
+	close(assoc.closeWriteLoopCh)
+	synctest.Wait()
+	assoc.setState(established)
+	assoc.payloadQueue.init(0)
+	assoc.setRWND(4096)
+
+	return assoc
+}
+
+func TestAssociationRTTSamplesCollapseBackoff(t *testing.T) {
+	for _, rtoMax := range []float64{500, 4000} {
+		for _, heartbeat := range []bool{false, true} {
+			synctest.Test(t, func(t *testing.T) {
+				assoc := newTimerTestAssociation(t, Config{RTOMax: rtoMax})
+				firstTSN := assoc.myNextTSN
+				send := func() {
+					assoc.pendingQueue.push(&chunkPayloadData{
+						beginningFragment: true, endingFragment: true, userData: []byte("data"),
+					})
+					packets, _ := assoc.gatherOutbound()
+					require.NotEmpty(t, packets)
+				}
+				send()
+				time.Sleep(time.Duration(min(rtoInitial, rtoMax)) * time.Millisecond)
+				synctest.Wait()
+				assert.Equal(t, uint64(1), assoc.stats.getNumT3Timeouts(), "initial T3 respects RTOMax")
+				time.Sleep(time.Duration(min(2*rtoInitial, rtoMax)) * time.Millisecond)
+				synctest.Wait()
+				assert.Equal(t, min(4*rtoInitial, rtoMax), assoc.rtoMgr.getRTO())
+
+				send()
+				time.Sleep(100 * time.Millisecond)
+				synctest.Wait()
+				assoc.lock.Lock()
+				if heartbeat {
+					info := make([]byte, 8)
+					binary.BigEndian.PutUint64(info, uint64(time.Now().Add(-100*time.Millisecond).UnixNano())) //nolint:gosec
+					assoc.handleHeartbeatAck(&chunkHeartbeatAck{params: []param{&paramHeartbeatInfo{
+						heartbeatInformation: info,
+					}}})
+				} else {
+					err := assoc.handleSack(&chunkSelectiveAck{
+						cumulativeTSNAck: firstTSN - 1, advertisedReceiverWindowCredit: 4096,
+						gapAckBlocks: []gapAckBlock{{start: 2, end: 2}},
+					})
+					assert.NoError(t, err)
+				}
+				assoc.lock.Unlock()
+				assert.Equal(t, min(rtoMin, rtoMax), assoc.rtoMgr.getRTO())
+				assert.Equal(t, float64(100), assoc.SRTT())
+				// Neither a heartbeat nor a gap ACK of later DATA restarts T3.
+				time.Sleep(time.Duration(min(4*rtoInitial, rtoMax))*time.Millisecond - 100*time.Millisecond)
+				synctest.Wait()
+				assert.Equal(t, uint64(3), assoc.stats.getNumT3Timeouts())
+			})
+		}
+	}
 }
