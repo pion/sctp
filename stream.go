@@ -599,6 +599,16 @@ func (s *Stream) resetOutgoingStreamSequenceNumbers() {
 	s.nextUnorderedMID = 0
 }
 
+// AssociationGeneration returns the association restart generation currently
+// owning this stream. It changes when an open stream is retained by a restart;
+// a new stream starts in the association's current generation.
+func (s *Stream) AssociationGeneration() uint64 {
+	s.lock.RLock()
+	defer s.lock.RUnlock()
+
+	return s.associationGeneration
+}
+
 // State return the stream state.
 func (s *Stream) State() StreamState {
 	s.lock.RLock()
