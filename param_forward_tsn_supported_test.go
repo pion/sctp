@@ -57,3 +57,35 @@ func TestParamForwardTSNSupported_Failure(t *testing.T) {
 		assert.Errorf(t, err, "expected unmarshal #%d: '%s' to fail.", i, tc.name)
 	}
 }
+
+func TestParamForwardTSNSupported_Unmarshal_InvalidLength(t *testing.T) {
+	// length says 6 (header + 2 bytes payload), which is invalid per RFC (must be 4 only).
+	bad := []byte{0xC0, 0x00, 0x00, 0x06, 0xAA, 0xBB}
+
+	var p paramForwardTSNSupported
+	_, err := p.unmarshal(bad)
+
+	assert.Error(t, err)
+	assert.ErrorIs(t, err, ErrForwardTSNSupportedParamInvalidLength)
+}
+
+func TestParamForwardTSNSupported_Marshal_EnforcesEmptyValue(t *testing.T) {
+	// even if raw is pre-filled, marshal must emit a header-only parameter (len=4).
+	p := &paramForwardTSNSupported{
+		paramHeader: paramHeader{
+			raw: []byte{0xAA, 0xBB}, // should be ignored by marshal
+		},
+	}
+
+	b, err := p.marshal()
+	assert.NoError(t, err)
+	assert.Equal(t, testParamForwardTSNSupported(), b, "marshal must emit header-only (len=4)")
+
+	var q paramForwardTSNSupported
+	_, err = q.unmarshal(b)
+	assert.NoError(t, err)
+	assert.Equal(t, forwardTSNSupp, q.typ)
+	assert.Equal(t, 4, q.len)
+	assert.Empty(t, q.raw)
+	assert.Equal(t, paramHeaderUnrecognizedActionSkipAndReport, q.unrecognizedAction)
+}
