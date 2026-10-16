@@ -1504,6 +1504,9 @@ func (a *Association) gatherOutboundFastRetransmissionPackets( //nolint:gocognit
 		}*/
 		canSend, next := a.CC1.CanSend(totalBytes+dataLen, srtt)
 		if !canSend {
+			if len(toFastRetrans) < 1 {
+				a.willRetransmitFast = true
+			}
 			time.AfterFunc(next.Sub(now), func() {
 				a.awakeWriteLoop()
 			})
