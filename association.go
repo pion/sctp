@@ -1509,6 +1509,7 @@ func (a *Association) gatherOutboundFastRetransmissionPackets( //nolint:gocognit
 	// MTU bundling + burst budgeting tracker
 	bytesInPacket := 0
 	stopBundling := false
+	abandoned := false
 
 	for i := 0; ; i++ {
 		chunkPayload, ok := a.inflightQueue.get(a.cumulativeTSNAckPoint + uint32(i) + 1) //nolint:gosec // G115
@@ -1521,6 +1522,14 @@ func (a *Association) gatherOutboundFastRetransmissionPackets( //nolint:gocognit
 		}
 
 		if chunkPayload.nSent > 1 || chunkPayload.missIndicator < 3 {
+			continue
+		}
+
+		// Abandon the chunk instead of retransmitting it if that would exceed
+		// its reliability limit (RFC 3758 Sec 3.5 A3).
+		if a.checkPartialReliabilityStatus(chunkPayload) {
+			abandoned = true
+
 			continue
 		}
 
@@ -1587,10 +1596,13 @@ func (a *Association) gatherOutboundFastRetransmissionPackets( //nolint:gocognit
 		a.rackRemove(chunkPayload)
 		a.rackInsert(chunkPayload)
 
-		a.checkPartialReliabilityStatus(chunkPayload)
 		toFastRetrans = append(toFastRetrans, chunkPayload)
 		a.log.Tracef("[%s] fast-retransmit: tsn=%d sent=%d htna=%d",
 			a.name, chunkPayload.tsn, chunkPayload.nSent, a.fastRecoverExitPoint)
+	}
+
+	if abandoned {
+		a.advanceAdvancedPeerTSNAckPoint()
 	}
 
 	if len(toFastRetrans) == 0 {
@@ -3281,22 +3293,7 @@ func (a *Association) finishAcknowledgement(
 			a.advancedPeerTSNAckPoint = a.cumulativeTSNAckPoint
 		}
 
-		// RFC 3758 Sec 3.5 C2
-		for i := a.advancedPeerTSNAckPoint + 1; ; i++ {
-			c, ok := a.inflightQueue.get(i)
-			if !ok {
-				break
-			}
-			if !c.abandoned() {
-				break
-			}
-			a.advancedPeerTSNAckPoint = i
-		}
-
-		// RFC 3758 Sec 3.5 C3
-		if sna32GT(a.advancedPeerTSNAckPoint, a.cumulativeTSNAckPoint) {
-			a.willSendForwardTSN = true
-		}
+		a.advanceAdvancedPeerTSNAckPoint()
 		a.awakeWriteLoop()
 	}
 
@@ -3957,9 +3954,8 @@ func (a *Association) movePendingDataChunkToInflightQueue(chunkPayload *chunkPay
 	// Assign TSN and original send time
 	chunkPayload.tsn = a.generateNextTSN()
 	chunkPayload.since = time.Now()
-	chunkPayload.nSent = 1
-
 	a.checkPartialReliabilityStatus(chunkPayload)
+	chunkPayload.nSent = 1
 
 	a.log.Tracef(
 		"[%s] sending ppi=%d tsn=%d ssn=%d sent=%d len=%d (%v,%v)",
@@ -4174,10 +4170,15 @@ func (a *Association) sendPayloadData(ctx context.Context, chunks []*chunkPayloa
 	return nil
 }
 
+// checkPartialReliabilityStatus marks the chunk abandoned if its reliability
+// limit has been reached, and reports whether it is abandoned. It must be
+// called before a transmission is counted in nSent, so that a chunk is only
+// abandoned instead of a retransmission, never while its last allowed
+// transmission is still in flight.
 // The caller should hold the lock.
-func (a *Association) checkPartialReliabilityStatus(chunkPayload *chunkPayloadData) {
+func (a *Association) checkPartialReliabilityStatus(chunkPayload *chunkPayloadData) bool {
 	if !a.partialReliabilityEnabled() {
-		return
+		return false
 	}
 
 	// draft-ietf-rtcweb-data-protocol-09.txt section 6
@@ -4186,7 +4187,7 @@ func (a *Association) checkPartialReliabilityStatus(chunkPayload *chunkPayloadDa
 	//		ordered delivery and reliable transmission.
 	//
 	if chunkPayload.payloadType == PayloadTypeWebRTCDCEP {
-		return
+		return false
 	}
 
 	// PR-SCTP
@@ -4220,6 +4221,31 @@ func (a *Association) checkPartialReliabilityStatus(chunkPayload *chunkPayloadDa
 		// Remote has reset its send side of the stream, we can still send data.
 		a.log.Tracef("[%s] stream %d not found, remote reset", a.name, chunkPayload.streamIdentifier)
 	}
+
+	return chunkPayload.abandoned()
+}
+
+// advanceAdvancedPeerTSNAckPoint moves Advanced.Peer.Ack.Point over abandoned
+// chunks and schedules a FORWARD TSN if it moved past the cumulative TSN ack
+// point (RFC 3758 Sec 3.5 C2 and C3).
+// The caller should hold the lock.
+func (a *Association) advanceAdvancedPeerTSNAckPoint() {
+	// RFC 3758 Sec 3.5 C2
+	for i := a.advancedPeerTSNAckPoint + 1; ; i++ {
+		c, ok := a.inflightQueue.get(i)
+		if !ok {
+			break
+		}
+		if !c.abandoned() {
+			break
+		}
+		a.advancedPeerTSNAckPoint = i
+	}
+
+	// RFC 3758 Sec 3.5 C3
+	if sna32GT(a.advancedPeerTSNAckPoint, a.cumulativeTSNAckPoint) {
+		a.willSendForwardTSN = true
+	}
 }
 
 // getDataPacketsToRetransmit is called when T3-rtx is timed out and retransmit outstanding data chunks
@@ -4233,6 +4259,13 @@ func (a *Association) getDataPacketsToRetransmit(budgetScaled *int64, consumed *
 
 	bytesInPacket := 0
 
+	abandoned := false
+	defer func() {
+		if abandoned {
+			a.advanceAdvancedPeerTSNAckPoint()
+		}
+	}()
+
 	for i := 0; ; i++ {
 		chunkPayload, ok := a.inflightQueue.get(a.cumulativeTSNAckPoint + uint32(i) + 1) //nolint:gosec // G115
 		if !ok {
@@ -4240,6 +4273,15 @@ func (a *Association) getDataPacketsToRetransmit(budgetScaled *int64, consumed *
 		}
 
 		if !chunkPayload.retransmit {
+			continue
+		}
+
+		// Abandon the chunk instead of retransmitting it if that would exceed
+		// its reliability limit (RFC 3758 Sec 3.5 A3).
+		if a.checkPartialReliabilityStatus(chunkPayload) {
+			chunkPayload.retransmit = false
+			abandoned = true
+
 			continue
 		}
 
@@ -4286,8 +4328,6 @@ func (a *Association) getDataPacketsToRetransmit(budgetScaled *int64, consumed *
 		chunkPayload.since = currRtxTimestamp
 		a.rackRemove(chunkPayload)
 		a.rackInsert(chunkPayload)
-
-		a.checkPartialReliabilityStatus(chunkPayload)
 
 		a.log.Tracef(
 			"[%s] retransmitting tsn=%d ssn=%d sent=%d",
@@ -4558,22 +4598,7 @@ func (a *Association) onRetransmissionTimeout(id int, nRtos uint) { //nolint:cyc
 		//  SHOULD try to advance the "Advanced.Peer.Ack.Point" by following
 		//  the procedures outlined in C2 - C5.
 		if a.partialReliabilityEnabled() {
-			// RFC 3758 Sec 3.5 C2
-			for i := a.advancedPeerTSNAckPoint + 1; ; i++ {
-				c, ok := a.inflightQueue.get(i)
-				if !ok {
-					break
-				}
-				if !c.abandoned() {
-					break
-				}
-				a.advancedPeerTSNAckPoint = i
-			}
-
-			// RFC 3758 Sec 3.5 C3
-			if sna32GT(a.advancedPeerTSNAckPoint, a.cumulativeTSNAckPoint) {
-				a.willSendForwardTSN = true
-			}
+			a.advanceAdvancedPeerTSNAckPoint()
 		}
 
 		a.log.Debugf("[%s] T3-rtx timed out: nRtos=%d cwnd=%d ssthresh=%d", a.name, nRtos, a.CWND(), a.ssthresh)
