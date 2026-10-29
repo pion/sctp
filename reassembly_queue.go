@@ -719,6 +719,20 @@ func (r *reassemblyQueue) forwardTSNForUnorderedMID(lastMID uint32) {
 	}
 }
 
+// discardAll drops every queued chunk, complete or not, and returns the
+// number of bytes dropped. Sequence state is kept.
+func (r *reassemblyQueue) discardAll() int {
+	r.ordered = nil
+	r.unordered = nil
+	r.unorderedChunks = nil
+	r.orderedMID = nil
+	r.unorderedMID = nil
+	clear(r.orderedMIDMap)
+	clear(r.unorderedMIDMap)
+
+	return int(atomic.SwapUint64(&r.nBytes, 0)) //nolint:gosec // G115
+}
+
 func (r *reassemblyQueue) subtractNumBytes(nBytes int) {
 	cur := atomic.LoadUint64(&r.nBytes)
 	if int(cur) >= nBytes { //nolint:gosec // G115
