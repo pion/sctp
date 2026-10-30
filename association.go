@@ -337,7 +337,7 @@ type Association struct {
 	rack                        rackSettings  // rack configurable options
 	rackReoWnd                  time.Duration // dynamic reordering window
 	rackMinRTT                  time.Duration // min observed RTT
-	rackDeliveredTime           time.Time     // send time of most recently delivered original chunk
+	rackDeliveredTime           time.Time     // latest transmission time among delivered chunks, including retries
 	rackHighestDeliveredOrigTSN uint32
 	rackReorderingSeen          bool // ever observed reordering for this association
 	rackKeepInflatedRecoveries  int  // keep inflated reoWnd for 16 loss recoveries
@@ -2896,6 +2896,7 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 ) {
 	bytesAckedPerStream = map[*Stream]int{}
 	now := time.Now() // capture the time for this SACK
+	var acknowledged []*chunkPayloadData
 	earliest := a.inflightQueue.earliestOutstanding()
 	stopT3 := earliest != nil && sna32LTE(earliest.tsn, selectiveAckChunk.cumulativeTSNAck)
 
@@ -2970,13 +2971,7 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 
 			a.measureRTT(chunkPayload, now)
 
-			// RFC 8985 (RACK) sec 5.2: RACK.segment is the most recently sent
-			// segment that has been delivered, including retransmissions.
-			if chunkPayload.since.After(newestDeliveredSendTime) {
-				newestDeliveredSendTime = chunkPayload.since
-				newestDeliveredOrigTSN = chunkPayload.tsn
-				deliveredFound = true
-			}
+			acknowledged = append(acknowledged, chunkPayload)
 		}
 
 		if a.inFastRecovery && chunkPayload.tsn == a.fastRecoverExitPoint {
@@ -3012,11 +3007,7 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 
 				a.measureRTT(chunkPayload, now)
 
-				if chunkPayload.since.After(newestDeliveredSendTime) {
-					newestDeliveredSendTime = chunkPayload.since
-					newestDeliveredOrigTSN = chunkPayload.tsn
-					deliveredFound = true
-				}
+				acknowledged = append(acknowledged, chunkPayload)
 			}
 
 			if sna32LT(htna, tsn) {
@@ -3025,7 +3016,33 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 		}
 	}
 
+	// Finish RTT sampling for the whole SACK before judging retry timing.
+	// Otherwise a sample in a later gap block could change which retries are credible.
+	if minRTT := a.rack.rackMinRTTWnd.Min(now); minRTT > 0 {
+		a.rackMinRTT = minRTT
+	}
+	for _, chunk := range acknowledged {
+		if a.rackAcknowledgedTransmissionValid(chunk, now) && chunk.since.After(newestDeliveredSendTime) {
+			newestDeliveredSendTime = chunk.since
+			newestDeliveredOrigTSN = chunk.tsn
+			deliveredFound = true
+		}
+	}
+
 	return bytesAckedPerStream, htna, newestDeliveredSendTime, newestDeliveredOrigTSN, deliveredFound, nil
+}
+
+// A late ACK may acknowledge an earlier copy rather than the latest retry.
+// RFC 8985 section 6.2 uses minimum RTT to reject implausibly early retry ACKs.
+// This delivery-evidence check is separate from Karn's rule for RTT sampling.
+func (a *Association) rackAcknowledgedTransmissionValid(chunk *chunkPayloadData, now time.Time) bool {
+	if chunk.nSent == 1 {
+		return true
+	}
+
+	// With no RTT estimate, allow delivery evidence so an all-retransmitted
+	// flight can bootstrap RACK. Karn still excludes these ACKs from RTT sampling.
+	return !now.Before(chunk.since.Add(a.rackMinRTT))
 }
 
 // measureRTT applies RFC 9260 section 6.3.1 C4/C5: sample once per round trip
@@ -4904,8 +4921,8 @@ func (a *Association) onRackAfterSACK( // nolint:gocognit,cyclop,gocyclo
 		}
 	}
 
-	// 3) Loss marking on ACK: any outstanding chunk whose (send_time + reoWnd) < newestDeliveredSendTime
-	// is lost (RACK for SCTP section 2A)
+	// 3) Loss marking compares each chunk's latest transmission, including retries,
+	// with the latest delivered transmission and the reordering window.
 	if !a.rackDeliveredTime.IsZero() { //nolint:nestif
 		marked := false
 
@@ -4920,15 +4937,14 @@ func (a *Association) onRackAfterSACK( // nolint:gocognit,cyclop,gocyclo
 				continue
 			}
 
-			if chunk.retransmit || chunk.nSent > 1 {
-				// Either already scheduled for retransmit or not an original send:
-				// skip but keep in list in case it's still outstanding.
+			if chunk.retransmit {
+				// Already queued work must not be scheduled twice.
 				chunk = next
 
 				continue
 			}
 
-			// Ordered by original send time. If this one is too new,
+			// Ordered by most recent transmission time. If this one is too new,
 			// all later ones are even newer -> short-circuit.
 			if !chunk.since.Add(a.rackReoWnd).Before(a.rackDeliveredTime) {
 				break
@@ -4938,7 +4954,7 @@ func (a *Association) onRackAfterSACK( // nolint:gocognit,cyclop,gocyclo
 			chunk.retransmit = true
 			marked = true
 
-			// Remove from xmit-time list: we no longer need RACK for this TSN.
+			// A retry will rejoin the xmit-time list when it is sent.
 			a.rackRemove(chunk)
 
 			a.log.Tracef("[%s] RACK: mark lost tsn=%d (sent=%v, delivered=%v, reoWnd=%v)",
@@ -5041,7 +5057,7 @@ func (a *Association) onRackTimeoutLocked() { //nolint:cyclop
 
 			continue
 		}
-		if chunk.retransmit || chunk.nSent > 1 {
+		if chunk.retransmit {
 			chunk = next
 
 			continue
