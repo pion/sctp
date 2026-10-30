@@ -2904,6 +2904,7 @@ func (a *Association) processFastRetransmission( //nolint:gocognit
 	gapAckBlocks []gapAckBlock,
 	htna uint32,
 	cumTSNAckPointAdvanced bool,
+	deliveredFound bool,
 ) error {
 	// HTNA algorithm - RFC 4960 Sec 7.2.4
 	// Increment missIndicator of each chunks that the SACK reported missing
@@ -2961,7 +2962,7 @@ func (a *Association) processFastRetransmission( //nolint:gocognit
 		}
 	}
 
-	if a.inFastRecovery && cumTSNAckPointAdvanced {
+	if a.inFastRecovery && deliveredFound {
 		a.willRetransmitFast = true
 	}
 
@@ -3058,6 +3059,7 @@ func (a *Association) finishAcknowledgement(
 		selectiveAckChunk.gapAckBlocks,
 		result.htna,
 		result.cumTSNAckPointAdvanced,
+		result.deliveredFound,
 	)
 	if err != nil {
 		return err
@@ -4689,7 +4691,7 @@ func (a *Association) onRackAfterSACK( // nolint:gocognit,cyclop,gocyclo
 				continue
 			}
 
-			if chunk.retransmit || chunk.nSent > 1 {
+			if chunk.retransmit || (chunk.missIndicator >= 3 && chunk.nSent == 1) {
 				// Either already scheduled for retransmit or not an original send:
 				// skip but keep in list in case it's still outstanding.
 				chunk = next
@@ -4810,7 +4812,7 @@ func (a *Association) onRackTimeoutLocked() { //nolint:cyclop
 
 			continue
 		}
-		if chunk.retransmit || chunk.nSent > 1 {
+		if chunk.retransmit || (chunk.missIndicator >= 3 && chunk.nSent == 1) {
 			chunk = next
 
 			continue
