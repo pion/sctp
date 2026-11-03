@@ -320,12 +320,11 @@ func (s *Stream) WriteSCTP(payload []byte, ppi PayloadProtocolIdentifier) (int, 
 		return 0, ErrStreamClosed
 	}
 
-	// the send could fail if the association is blocked for writing (timeout), it will left a hole
-	// in the stream sequence number space, so we need to lock the write to avoid concurrent send and decrement
-	// the sequence number in case of failure
-	if s.association.isBlockWrite() {
-		s.writeLock.Lock()
-	}
+	// The send can fail after packetize has taken a sequence number: on a blockWrite
+	// timeout, or when Close wins the race to the pending queue. rollbackWrite then
+	// gives the number back, which is only safe if no other write on this stream
+	// took a later one in the meantime, so writes are serialized in every mode.
+	s.writeLock.Lock()
 	chunks, unordered := s.packetize(payload, ppi)
 	n := len(payload)
 	err := s.association.sendPayloadData(s.writeDeadline.Context(), chunks)
@@ -333,9 +332,7 @@ func (s *Stream) WriteSCTP(payload []byte, ppi PayloadProtocolIdentifier) (int, 
 		s.rollbackWrite(chunks, unordered, uint64(len(payload)))
 		n = 0
 	}
-	if s.association.isBlockWrite() {
-		s.writeLock.Unlock()
-	}
+	s.writeLock.Unlock()
 
 	return n, err
 }
