@@ -158,6 +158,20 @@ func WithRTOMax(rtoMax float64) AssociationOption {
 	})
 }
 
+// WithHandshakeRTOMax sets the max retransmission timeout in ms for the
+// T1-init and T1-cookie handshake timers. Other association timers retain the
+// value configured by WithRTOMax or the default.
+func WithHandshakeRTOMax(rtoMax float64) AssociationOption {
+	return sharedOption(func(c *Config) error {
+		if rtoMax <= 0 {
+			return errInvalidRTOMax
+		}
+		c.HandshakeRTOMax = rtoMax
+
+		return nil
+	})
+}
+
 // WithMinCwnd sets the minimum congestion window for the association.
 func WithMinCwnd(minCwnd uint32) AssociationOption {
 	return sharedOption(func(c *Config) error {
