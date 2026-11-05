@@ -129,6 +129,12 @@ func TestAssociationOptions_Validation(t *testing.T) {
 		assert.ErrorIs(t, err, errInvalidRTOMax)
 	})
 
+	t.Run("rto min <= 0", func(t *testing.T) {
+		var cfg Config
+		err := WithRTOMin(0).applyServer(&cfg)
+		assert.ErrorIs(t, err, errInvalidRTOMin)
+	})
+
 	t.Run("snap nil arguments", func(t *testing.T) {
 		var cfg Config
 		err := WithSNAP(nil, nil).applyServer(&cfg)
@@ -205,6 +211,7 @@ func TestAssociationOptions_ClientAndServer(t *testing.T) {
 		WithMaxMessageSize(30000),
 		WithMaxReassemblyQueueEntries(13),
 		WithRTOMax(1000),
+		WithRTOMin(400),
 		WithMinCwnd(5000),
 		WithFastRtxWnd(6000),
 		WithCwndCAStep(7000),
@@ -234,6 +241,9 @@ func TestAssociationOptions_ClientAndServer(t *testing.T) {
 
 	assert.Equal(t, uint32(13), aClient.maxReassemblyQueueEntries)
 	assert.Equal(t, uint32(13), aServer.maxReassemblyQueueEntries)
+
+	assert.Equal(t, float64(400), aClient.rtoMgr.rtoMin)
+	assert.Equal(t, float64(400), aServer.rtoMgr.rtoMin)
 
 	assert.Equal(t, uint32(5000), aClient.minCwnd)
 	assert.Equal(t, uint32(6000), aClient.fastRtxWnd)
