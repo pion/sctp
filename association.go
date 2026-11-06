@@ -3953,8 +3953,10 @@ func (a *Association) sendPayloadData(ctx context.Context, chunks []*chunkPayloa
 		a.writePending = true
 	}
 
+	immediateSack := a.CWND() < 150000
 	// Push the chunks into the pending queue first.
 	for _, c := range chunks {
+		c.immediateSack = immediateSack
 		a.pendingQueue.push(c)
 	}
 
