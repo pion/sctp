@@ -22,7 +22,7 @@ const pathMaxRetrans uint = 5
 
 func TestRTOManager(t *testing.T) {
 	t.Run("initial values", func(t *testing.T) {
-		m := newRTOManager(0)
+		m := newRTOManager(0, 0)
 		assert.Equal(t, rtoInitial, m.rto, "should be rtoInitial")
 		assert.Equal(t, rtoInitial, m.getRTO(), "should be rtoInitial")
 		assert.Equal(t, float64(0), m.srtt, "should be 0")
@@ -31,7 +31,7 @@ func TestRTOManager(t *testing.T) {
 
 	t.Run("RTO calculation (small RTT)", func(t *testing.T) {
 		var rto float64
-		m := newRTOManager(0)
+		m := newRTOManager(0, 0)
 		exp := []int32{
 			1800,
 			1500,
@@ -47,9 +47,20 @@ func TestRTOManager(t *testing.T) {
 		}
 	})
 
+	t.Run("RTO calculation (custom RTO.Min)", func(t *testing.T) {
+		var rto float64
+		m := newRTOManager(400, 0)
+		for range 10 {
+			m.setNewRTT(70)
+			rto = m.getRTO()
+		}
+		assert.Equal(t, float64(400), rto, "should be capped at the custom RTO.Min")
+		assert.Equal(t, rtoInitial, newRTOManager(400, 0).getRTO(), "initial RTO is unchanged")
+	})
+
 	t.Run("RTO calculation (large RTT)", func(t *testing.T) {
 		var rto float64
-		m := newRTOManager(0)
+		m := newRTOManager(0, 0)
 		exp := []int32{
 			60000, // capped at RTO.Max
 			60000, // capped at RTO.Max
@@ -93,7 +104,7 @@ func TestRTOManager(t *testing.T) {
 	})
 
 	t.Run("reset", func(t *testing.T) {
-		m := newRTOManager(0)
+		m := newRTOManager(0, 0)
 		for range 10 {
 			m.setNewRTT(200)
 		}
@@ -417,11 +428,11 @@ func TestRtxTimer(t *testing.T) { //nolint: maintidx
 
 func TestRTOManagerGranularity(t *testing.T) {
 	for _, srtt := range []float64{0, 2000} {
-		m := newRTOManager(0)
+		m := newRTOManager(0, 0)
 		m.srtt = srtt
 		m.setNewRTT(srtt)
 		assert.Equal(t, float64(1), m.rttvar)
-		assert.Equal(t, math.Max(rtoMin, srtt+4), m.getRTO())
+		assert.Equal(t, math.Max(defaultRTOMin, srtt+4), m.getRTO())
 	}
 }
 
@@ -478,7 +489,7 @@ func TestAssociationRTTSamplesCollapseBackoff(t *testing.T) {
 					assert.NoError(t, err)
 				}
 				assoc.lock.Unlock()
-				assert.Equal(t, min(rtoMin, rtoMax), assoc.rtoMgr.getRTO())
+				assert.Equal(t, min(defaultRTOMin, rtoMax), assoc.rtoMgr.getRTO())
 				assert.Equal(t, float64(100), assoc.SRTT())
 				// Neither a heartbeat nor a gap ACK of later DATA restarts T3.
 				time.Sleep(time.Duration(min(4*rtoInitial, rtoMax))*time.Millisecond - 100*time.Millisecond)
