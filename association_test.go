@@ -8302,3 +8302,90 @@ func TestAssociationRestartRejectsStaleWriteWhileBlocked(t *testing.T) {
 	default:
 	}
 }
+
+// https://github.com/pion/sctp/pull/531
+// A write racing Close must either fail or be queued before the stream's
+// reset. A write queued after the reset reaches the peer past senderLastTSN,
+// and the peer, which has already removed the stream, accepts it as a new
+// stream whose first SSN is not 0. Nothing can ever be read from that stream.
+func TestAssociation_StreamWriteRacingCloseIsNotQueuedAfterReset(t *testing.T) {
+	checkGoroutineLeaks(t)
+
+	a1, a2, err := createAssocs()
+	require.NoError(t, err)
+
+	var mu sync.Mutex
+	accepted := map[uint16]int{}
+	acceptDone := make(chan struct{})
+	go func() {
+		defer close(acceptDone)
+		for {
+			stream, err := a2.AcceptStream()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			accepted[stream.StreamIdentifier()]++
+			mu.Unlock()
+			go func() {
+				buf := make([]byte, 1024)
+				for {
+					if _, err := stream.Read(buf); err != nil {
+						return
+					}
+				}
+			}()
+		}
+	}()
+
+	const streams = 200
+	payload := make([]byte, 64)
+	for i := uint16(1); i <= streams; i++ {
+		stream, err := a1.OpenStream(i, PayloadTypeWebRTCBinary)
+		require.NoError(t, err)
+		_, err = stream.WriteSCTP(payload, PayloadTypeWebRTCBinary)
+		require.NoError(t, err)
+
+		start := make(chan struct{})
+		var writers sync.WaitGroup
+		for range 4 {
+			writers.Add(1)
+			go func() {
+				defer writers.Done()
+				<-start
+				for {
+					if _, err := stream.WriteSCTP(payload, PayloadTypeWebRTCBinary); err != nil {
+						assert.True(t, errors.Is(err, ErrStreamClosed), "unexpected write error: %v", err)
+
+						return
+					}
+				}
+			}()
+		}
+		close(start)
+		time.Sleep(200 * time.Microsecond)
+		require.NoError(t, stream.Close())
+		writers.Wait()
+	}
+
+	// Wait for the peer to accept every stream, then give any DATA queued after a reset time to
+	// arrive and be accepted a second time.
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+
+		return len(accepted) == streams
+	}, 10*time.Second, 10*time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
+
+	mu.Lock()
+	for sid, n := range accepted {
+		assert.Equal(t, 1, n, "peer accepted stream %d %d times: DATA arrived after its reset", sid, n)
+	}
+	assert.Len(t, accepted, streams)
+	mu.Unlock()
+
+	require.NoError(t, a1.Close())
+	require.NoError(t, a2.Close())
+	<-acceptDone
+}

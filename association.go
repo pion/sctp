@@ -1294,10 +1294,6 @@ func (a *Association) awakeWriteLoop() {
 	}
 }
 
-func (a *Association) isBlockWrite() bool {
-	return a.blockWrite
-}
-
 // Mark the association is writable and unblock the waiting write,
 // the caller should hold the association write lock.
 func (a *Association) notifyBlockWritable() {
@@ -4148,6 +4144,17 @@ func (a *Association) validatePayloadData(chunks []*chunkPayloadData) error {
 	for _, c := range chunks {
 		if c.associationGeneration != a.restartGeneration {
 			return ErrAssociationRestarted
+		}
+	}
+
+	// Stream.Close changes the state before it queues the reset under a.lock,
+	// so a check made here, under a.lock, orders this write before the reset or
+	// refuses it. The check in WriteSCTP alone does not: a write queued after
+	// the reset reaches the peer past senderLastTSN and is taken there as a
+	// new stream.
+	if len(chunks) > 0 && chunks[0].stream != nil {
+		if chunks[0].stream.State() != StreamStateOpen {
+			return ErrStreamClosed
 		}
 	}
 
