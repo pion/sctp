@@ -436,6 +436,10 @@ type Config struct {
 	// Reassembly queue config options
 	maxReassemblyQueueEntries uint32
 
+	// Minimum retransmission timeout in milliseconds, set with WithRTOMin.
+	// Zero keeps the default of 1000 ms.
+	rtoMin float64
+
 	// SNAP/sctp-init
 	snapConfig *snapConfig
 
@@ -632,6 +636,9 @@ func (c Config) applyServer(cfg *Config) error { //nolint:dupl,cyclop
 	if c.RTOMax != 0 {
 		cfg.RTOMax = c.RTOMax
 	}
+	if c.rtoMin != 0 {
+		cfg.rtoMin = c.rtoMin
+	}
 	if c.MinCwnd != 0 {
 		cfg.MinCwnd = c.MinCwnd
 	}
@@ -742,6 +749,9 @@ func (c Config) applyClient(cfg *Config) error { //nolint:dupl,cyclop
 	if c.RTOMax != 0 {
 		cfg.RTOMax = c.RTOMax
 	}
+	if c.rtoMin != 0 {
+		cfg.rtoMin = c.rtoMin
+	}
 	if c.MinCwnd != 0 {
 		cfg.MinCwnd = c.MinCwnd
 	}
@@ -845,7 +855,7 @@ func createAssociationFromConfigWithTsn(cfg *Config, tsn uint32) *Association {
 		myNextRSN:               tsn,
 		minTSN2MeasureRTT:       tsn,
 		state:                   closed,
-		rtoMgr:                  newRTOManager(rtoMax),
+		rtoMgr:                  newRTOManager(cfg.rtoMin, rtoMax),
 		streams:                 map[uint16]*Stream{},
 		reconfigs:               map[uint32]*chunkReconfig{},
 		reconfigRequests:        map[uint32]*paramOutgoingResetRequest{},
