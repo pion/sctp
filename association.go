@@ -4095,6 +4095,20 @@ func (a *Association) bundleDataChunksIntoPackets(chunks []*chunkPayloadData) []
 	chunksToSend := []chunk{}
 	bytesInPacket := int(commonHeaderSize)
 
+	// RFC 4960 sec 6.2.  Acknowledgement on Reception of DATA Chunks
+	//   Before an endpoint transmits a DATA chunk, if any received DATA
+	//   chunks have not been acknowledged (e.g., due to delayed ack), the
+	//   sender should create a SACK and bundle it with the outbound DATA
+	//   chunk, as long as the size of the final SCTP packet does not exceed
+	//   the current MTU.
+	// Control chunks precede DATA chunks in a packet (RFC 4960 sec 6.10).
+	if len(chunks) > 0 {
+		if sack, size := a.takePendingSack(); sack != nil {
+			chunksToSend = append(chunksToSend, sack)
+			bytesInPacket += size
+		}
+	}
+
 	for _, chunkPayload := range chunks {
 		// RFC 4960 sec 6.1.  Transmission of DATA Chunks
 		//   Multiple DATA chunks committed for transmission MAY be bundled in a
@@ -4116,6 +4130,26 @@ func (a *Association) bundleDataChunksIntoPackets(chunks []*chunkPayloadData) []
 	}
 
 	return packets
+}
+
+// takePendingSack returns a SACK for received DATA that is still waiting on the
+// delayed-ack timer or an immediate ack, along with its size in a packet, and
+// clears that pending acknowledgement. It returns nil when nothing is owed or
+// the association always delays acks.
+// The caller should hold the lock.
+func (a *Association) takePendingSack() (*chunkSelectiveAck, int) {
+	if a.ackMode == ackModeAlwaysDelay || (a.ackState != ackStateDelay && a.ackState != ackStateImmediate) {
+		return nil, 0
+	}
+	a.ackTimer.stop()
+	a.ackState = ackStateIdle
+	sack := a.createSelectiveAckChunk()
+	a.stats.incSACKsSent()
+	a.log.Debugf("[%s] bundling SACK with DATA: %s", a.name, sack)
+	// A SACK chunk is a multiple of four bytes, so it needs no padding.
+	size := int(chunkHeaderSize) + selectiveAckHeaderSize + 4*(len(sack.gapAckBlocks)+len(sack.duplicateTSN))
+
+	return sack, size
 }
 
 // validatePayloadData checks whether chunks can be sent.
