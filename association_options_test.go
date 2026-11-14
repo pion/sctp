@@ -11,7 +11,19 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+func TestResourceLimitOptions(t *testing.T) {
+	cfg := &Config{}
+	require.NoError(t, WithStreamLimits(2, 3).applyClient(cfg))
+	require.Equal(t, uint16(2), cfg.maxInboundStreams)
+	require.Equal(t, uint16(3), cfg.maxOutboundStreams)
+	require.NoError(t, WithMaxInboundMessageSize(16).applyClient(cfg))
+	require.Equal(t, uint32(16), cfg.maxInboundMessageSize)
+	require.NoError(t, WithMaxRetainedPayloadChunks(8).applyClient(cfg))
+	require.Equal(t, uint32(8), cfg.maxRetainedPayloadChunks)
+}
 
 func udpPiper(t *testing.T) (net.Conn, net.Conn) {
 	t.Helper()
