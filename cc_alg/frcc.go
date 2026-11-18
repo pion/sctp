@@ -132,6 +132,8 @@ type FRCC struct {
 	SSEndInitiated bool
 	SSSentBytes    uint64
 	SSAckedBytes   uint64
+	SSLastCheck    time.Time
+	SSMinRTT       time.Duration
 
 	SlotMaxQDel   time.Duration
 	SlotStartTime time.Time
@@ -239,6 +241,8 @@ func CreateFRCC(config FRCCParam) FRCC {
 
 		SSDone:         false,
 		SSEndInitiated: false,
+		SSLastCheck:    time.Time{},
+		SSMinRTT:       math.MaxUint32 * time.Microsecond,
 
 		PacingSlotStart: time.Time{},
 		PacingSlotEnd:   time.Time{},
@@ -536,13 +540,20 @@ func (frcc *FRCC) slowStart(now time.Time, rtt time.Duration, ackedBytes uint32)
 	// when we expect the rtt to stop increasing.
 
 	param := &frcc.Param
-	delta1 := param.ContractMinQDel + param.UBRTTErr
-	shouldInitSSEnd := rtt > frcc.MinRTProp+delta1
+	delta1 := param.ContractMinQDel
+	frcc.SSMinRTT = min(frcc.SSMinRTT, rtt)
+	shouldInitSSEnd := false
+	if now.Sub(frcc.SSLastCheck) > frcc.MinRTProp/2 {
+		frcc.SSLastCheck = now
+		if frcc.MinRTProp >= delta1 {
+			shouldInitSSEnd = frcc.SSMinRTT > frcc.MinRTProp+delta1
+		} else {
+			shouldInitSSEnd = frcc.SSMinRTT > frcc.MinRTProp<<1
+		}
+		frcc.SSMinRTT = math.MaxUint32 * time.Microsecond
+	}
 	// TODO: contract_const subsumes rtt_err, so should we really add that
 	// here?
-	if frcc.MinRTProp < delta1 {
-		shouldInitSSEnd = rtt > frcc.MinRTProp<<1
-	}
 
 	ssEnded := frcc.SSAckedBytes >= frcc.SSSentBytes
 
