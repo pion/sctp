@@ -562,7 +562,8 @@ func (frcc *FRCC) slowStart(now time.Time, rtt time.Duration, ackedBytes uint32)
 			frcc.CWND = max(frcc.CWND+ackedBytes, param.LBCwnd)
 			frcc.updatePacingRate(rtt, false)
 		} else {
-			frcc.CWND = max(frcc.CWND/2, param.LBCwnd)
+			//1/(2^1.5) = 0.3535533905932738
+			frcc.CWND = max(uint32(float32(frcc.CWND)*0.3535533905932738), param.LBCwnd)
 			frcc.updatePacingRate(rtt, false)
 			frcc.SSEndInitiated = true
 		}
