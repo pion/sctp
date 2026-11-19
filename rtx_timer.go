@@ -14,7 +14,7 @@ const (
 	rtoInitial float64 = 1.0 * 1000
 
 	// RTO.Min in msec.
-	rtoMin float64 = 1.0 * 1000
+	defaultRTOMin float64 = 1.0 * 1000
 
 	// RTO.Max in msec.
 	defaultRTOMax float64 = 60.0 * 1000
@@ -39,14 +39,19 @@ type rtoManager struct {
 	rto      float64
 	noUpdate bool
 	mutex    sync.RWMutex
+	rtoMin   float64
 	rtoMax   float64
 }
 
-// newRTOManager creates a new rtoManager.
-func newRTOManager(rtoMax float64) *rtoManager {
+// newRTOManager creates a new rtoManager. Zero values select the defaults.
+func newRTOManager(rtoMin, rtoMax float64) *rtoManager {
 	mgr := rtoManager{
 		rto:    rtoInitial,
+		rtoMin: rtoMin,
 		rtoMax: rtoMax,
+	}
+	if mgr.rtoMin == 0 {
+		mgr.rtoMin = defaultRTOMin
 	}
 	if mgr.rtoMax == 0 {
 		mgr.rtoMax = defaultRTOMax
@@ -77,7 +82,7 @@ func (m *rtoManager) setNewRTT(rtt float64) float64 {
 	if m.rttvar == 0 {
 		m.rttvar = 1
 	}
-	m.rto = math.Min(math.Max(m.srtt+4*m.rttvar, rtoMin), m.rtoMax)
+	m.rto = math.Min(math.Max(m.srtt+4*m.rttvar, m.rtoMin), m.rtoMax)
 
 	return m.srtt
 }

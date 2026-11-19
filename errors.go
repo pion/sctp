@@ -25,6 +25,8 @@ var (
 
 	// errInvalidRTOMax indicates that the RTO max was set to 0 or a negative value.
 	errInvalidRTOMax = errors.New("RTO max was set to <= 0")
+	// errInvalidRTOMin indicates that the RTO min was set to 0 or a negative value.
+	errInvalidRTOMin = errors.New("RTO min was set to <= 0")
 
 	// errInvalidRackMinRTTWnd indicates the length of the local minimum window used to determine the
 	// minRTT was set to <= 0.

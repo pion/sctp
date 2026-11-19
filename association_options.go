@@ -158,6 +158,20 @@ func WithRTOMax(rtoMax float64) AssociationOption {
 	})
 }
 
+// WithRTOMin sets the min retransmission timeout in ms for the association.
+// RFC 9260 recommends 1000 ms, the default; WebRTC stacks commonly use lower
+// values (libwebrtc's dcsctp defaults to 400 ms).
+func WithRTOMin(rtoMin float64) AssociationOption {
+	return sharedOption(func(c *Config) error {
+		if rtoMin <= 0 {
+			return errInvalidRTOMin
+		}
+		c.rtoMin = rtoMin
+
+		return nil
+	})
+}
+
 // WithMinCwnd sets the minimum congestion window for the association.
 func WithMinCwnd(minCwnd uint32) AssociationOption {
 	return sharedOption(func(c *Config) error {
