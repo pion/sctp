@@ -2668,6 +2668,7 @@ func TestAssocUnreliableRexmitLimit(t *testing.T) {
 		sends     int
 		delivered bool
 	}{
+		{limit: 0, drops: 0, sends: 1, delivered: true},
 		{limit: 0, drops: 1, sends: 1, delivered: false},
 		{limit: 1, drops: 1, sends: 2, delivered: true},
 		{limit: 1, drops: 2, sends: 2, delivered: false},
@@ -2780,6 +2781,216 @@ func runRexmitLimit(t *testing.T, limit uint32, drops int) (int, bool) { //nolin
 	}
 
 	return countSends(), delivered.Load() == 1
+}
+
+func TestAssocZeroRetransmitKeepsDelayedInitial(t *testing.T) { //nolint:cyclop
+	for _, interleaving := range []bool{false, true} {
+		for _, size := range []int{1000, 2000} {
+			t.Run(fmt.Sprintf("interleaving=%t/bytes=%d", interleaving, size), func(t *testing.T) {
+				br := test.NewBridge()
+				a0, a1, err := createNewAssociationPairWithInterleaving(br, ackModeNoDelay, 0, interleaving, interleaving)
+				require.NoError(t, err)
+				defer closeAssociationPair(br, a0, a1)
+				s0, s1, err := establishSessionPair(br, a0, a1, 1)
+				require.NoError(t, err)
+				s0.SetReliabilityParams(false, ReliabilityTypeRexmit, 0)
+				// Isolate initial abandonment from RACK's independent early-loss
+				// declaration on a sub-millisecond in-memory path.
+				a0.lock.Lock()
+				a0.rackReorderingSeen = true
+				a0.rackReoWnd = 100 * time.Millisecond
+				a0.rack.rackReoWndFloor = 100 * time.Millisecond
+				a0.srtt.Store(a0.rtoMgr.setNewRTT(400))
+				a0.lock.Unlock()
+
+				var mu sync.Mutex
+				var held []byte
+				released := false
+				forwardCount := 0
+				var gapAck atomic.Bool
+				br.Filter(0, func(raw []byte) bool {
+					p := &packet{}
+					if p.unmarshal(true, raw) != nil {
+						return true
+					}
+					mu.Lock()
+					defer mu.Unlock()
+					for _, c := range p.chunks {
+						switch c := c.(type) {
+						case *chunkForwardTSN, *chunkIForwardTSN:
+							forwardCount++
+						case *chunkPayloadData:
+							if !released && c.beginningFragment && len(c.userData) > 0 && c.userData[0] == 0xa1 {
+								held = append([]byte(nil), raw...)
+
+								return false
+							}
+						}
+					}
+
+					return true
+				})
+				br.Filter(1, func(raw []byte) bool {
+					p := &packet{}
+					if p.unmarshal(true, raw) == nil {
+						for _, c := range p.chunks {
+							if sack, ok := c.(*chunkSelectiveAck); ok && len(sack.gapAckBlocks) > 0 {
+								gapAck.Store(true)
+							}
+						}
+					}
+
+					return true
+				})
+				payload := bytes.Repeat([]byte{0xa1}, size)
+				tail := bytes.Repeat([]byte{0xb2}, 64)
+				_, err = s0.WriteSCTP(payload, PayloadTypeWebRTCBinary)
+				require.NoError(t, err)
+				require.Eventually(t, func() bool {
+					br.Tick()
+					mu.Lock()
+					defer mu.Unlock()
+
+					return len(held) > 0
+				}, time.Second, time.Millisecond)
+				_, err = s0.WriteSCTP(tail, PayloadTypeWebRTCBinary)
+				require.NoError(t, err)
+				require.Eventually(t, func() bool {
+					br.Tick()
+
+					return gapAck.Load()
+				}, time.Second, time.Millisecond)
+				// Let the sender process the gap ACK without declaring a loss:
+				// at most two later DATA chunks, below the fast-retry threshold.
+				for range 20 {
+					br.Tick()
+					time.Sleep(time.Millisecond)
+				}
+				mu.Lock()
+				initial, forwarded := held, forwardCount
+				released = true
+				mu.Unlock()
+				require.NotEmpty(t, initial)
+				require.Zero(t, forwarded, "initial DATA must not be skipped by Forward-TSN before a retry is needed")
+				require.True(t, br.Push(initial, 0))
+				received := readPartialReliabilityMessages(t, br, s1, 2)
+				require.Equal(t, [][]byte{payload, tail}, received)
+			})
+		}
+	}
+}
+
+func TestAssocTimedLifetimeSurvivesRetryAndReleasesOrderedTail(t *testing.T) {
+	for _, interleaving := range []bool{false, true} {
+		for _, size := range []int{1000, 2000} {
+			t.Run(fmt.Sprintf("interleaving=%t/bytes=%d", interleaving, size), func(t *testing.T) {
+				br := test.NewBridge()
+				a0, a1, err := createNewAssociationPairWithInterleaving(br, ackModeNoDelay, 0, interleaving, interleaving)
+				require.NoError(t, err)
+				defer closeAssociationPair(br, a0, a1)
+				s0, s1, err := establishSessionPair(br, a0, a1, 1)
+				require.NoError(t, err)
+				a0.rtoMgr.setRTO(50, true)
+				const lifetimeMS uint32 = 120
+				const lifetime = time.Duration(lifetimeMS) * time.Millisecond
+				s0.SetReliabilityParams(false, ReliabilityTypeTimed, lifetimeMS)
+
+				var mu sync.Mutex
+				var sends []time.Time
+				initialCopies := 0
+				forwarded := false
+				br.Filter(0, func(raw []byte) bool {
+					p := &packet{}
+					if p.unmarshal(true, raw) != nil {
+						return true
+					}
+					mu.Lock()
+					defer mu.Unlock()
+					for _, c := range p.chunks {
+						switch c := c.(type) {
+						case *chunkForwardTSN, *chunkIForwardTSN:
+							forwarded = true
+						case *chunkPayloadData:
+							if len(c.userData) > 0 && c.userData[0] == 0xa1 {
+								sends = append(sends, time.Now())
+								if c.beginningFragment {
+									initialCopies++
+								}
+
+								return false
+							}
+						}
+					}
+
+					return true
+				})
+				_, err = s0.WriteSCTP(bytes.Repeat([]byte{0xa1}, size), PayloadTypeWebRTCBinary)
+				require.NoError(t, err)
+				require.Eventually(t, func() bool {
+					br.Tick()
+					mu.Lock()
+					defer mu.Unlock()
+
+					return initialCopies >= 2
+				}, time.Second, time.Millisecond, "test must exercise a retry before expiry")
+				// Keep the policy unchanged. The later message is received and
+				// gap-acknowledged, but ordered delivery waits for the lost head.
+				// Expiry must release it without depending on another incoming ACK.
+				tail := []byte("ordered tail after timed expiry")
+				_, err = s0.WriteSCTP(tail, PayloadTypeWebRTCBinary)
+				require.NoError(t, err)
+				require.Equal(t, [][]byte{tail}, readPartialReliabilityMessages(t, br, s1, 1))
+				mu.Lock()
+				first, last, sawForward := sends[0], sends[len(sends)-1], forwarded
+				mu.Unlock()
+				require.True(t, sawForward, "expired ordered message must advance Forward-TSN")
+				require.Less(t, last.Sub(first), lifetime+20*time.Millisecond, "retry reset the message lifetime")
+				require.Eventually(t, func() bool {
+					br.Tick()
+
+					return a0.BufferedAmount() == 0
+				}, time.Second, time.Millisecond)
+			})
+		}
+	}
+}
+
+func readPartialReliabilityMessages(t *testing.T, br *test.Bridge, stream *Stream, count int) [][]byte {
+	t.Helper()
+	type result struct {
+		data []byte
+		err  error
+	}
+	require.NoError(t, stream.SetReadDeadline(time.Now().Add(2*time.Second)))
+	results := make(chan result, count)
+	go func() {
+		for range count {
+			buf := make([]byte, 4096)
+			n, _, err := stream.ReadSCTP(buf)
+			results <- result{data: buf[:n], err: err}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	timer := time.NewTimer(3 * time.Second)
+	defer timer.Stop()
+	var received [][]byte
+	for len(received) < count {
+		select {
+		case value := <-results:
+			require.NoError(t, value.err)
+			received = append(received, value.data)
+		case <-ticker.C:
+			br.Tick()
+		case <-timer.C:
+			require.FailNow(t, "partial-reliability stream did not make progress")
+		}
+	}
+
+	return received
 }
 
 func TestInitVerificationTagIsZero(t *testing.T) { //nolint:cyclop
