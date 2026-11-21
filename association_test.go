@@ -2682,6 +2682,75 @@ func TestAssocUnreliableRexmitLimit(t *testing.T) {
 	}
 }
 
+// On a link that loses nothing, no chunk needs a retransmission, so none may be
+// abandoned and no FORWARD TSN may be sent, whatever the retransmission limit.
+// Abandoning chunks while they are still in flight made every SACK trigger a
+// FORWARD TSN, and every FORWARD TSN another SACK (#505).
+func TestAssocUnreliableRexmitNoForwardTSNWithoutLoss(t *testing.T) {
+	for _, limit := range []uint32{0, 1, 2} {
+		t.Run(fmt.Sprintf("limit %d", limit), func(t *testing.T) {
+			lim := test.TimeOut(time.Second * 10)
+			defer lim.Stop()
+
+			br := test.NewBridge()
+
+			a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, 0)
+			assert.NoError(t, err, "failed to create associations")
+
+			s0, s1, err := establishSessionPair(br, a0, a1, 1)
+			assert.NoError(t, err, "failed to establish session pair")
+			defer closeAssociationPair(br, a0, a1)
+
+			s0.SetReliabilityParams(true, ReliabilityTypeRexmit, limit)
+
+			var forwardTSNs atomic.Int32
+			br.Filter(0, func(raw []byte) bool {
+				p := &packet{}
+				if p.unmarshal(true, raw) != nil {
+					return true
+				}
+				for _, c := range p.chunks {
+					switch c.(type) {
+					case *chunkForwardTSN, *chunkIForwardTSN:
+						forwardTSNs.Add(1)
+					}
+				}
+
+				return true
+			})
+
+			const numMsgs = 50
+			var delivered atomic.Int32
+			go func() {
+				buf := make([]byte, 2000)
+				for {
+					if _, _, readErr := s1.ReadSCTP(buf); readErr != nil {
+						return
+					}
+					delivered.Add(1)
+				}
+			}()
+
+			for range numMsgs {
+				_, err = s0.WriteSCTP(make([]byte, 1000), PayloadTypeWebRTCBinary)
+				assert.NoError(t, err)
+				br.Tick()
+			}
+			for delivered.Load() < numMsgs {
+				br.Tick()
+				time.Sleep(time.Millisecond)
+			}
+			// Let the final SACKs, and any FORWARD TSN they would trigger, through.
+			for range 50 {
+				br.Tick()
+				time.Sleep(time.Millisecond)
+			}
+
+			assert.Equal(t, int32(0), forwardTSNs.Load(), "FORWARD TSN sent without any loss")
+		})
+	}
+}
+
 // runRexmitLimit writes one message on an unordered stream limited to limit
 // retransmissions, discards the first drops copies of it on the wire, and
 // reports how many copies were sent and whether the message was delivered.
