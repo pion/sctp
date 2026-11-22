@@ -20,10 +20,7 @@ func udpPiper(t *testing.T) (net.Conn, net.Conn) {
 }
 
 func TestAssociationOptions_ApplyBothSides(t *testing.T) {
-	opts := []AssociationOption{
-		WithName("x"),
-		WithMaxReassemblyQueueEntries(13),
-	}
+	opts := []AssociationOption{WithName("x"), WithMaxReassemblyQueueEntries(13)}
 
 	var sCfg Config
 	var cCfg Config
@@ -151,9 +148,7 @@ func TestAssociationOptions_Validation(t *testing.T) {
 
 	t.Run("invalid stream scheduler weight", func(t *testing.T) {
 		var cfg Config
-		err := WithInterleavingOptions(
-			WithInterleavingWeightedFairQueueingWeight(1, 0),
-		).applyServer(&cfg)
+		err := WithInterleavingOptions(WithInterleavingWeightedFairQueueingWeight(1, 0)).applyServer(&cfg)
 		assert.ErrorIs(t, err, errInvalidStreamSchedulerWeight)
 	})
 }

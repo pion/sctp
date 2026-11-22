@@ -268,10 +268,7 @@ func TestChunkHeartbeat_Marshal_Failure_NoParams(t *testing.T) {
 
 func TestChunkHeartbeat_Marshal_Failure_MoreThanOneParam(t *testing.T) {
 	hb := &chunkHeartbeat{
-		params: []param{
-			&paramHeartbeatInfo{heartbeatInformation: []byte{0x01}},
-			&paramHeartbeatInfo{heartbeatInformation: []byte{0x02}},
-		},
+		params: []param{&paramHeartbeatInfo{heartbeatInformation: []byte{0x01}}, &paramHeartbeatInfo{heartbeatInformation: []byte{0x02}}},
 	}
 
 	_, err := hb.Marshal()
@@ -282,9 +279,7 @@ func TestChunkHeartbeat_Marshal_Failure_MoreThanOneParam(t *testing.T) {
 func TestChunkHeartbeat_Marshal_Failure_WrongParamType(t *testing.T) {
 	// Not a *paramHeartbeatInfo -> ErrHeartbeatParam.
 	hb := &chunkHeartbeat{
-		params: []param{
-			&paramStateCookie{cookie: []byte{0x01}},
-		},
+		params: []param{&paramStateCookie{cookie: []byte{0x01}}},
 	}
 
 	_, err := hb.Marshal()

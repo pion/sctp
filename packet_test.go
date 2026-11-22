@@ -18,15 +18,9 @@ func TestPacketUnmarshal(t *testing.T) {
 	err := pkt.unmarshal(true, headerOnly)
 	assert.NoError(t, err, "Unmarshal failed for SCTP packet with no chunks")
 
-	assert.Equal(t, uint16(defaultSCTPSrcDstPort), pkt.sourcePort,
-		"Unmarshal passed for SCTP packet, but got incorrect source port exp: %d act: %d",
-		defaultSCTPSrcDstPort, pkt.sourcePort)
-	assert.Equal(t, uint16(defaultSCTPSrcDstPort), pkt.destinationPort,
-		"Unmarshal passed for SCTP packet, but got incorrect destination port exp: %d act: %d",
-		defaultSCTPSrcDstPort, pkt.destinationPort)
-	assert.Equal(t, uint32(0), pkt.verificationTag,
-		"Unmarshal passed for SCTP packet, but got incorrect verification tag exp: %d act: %d",
-		0, pkt.verificationTag)
+	assert.Equal(t, uint16(defaultSCTPSrcDstPort), pkt.sourcePort, "Unmarshal passed for SCTP packet, but got incorrect source port exp: %d act: %d", defaultSCTPSrcDstPort, pkt.sourcePort)
+	assert.Equal(t, uint16(defaultSCTPSrcDstPort), pkt.destinationPort, "Unmarshal passed for SCTP packet, but got incorrect destination port exp: %d act: %d", defaultSCTPSrcDstPort, pkt.destinationPort)
+	assert.Equal(t, uint32(0), pkt.verificationTag, "Unmarshal passed for SCTP packet, but got incorrect verification tag exp: %d act: %d", 0, pkt.verificationTag)
 
 	rawChunk := []byte{
 		0x13, 0x88, 0x13, 0x88, 0x00, 0x00, 0x00, 0x00, 0x81, 0x46, 0x9d, 0xfc, 0x01, 0x00, 0x00, 0x56, 0x55,
@@ -48,9 +42,7 @@ func TestPacketMarshal(t *testing.T) {
 
 	headerOnlyMarshaled, err := pkt.marshal(true)
 	if assert.NoError(t, err, "Marshal failed for SCTP packet with no chunks") {
-		assert.Equal(t, headerOnly, headerOnlyMarshaled,
-			"Unmarshal/Marshaled header only packet did not match \nheaderOnly: % 02x \nheaderOnlyMarshaled % 02x",
-			headerOnly, headerOnlyMarshaled)
+		assert.Equal(t, headerOnly, headerOnlyMarshaled, "Unmarshal/Marshaled header only packet did not match \nheaderOnly: % 02x \nheaderOnlyMarshaled % 02x", headerOnly, headerOnlyMarshaled)
 	}
 }
 

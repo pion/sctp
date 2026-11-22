@@ -15,24 +15,16 @@ func TestChunkReconfig_Success(t *testing.T) {
 	}{
 		{
 			// Note: chunk trailing padding is added in packet.marshal
-			append(
-				[]byte{0x82, 0x0, 0x0, 0x1a}, testChunkReconfigParamA()...,
-			),
+			append([]byte{0x82, 0x0, 0x0, 0x1a}, testChunkReconfigParamA()...),
 		},
 		{append([]byte{0x82, 0x0, 0x0, 0x14}, testChunkReconfigParamB()...)},
 		{append([]byte{0x82, 0x0, 0x0, 0x10}, testChunkReconfigResponce()...)},
 		{
-			append(
-				append([]byte{0x82, 0x0, 0x0, 0x2c}, padByte(testChunkReconfigParamA(), 2)...),
-				testChunkReconfigParamB()...),
+			append(append([]byte{0x82, 0x0, 0x0, 0x2c}, padByte(testChunkReconfigParamA(), 2)...), testChunkReconfigParamB()...),
 		},
 		{
 			// Note: chunk trailing padding is added in packet.marshal
-			append(
-				append([]byte{0x82, 0x0, 0x0, 0x2a},
-					testChunkReconfigParamB()...),
-				testChunkReconfigParamA()...,
-			),
+			append(append([]byte{0x82, 0x0, 0x0, 0x2a}, testChunkReconfigParamB()...), testChunkReconfigParamA()...),
 		},
 	}
 
@@ -57,9 +49,7 @@ func TestChunkReconfigUnmarshal_Failure(t *testing.T) {
 		{"wrong param (A)", []byte{0x82, 0x0, 0x0, 0x8, 0x0, 0xd, 0x0, 0x0}},
 		{
 			"wrong param (B)",
-			append(append([]byte{0x82, 0x0, 0x0, 0x18},
-				testChunkReconfigParamB()...),
-				[]byte{0x0, 0xd, 0x0, 0x0}...),
+			append(append([]byte{0x82, 0x0, 0x0, 0x18}, testChunkReconfigParamB()...), []byte{0x0, 0xd, 0x0, 0x0}...),
 		},
 	}
 

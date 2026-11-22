@@ -51,11 +51,7 @@ func TestRACKOptions_AtomicApply_NoPartialMutationOnError(t *testing.T) {
 func TestRACKOptions_ApplyToConfig(t *testing.T) {
 	var cfg Config
 
-	err := WithRACKOptions(
-		WithRackMinRTTWnd(10*time.Second),
-		WithRackReoWndFloor(2*time.Millisecond),
-		WithRackWCDelAck(50*time.Millisecond),
-	).applyServer(&cfg)
+	err := WithRACKOptions(WithRackMinRTTWnd(10*time.Second), WithRackReoWndFloor(2*time.Millisecond), WithRackWCDelAck(50*time.Millisecond)).applyServer(&cfg)
 	assert.NoError(t, err)
 
 	assert.NotNil(t, cfg.rack.rackMinRTTWnd)
@@ -83,15 +79,7 @@ func TestRACKOptions_EndToEnd_DefaultsAndOverrides(t *testing.T) {
 	})
 
 	t.Run("overrides when configured", func(t *testing.T) {
-		aClient, aServer, err := association(
-			t,
-			udpPiper,
-			WithRACKOptions(
-				WithRackMinRTTWnd(5*time.Second),
-				WithRackReoWndFloor(3*time.Millisecond),
-				WithRackWCDelAck(75*time.Millisecond),
-			),
-		)
+		aClient, aServer, err := association(t, udpPiper, WithRACKOptions(WithRackMinRTTWnd(5*time.Second), WithRackReoWndFloor(3*time.Millisecond), WithRackWCDelAck(75*time.Millisecond)))
 		assert.NoError(t, err)
 		defer func() {
 			_ = aClient.Close()

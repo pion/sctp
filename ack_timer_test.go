@@ -57,8 +57,7 @@ func TestAckTimer(t *testing.T) {
 				time.Sleep(ackInterval*2 + 50*time.Millisecond)
 				synctest.Wait()
 
-				assert.Equalf(t, uint32(1), atomic.LoadUint32(&nCbs),
-					"should be called once (actual: %d)", atomic.LoadUint32(&nCbs))
+				assert.Equalf(t, uint32(1), atomic.LoadUint32(&nCbs), "should be called once (actual: %d)", atomic.LoadUint32(&nCbs))
 				atomic.StoreUint32(&nCbs, 0)
 			}
 
@@ -95,8 +94,7 @@ func TestAckTimer(t *testing.T) {
 			}
 			time.Sleep(ackInterval + 50*time.Millisecond)
 			synctest.Wait()
-			assert.Equalf(t, uint32(0), atomic.LoadUint32(&nCbs),
-				"should not be timed out (actual: %d)", atomic.LoadUint32(&nCbs))
+			assert.Equalf(t, uint32(0), atomic.LoadUint32(&nCbs), "should not be timed out (actual: %d)", atomic.LoadUint32(&nCbs))
 
 			// can start again
 			ok := rt.start()

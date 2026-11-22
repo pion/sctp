@@ -26,30 +26,16 @@ func TestInitChunk(t *testing.T) {
 	assert.True(t, ok, "Failed to cast Chunk -> Init")
 
 	assert.NoError(t, err, "Unmarshal init Chunk failed")
-	assert.Equalf(t, initChunk.initiateTag, uint32(1438213285),
-		"Unmarshal passed for SCTP packet, but got incorrect initiate tag exp: %d act: %d",
-		1438213285, initChunk.initiateTag)
-	assert.Equalf(t, initChunk.advertisedReceiverWindowCredit, uint32(131072),
-		"Unmarshal passed for SCTP packet, but got incorrect advertisedReceiverWindowCredit exp: %d act: %d",
-		131072, initChunk.advertisedReceiverWindowCredit)
-	assert.Equalf(t, initChunk.numOutboundStreams, uint16(1024),
-		"Unmarshal passed for SCTP packet, but got incorrect numOutboundStreams tag exp: %d act: %d",
-		1024, initChunk.numOutboundStreams)
-	assert.Equalf(t, initChunk.numInboundStreams, uint16(2048),
-		"Unmarshal passed for SCTP packet, but got incorrect numInboundStreams exp: %d act: %d",
-		2048, initChunk.numInboundStreams)
-	assert.Equalf(t, initChunk.initialTSN, uint32(3899461680),
-		"Unmarshal passed for SCTP packet, but got incorrect initialTSN exp: %d act: %d",
-		uint32(3899461680), initChunk.initialTSN)
+	assert.Equalf(t, initChunk.initiateTag, uint32(1438213285), "Unmarshal passed for SCTP packet, but got incorrect initiate tag exp: %d act: %d", 1438213285, initChunk.initiateTag)
+	assert.Equalf(t, initChunk.advertisedReceiverWindowCredit, uint32(131072), "Unmarshal passed for SCTP packet, but got incorrect advertisedReceiverWindowCredit exp: %d act: %d", 131072, initChunk.advertisedReceiverWindowCredit)
+	assert.Equalf(t, initChunk.numOutboundStreams, uint16(1024), "Unmarshal passed for SCTP packet, but got incorrect numOutboundStreams tag exp: %d act: %d", 1024, initChunk.numOutboundStreams)
+	assert.Equalf(t, initChunk.numInboundStreams, uint16(2048), "Unmarshal passed for SCTP packet, but got incorrect numInboundStreams exp: %d act: %d", 2048, initChunk.numInboundStreams)
+	assert.Equalf(t, initChunk.initialTSN, uint32(3899461680), "Unmarshal passed for SCTP packet, but got incorrect initialTSN exp: %d act: %d", uint32(3899461680), initChunk.initialTSN)
 }
 
 func TestInitAck(t *testing.T) {
 	pkt := &packet{}
-	rawPkt := []byte{
-		0x13, 0x88, 0x13, 0x88, 0xce, 0x15, 0x79, 0xa2, 0x96, 0x19, 0xe8, 0xb2, 0x02, 0x00, 0x00, 0x1c, 0xeb, 0x81,
-		0x4e, 0x01, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x08, 0x00, 0x50, 0xdf, 0x90, 0xd9, 0x00, 0x07, 0x00, 0x08,
-		0x94, 0x06, 0x2f, 0x93,
-	}
+	rawPkt := []byte{0x13, 0x88, 0x13, 0x88, 0xce, 0x15, 0x79, 0xa2, 0x96, 0x19, 0xe8, 0xb2, 0x02, 0x00, 0x00, 0x1c, 0xeb, 0x81, 0x4e, 0x01, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x08, 0x00, 0x50, 0xdf, 0x90, 0xd9, 0x00, 0x07, 0x00, 0x08, 0x94, 0x06, 0x2f, 0x93}
 	err := pkt.unmarshal(true, rawPkt)
 	assert.NoError(t, err)
 
@@ -143,21 +129,11 @@ func TestInitMarshalUnmarshal(t *testing.T) {
 	assert.True(t, ok, "Failed to cast Chunk -> InitAck")
 
 	assert.NoError(t, err, "Unmarshal init ack Chunk failed")
-	assert.Equalf(t, initAckChunk.initiateTag, uint32(123),
-		"Unmarshal passed for SCTP packet, but got incorrect initiate tag exp: %d act: %d",
-		123, initAckChunk.initiateTag)
-	assert.Equalf(t, initAckChunk.advertisedReceiverWindowCredit, uint32(1024),
-		"Unmarshal passed for SCTP packet, but got incorrect advertisedReceiverWindowCredit exp: %d act: %d",
-		1024, initAckChunk.advertisedReceiverWindowCredit)
-	assert.Equalf(t, initAckChunk.numOutboundStreams, uint16(1),
-		"Unmarshal passed for SCTP packet, but got incorrect numOutboundStreams tag exp: %d act: %d",
-		1, initAckChunk.numOutboundStreams)
-	assert.Equalf(t, initAckChunk.numInboundStreams, uint16(1),
-		"Unmarshal passed for SCTP packet, but got incorrect numInboundStreams exp: %d act: %d",
-		1, initAckChunk.numInboundStreams)
-	assert.Equalf(t, initAckChunk.initialTSN, uint32(123),
-		"Unmarshal passed for SCTP packet, but got incorrect initialTSN exp: %d act: %d",
-		123, initAckChunk.initialTSN)
+	assert.Equalf(t, initAckChunk.initiateTag, uint32(123), "Unmarshal passed for SCTP packet, but got incorrect initiate tag exp: %d act: %d", 123, initAckChunk.initiateTag)
+	assert.Equalf(t, initAckChunk.advertisedReceiverWindowCredit, uint32(1024), "Unmarshal passed for SCTP packet, but got incorrect advertisedReceiverWindowCredit exp: %d act: %d", 1024, initAckChunk.advertisedReceiverWindowCredit)
+	assert.Equalf(t, initAckChunk.numOutboundStreams, uint16(1), "Unmarshal passed for SCTP packet, but got incorrect numOutboundStreams tag exp: %d act: %d", 1, initAckChunk.numOutboundStreams)
+	assert.Equalf(t, initAckChunk.numInboundStreams, uint16(1), "Unmarshal passed for SCTP packet, but got incorrect numInboundStreams exp: %d act: %d", 1, initAckChunk.numInboundStreams)
+	assert.Equalf(t, initAckChunk.initialTSN, uint32(123), "Unmarshal passed for SCTP packet, but got incorrect initialTSN exp: %d act: %d", 123, initAckChunk.initialTSN)
 }
 
 func TestPayloadDataMarshalUnmarshal(t *testing.T) {
@@ -178,11 +154,7 @@ func TestPayloadDataMarshalUnmarshal(t *testing.T) {
 
 func TestSelectAckChunk(t *testing.T) {
 	pkt := &packet{}
-	rawPkt := []byte{
-		0x13, 0x88, 0x13, 0x88, 0xc2, 0x98, 0x98, 0x0f, 0x42, 0x31, 0xea,
-		0x78, 0x03, 0x00, 0x00, 0x14, 0x87, 0x73, 0xbd, 0xa4, 0x00, 0x01,
-		0xfe, 0x74, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x02,
-	}
+	rawPkt := []byte{0x13, 0x88, 0x13, 0x88, 0xc2, 0x98, 0x98, 0x0f, 0x42, 0x31, 0xea, 0x78, 0x03, 0x00, 0x00, 0x14, 0x87, 0x73, 0xbd, 0xa4, 0x00, 0x01, 0xfe, 0x74, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x02}
 	err := pkt.unmarshal(true, rawPkt)
 	assert.NoError(t, err)
 
@@ -192,11 +164,7 @@ func TestSelectAckChunk(t *testing.T) {
 
 func TestReconfigChunk(t *testing.T) {
 	pkt := &packet{}
-	rawPkt := []byte{
-		0x13, 0x88, 0x13, 0x88, 0xb6, 0xa5, 0x12, 0xe5, 0x75, 0x3b, 0x12, 0xd3, 0x82,
-		0x0, 0x0, 0x16, 0x0, 0xd, 0x0, 0x12, 0x4e, 0x1c, 0xb9, 0xe6, 0x3a, 0x74, 0x8d,
-		0xff, 0x4e, 0x1c, 0xb9, 0xe6, 0x0, 0x1, 0x0, 0x0,
-	}
+	rawPkt := []byte{0x13, 0x88, 0x13, 0x88, 0xb6, 0xa5, 0x12, 0xe5, 0x75, 0x3b, 0x12, 0xd3, 0x82, 0x0, 0x0, 0x16, 0x0, 0xd, 0x0, 0x12, 0x4e, 0x1c, 0xb9, 0xe6, 0x3a, 0x74, 0x8d, 0xff, 0x4e, 0x1c, 0xb9, 0xe6, 0x0, 0x1, 0x0, 0x0}
 	err := pkt.unmarshal(true, rawPkt)
 	assert.NoError(t, err)
 
@@ -209,10 +177,7 @@ func TestReconfigChunk(t *testing.T) {
 
 func TestForwardTSNChunk(t *testing.T) {
 	pkt := &packet{}
-	rawPkt := append(
-		[]byte{0x13, 0x88, 0x13, 0x88, 0xb6, 0xa5, 0x12, 0xe5, 0x1f, 0x9d, 0xa0, 0xfb},
-		testChunkForwardTSN()...,
-	)
+	rawPkt := append([]byte{0x13, 0x88, 0x13, 0x88, 0xb6, 0xa5, 0x12, 0xe5, 0x1f, 0x9d, 0xa0, 0xfb}, testChunkForwardTSN()...)
 	err := pkt.unmarshal(true, rawPkt)
 	assert.NoError(t, err)
 

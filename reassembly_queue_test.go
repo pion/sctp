@@ -1279,11 +1279,7 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx,cyclop
 		}
 
 		assert.Len(t, rq.orderedMID, 3)
-		assert.Equal(t, []uint32{1, 2, 3}, []uint32{
-			rq.orderedMID[0].mid,
-			rq.orderedMID[1].mid,
-			rq.orderedMID[2].mid,
-		})
+		assert.Equal(t, []uint32{1, 2, 3}, []uint32{rq.orderedMID[0].mid, rq.orderedMID[1].mid, rq.orderedMID[2].mid})
 	})
 
 	t.Run("unordered i-data rejects new incomplete mids after descriptor limit", func(t *testing.T) {
@@ -1388,8 +1384,7 @@ func TestChunkSet(t *testing.T) {
 			ppi:    0,
 			chunks: []*chunkPayloadData{{}},
 		}
-		assert.False(t, cset.isComplete(),
-			"chunkSet not starting with B=1 cannot be complete")
+		assert.False(t, cset.isComplete(), "chunkSet not starting with B=1 cannot be complete")
 	})
 
 	t.Run("Incomplete chunkSet: no contiguous tsn", func(t *testing.T) {
@@ -1410,7 +1405,6 @@ func TestChunkSet(t *testing.T) {
 				},
 			},
 		}
-		assert.False(t, cset.isComplete(),
-			"chunkSet not starting with incontiguous tsn cannot be complete")
+		assert.False(t, cset.isComplete(), "chunkSet not starting with incontiguous tsn cannot be complete")
 	})
 }

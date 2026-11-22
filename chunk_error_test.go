@@ -52,9 +52,7 @@ func TestChunkErrorUnrecognizedChunkType(t *testing.T) {
 		}
 
 		ec := &chunkError{
-			errorCauses: []errorCause{
-				errorCause(ecUnrecognizedChunkType),
-			},
+			errorCauses: []errorCause{errorCause(ecUnrecognizedChunkType)},
 		}
 
 		raw, err := ec.marshal()
@@ -67,9 +65,7 @@ func TestChunkErrorUnrecognizedChunkType(t *testing.T) {
 		ecUnrecognizedChunkType := &errorCauseUnrecognizedChunkType{}
 
 		ec := &chunkError{
-			errorCauses: []errorCause{
-				errorCause(ecUnrecognizedChunkType),
-			},
+			errorCauses: []errorCause{errorCause(ecUnrecognizedChunkType)},
 		}
 
 		raw, err := ec.marshal()

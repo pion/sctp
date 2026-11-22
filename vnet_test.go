@@ -205,10 +205,7 @@ func testRwndFull(t *testing.T, unordered bool) { //nolint:cyclop
 	go func() {
 		defer close(serverShutDown)
 		// connected UDP conn for server
-		conn, err := venv.net0.DialUDP("udp4",
-			&net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: defaultSCTPSrcDstPort},
-			&net.UDPAddr{IP: net.ParseIP("2.2.2.2"), Port: defaultSCTPSrcDstPort},
-		)
+		conn, err := venv.net0.DialUDP("udp4", &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: defaultSCTPSrcDstPort}, &net.UDPAddr{IP: net.ParseIP("2.2.2.2"), Port: defaultSCTPSrcDstPort})
 		if !assert.NoError(t, err, "should succeed") {
 			return
 		}
@@ -280,10 +277,7 @@ func testRwndFull(t *testing.T, unordered bool) { //nolint:cyclop
 	go func() {
 		defer close(clientShutDown)
 		// connected UDP conn for client
-		conn, err := venv.net1.DialUDP("udp4",
-			&net.UDPAddr{IP: net.ParseIP("2.2.2.2"), Port: defaultSCTPSrcDstPort},
-			&net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: defaultSCTPSrcDstPort},
-		)
+		conn, err := venv.net1.DialUDP("udp4", &net.UDPAddr{IP: net.ParseIP("2.2.2.2"), Port: defaultSCTPSrcDstPort}, &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: defaultSCTPSrcDstPort})
 		if !assert.NoError(t, err, "should succeed") {
 			return
 		}
@@ -436,10 +430,7 @@ func TestStreamClose(t *testing.T) { //nolint:cyclop
 		go func() {
 			defer close(serverShutDown)
 			// connected UDP conn for server
-			conn, innerErr := venv.net0.DialUDP("udp4",
-				&net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: defaultSCTPSrcDstPort},
-				&net.UDPAddr{IP: net.ParseIP("2.2.2.2"), Port: defaultSCTPSrcDstPort},
-			)
+			conn, innerErr := venv.net0.DialUDP("udp4", &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: defaultSCTPSrcDstPort}, &net.UDPAddr{IP: net.ParseIP("2.2.2.2"), Port: defaultSCTPSrcDstPort})
 			if !assert.NoError(t, innerErr, "should succeed") {
 				return
 			}
@@ -487,10 +478,7 @@ func TestStreamClose(t *testing.T) { //nolint:cyclop
 		}()
 
 		// connected UDP conn for client
-		conn, err := venv.net1.DialUDP("udp4",
-			&net.UDPAddr{IP: net.ParseIP("2.2.2.2"), Port: defaultSCTPSrcDstPort},
-			&net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: defaultSCTPSrcDstPort},
-		)
+		conn, err := venv.net1.DialUDP("udp4", &net.UDPAddr{IP: net.ParseIP("2.2.2.2"), Port: defaultSCTPSrcDstPort}, &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: defaultSCTPSrcDstPort})
 		if !assert.NoError(t, err, "should succeed") {
 			return
 		}
@@ -619,10 +607,7 @@ func TestCookieEchoRetransmission(t *testing.T) {
 	go func() {
 		defer close(serverShutDown)
 		// connected UDP conn for server
-		conn, err := venv.net0.DialUDP("udp4",
-			&net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: defaultSCTPSrcDstPort},
-			&net.UDPAddr{IP: net.ParseIP("2.2.2.2"), Port: defaultSCTPSrcDstPort},
-		)
+		conn, err := venv.net0.DialUDP("udp4", &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: defaultSCTPSrcDstPort}, &net.UDPAddr{IP: net.ParseIP("2.2.2.2"), Port: defaultSCTPSrcDstPort})
 		if !assert.NoError(t, err, "should succeed") {
 			return
 		}
@@ -649,10 +634,7 @@ func TestCookieEchoRetransmission(t *testing.T) {
 	go func() {
 		defer close(clientShutDown)
 		// connected UDP conn for client
-		conn, err := venv.net1.DialUDP("udp4",
-			&net.UDPAddr{IP: net.ParseIP("2.2.2.2"), Port: defaultSCTPSrcDstPort},
-			&net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: defaultSCTPSrcDstPort},
-		)
+		conn, err := venv.net1.DialUDP("udp4", &net.UDPAddr{IP: net.ParseIP("2.2.2.2"), Port: defaultSCTPSrcDstPort}, &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: defaultSCTPSrcDstPort})
 		if !assert.NoError(t, err, "should succeed") {
 			return
 		}
@@ -770,10 +752,7 @@ func TestRACK_RTTSwitch_Reordering_NoDrop(t *testing.T) { //nolint:gocyclo,cyclo
 			}
 		}
 
-		conn, err := venv.net0.DialUDP("udp4",
-			&net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: defaultSCTPSrcDstPort},
-			&net.UDPAddr{IP: net.ParseIP("2.2.2.2"), Port: defaultSCTPSrcDstPort},
-		)
+		conn, err := venv.net0.DialUDP("udp4", &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: defaultSCTPSrcDstPort}, &net.UDPAddr{IP: net.ParseIP("2.2.2.2"), Port: defaultSCTPSrcDstPort})
 		if err != nil {
 			fail(fmt.Errorf("server DialUDP: %w", err))
 			serverStatsCh <- statsResult{ok: false}
@@ -835,10 +814,7 @@ func TestRACK_RTTSwitch_Reordering_NoDrop(t *testing.T) { //nolint:gocyclo,cyclo
 			}
 		}
 
-		conn, err := venv.net1.DialUDP("udp4",
-			&net.UDPAddr{IP: net.ParseIP("2.2.2.2"), Port: defaultSCTPSrcDstPort},
-			&net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: defaultSCTPSrcDstPort},
-		)
+		conn, err := venv.net1.DialUDP("udp4", &net.UDPAddr{IP: net.ParseIP("2.2.2.2"), Port: defaultSCTPSrcDstPort}, &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: defaultSCTPSrcDstPort})
 		if err != nil {
 			fail(fmt.Errorf("client DialUDP: %w", err))
 			clientStatsCh <- statsResult{ok: false}
@@ -951,12 +927,10 @@ func TestRACK_RTTSwitch_Reordering_NoDrop(t *testing.T) { //nolint:gocyclo,cyclo
 	ss := <-serverStatsCh
 
 	if assert.True(t, cs.ok, "client assoc/stats unavailable") {
-		assert.LessOrEqual(t, cs.fr, uint64(2),
-			"client fast retransmits should be low")
+		assert.LessOrEqual(t, cs.fr, uint64(2), "client fast retransmits should be low")
 	}
 
 	if assert.True(t, ss.ok, "server assoc/stats unavailable") {
-		assert.LessOrEqual(t, ss.fr, uint64(2),
-			"server fast retransmits should be low")
+		assert.LessOrEqual(t, ss.fr, uint64(2), "server fast retransmits should be low")
 	}
 }

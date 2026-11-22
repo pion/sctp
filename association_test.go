@@ -286,22 +286,12 @@ func (c *dumbConn) SetWriteDeadline(time.Time) error {
 }
 
 //nolint:cyclop
-func createNewAssociationPair(
-	br *test.Bridge,
-	ackMode int,
-	recvBufSize uint32,
-) (*Association, *Association, error) {
+func createNewAssociationPair(br *test.Bridge, ackMode int, recvBufSize uint32) (*Association, *Association, error) {
 	return createNewAssociationPairWithInterleaving(br, ackMode, recvBufSize, false, false)
 }
 
 //nolint:cyclop
-func createNewAssociationPairWithInterleaving(
-	br *test.Bridge,
-	ackMode int,
-	recvBufSize uint32,
-	clientInterleaving bool,
-	serverInterleaving bool,
-) (*Association, *Association, error) {
+func createNewAssociationPairWithInterleaving(br *test.Bridge, ackMode int, recvBufSize uint32, clientInterleaving bool, serverInterleaving bool) (*Association, *Association, error) {
 	c0 := br.GetConn0()
 	c1 := br.GetConn1()
 
@@ -316,12 +306,7 @@ func createNewAssociationPairWithInterleaving(
 	ch := make(chan result, 2)
 
 	go func() {
-		opts := []ClientOption{
-			WithName("a0"),
-			WithNetConn(c0),
-			WithLoggerFactory(loggerFactory),
-			WithEnableInterleaving(clientInterleaving),
-		}
+		opts := []ClientOption{WithName("a0"), WithNetConn(c0), WithLoggerFactory(loggerFactory), WithEnableInterleaving(clientInterleaving)}
 		if recvBufSize != 0 {
 			opts = append(opts, WithMaxReceiveBufferSize(recvBufSize))
 		}
@@ -331,12 +316,7 @@ func createNewAssociationPairWithInterleaving(
 	}()
 
 	go func() {
-		opts := []ServerOption{
-			WithName("a1"),
-			WithNetConn(c1),
-			WithLoggerFactory(loggerFactory),
-			WithEnableInterleaving(serverInterleaving),
-		}
+		opts := []ServerOption{WithName("a1"), WithNetConn(c1), WithLoggerFactory(loggerFactory), WithEnableInterleaving(serverInterleaving)}
 		if recvBufSize != 0 {
 			opts = append(opts, WithMaxReceiveBufferSize(recvBufSize))
 		}
@@ -654,13 +634,7 @@ func marshalChunkPacketFromAssociation(t *testing.T, a *Association, c chunk) []
 	return raw
 }
 
-func requireProtocolViolationAbort(
-	t *testing.T,
-	br *test.Bridge,
-	assoc *Association,
-	reasons <-chan string,
-	expectedReason string,
-) {
+func requireProtocolViolationAbort(t *testing.T, br *test.Bridge, assoc *Association, reasons <-chan string, expectedReason string) {
 	t.Helper()
 
 	timer := time.NewTimer(time.Second)
@@ -713,13 +687,7 @@ func TestAssociationPRForwardTSNChunkTypeMatchesInterleaving(t *testing.T) {
 
 			const si uint16 = 1
 			br := test.NewBridge()
-			a0, a1, err := createNewAssociationPairWithInterleaving(
-				br,
-				ackModeNoDelay,
-				0,
-				tt.enableInterleaving,
-				tt.enableInterleaving,
-			)
+			a0, a1, err := createNewAssociationPairWithInterleaving(br, ackModeNoDelay, 0, tt.enableInterleaving, tt.enableInterleaving)
 			require.NoError(t, err, "failed to create associations")
 			defer closeAssociationPair(br, a0, a1)
 
@@ -800,13 +768,7 @@ func TestAssociationInterleavingNegotiationPayloadChunkType(t *testing.T) {
 			const msg = "ABC"
 			br := test.NewBridge()
 
-			a0, a1, err := createNewAssociationPairWithInterleaving(
-				br,
-				ackModeNoDelay,
-				0,
-				tt.clientInterleaving,
-				tt.serverInterleaving,
-			)
+			a0, a1, err := createNewAssociationPairWithInterleaving(br, ackModeNoDelay, 0, tt.clientInterleaving, tt.serverInterleaving)
 			require.NoError(t, err, "failed to create associations")
 			defer closeAssociationPair(br, a0, a1)
 
@@ -924,13 +886,7 @@ func TestAssociationInterleavingProtocolViolationWrongPayloadChunkType(t *testin
 			defer lim.Stop()
 
 			br := test.NewBridge()
-			a0, a1, err := createNewAssociationPairWithInterleaving(
-				br,
-				ackModeNoDelay,
-				0,
-				tt.clientInterleaving,
-				tt.serverInterleaving,
-			)
+			a0, a1, err := createNewAssociationPairWithInterleaving(br, ackModeNoDelay, 0, tt.clientInterleaving, tt.serverInterleaving)
 			require.NoError(t, err, "failed to create associations")
 			defer closeAssociationPair(br, a0, a1)
 
@@ -1329,11 +1285,7 @@ func TestAssociationShutdownPrioritizedOverControlQueue(t *testing.T) {
 	require.Len(t, rawPackets, 3)
 	assert.True(t, assoc.t2Shutdown.isRunning())
 
-	expected := []chunk{
-		&chunkSelectiveAck{},
-		&chunkShutdown{},
-		&chunkCookieAck{},
-	}
+	expected := []chunk{&chunkSelectiveAck{}, &chunkShutdown{}, &chunkCookieAck{}}
 	for i, expectedChunk := range expected {
 		packet := &packet{}
 		require.NoError(t, packet.unmarshal(false, rawPackets[i]))
@@ -1618,10 +1570,7 @@ func TestAssociationSendsForwardTSNWhileDrainingShutdown(t *testing.T) {
 			})
 
 			assoc.lock.Lock()
-			err := assoc.finishAcknowledgement(
-				&chunkSelectiveAck{cumulativeTSNAck: 9},
-				acknowledgementResult{htna: 9},
-			)
+			err := assoc.finishAcknowledgement(&chunkSelectiveAck{cumulativeTSNAck: 9}, acknowledgementResult{htna: 9})
 			assoc.lock.Unlock()
 			require.NoError(t, err)
 			require.Equal(t, uint32(10), assoc.advancedPeerTSNAckPoint)
@@ -1780,13 +1729,7 @@ func TestAssociationInterleavingProtocolViolationWrongForwardTSNChunkType(t *tes
 			defer lim.Stop()
 
 			br := test.NewBridge()
-			a0, a1, err := createNewAssociationPairWithInterleaving(
-				br,
-				ackModeNoDelay,
-				0,
-				tt.clientInterleaving,
-				tt.serverInterleaving,
-			)
+			a0, a1, err := createNewAssociationPairWithInterleaving(br, ackModeNoDelay, 0, tt.clientInterleaving, tt.serverInterleaving)
 			require.NoError(t, err, "failed to create associations")
 			defer closeAssociationPair(br, a0, a1)
 
@@ -2105,16 +2048,14 @@ func TestAssocReliable(t *testing.T) { //nolint:maintidx
 		assert.NoError(t, err, "ReadSCTP failed")
 
 		assert.Equal(t, n, len(sbuf), "unexpected length of received data")
-		assert.Equal(t, uint32(0), binary.BigEndian.Uint32(buf[:n]),
-			"unexpected received data")
+		assert.Equal(t, uint32(0), binary.BigEndian.Uint32(buf[:n]), "unexpected received data")
 		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
 
 		n, ppi, err = s1.ReadSCTP(buf)
 		assert.NoError(t, err, "ReadSCTP failed")
 
 		assert.Equal(t, n, len(sbuf), "unexpected length of received data")
-		assert.Equal(t, uint32(1), binary.BigEndian.Uint32(buf[:n]),
-			"unexpected received data")
+		assert.Equal(t, uint32(1), binary.BigEndian.Uint32(buf[:n]), "unexpected received data")
 		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
 
 		br.Process()
@@ -3482,18 +3423,13 @@ func TestHandleIForwardTSN(t *testing.T) {
 
 		assert.Len(t, unorderedStream.reassemblyQueue.unorderedMID, 2, "should keep complete unordered MIDs")
 		assert.Equal(t, uint32(1), unorderedStream.reassemblyQueue.unorderedMID[0].mid, "unexpected first unordered MID kept")
-		assert.Equal(
-			t, uint32(4), unorderedStream.reassemblyQueue.unorderedMID[1].mid, "unexpected second unordered MID kept",
-		)
+		assert.Equal(t, uint32(4), unorderedStream.reassemblyQueue.unorderedMID[1].mid, "unexpected second unordered MID kept")
 		_, ok = unorderedStream.reassemblyQueue.unorderedMIDMap[2]
 		assert.False(t, ok, "forwarded incomplete unordered MID should be removed from the map")
 		assert.Len(t, unorderedStream.reassemblyQueue.unorderedMIDMap, 1, "should only keep newer incomplete unordered MID")
 		_, ok = unorderedStream.reassemblyQueue.unorderedMIDMap[5]
 		assert.True(t, ok, "newer incomplete unordered MID should remain mapped")
-		assert.Equal(
-			t, 12, unorderedStream.reassemblyQueue.getNumBytes(),
-			"only incomplete forwarded unordered MID bytes should be removed",
-		)
+		assert.Equal(t, 12, unorderedStream.reassemblyQueue.getNumBytes(), "only incomplete forwarded unordered MID bytes should be removed")
 		assert.True(t, unorderedStream.reassemblyQueue.isReadable(), "complete unordered MID should remain readable")
 
 		_, ok = untouchedStream.reassemblyQueue.orderedMIDMap[1]
@@ -4110,12 +4046,10 @@ func TestAssocCongestionControl(t *testing.T) { //nolint:cyclop,maintidx
 
 		// With RACK enabled, recovery may happen without classic fast retransmit.
 		// Require recovery before RTO; allow FR count to be 0 or 1.
-		assert.Zero(t, a0.stats.getNumT3Timeouts(),
-			"recovery should complete before any T3 RTO")
+		assert.Zero(t, a0.stats.getNumT3Timeouts(), "recovery should complete before any T3 RTO")
 
 		fr := a0.stats.getNumFastRetrans()
-		assert.Truef(t, fr == 0 || fr == 1,
-			"expected fast retrans 0 or 1 (RACK may bypass FR), got %d", fr)
+		assert.Truef(t, fr == 0 || fr == 1, "expected fast retrans 0 or 1 (RACK may bypass FR), got %d", fr)
 
 		closeAssociationPair(br, a0, a1)
 	})
@@ -4368,12 +4302,7 @@ func TestAssocDelayedAck(t *testing.T) {
 		t.Logf("nAckTimeouts: %d\n", a1.stats.getNumAckTimeouts())
 
 		assert.Equal(t, uint64(1), a1.stats.getNumDATAs(), "DATA chunk count mismatch")
-		assert.Equal(
-			t,
-			a0.stats.getNumSACKsReceived(),
-			a1.stats.getNumDATAs(),
-			"sack count should be equal to the number of data chunks",
-		)
+		assert.Equal(t, a0.stats.getNumSACKsReceived(), a1.stats.getNumDATAs(), "sack count should be equal to the number of data chunks")
 		assert.Equal(t, uint64(1), a1.stats.getNumAckTimeouts(), "ackTimeout count mismatch")
 		assert.Equal(t, uint64(0), a0.stats.getNumT3Timeouts(), "should be no retransmit")
 
@@ -5348,11 +5277,7 @@ func createAssociationPair(udpConn1 net.Conn, udpConn2 net.Conn) (*Association, 
 }
 
 //nolint:cyclop
-func createAssociationPairWithConfig(
-	udpConn1 net.Conn,
-	udpConn2 net.Conn,
-	config Config,
-) (*Association, *Association, error) {
+func createAssociationPairWithConfig(udpConn1 net.Conn, udpConn2 net.Conn, config Config) (*Association, *Association, error) {
 	loggerFactory := logging.NewDefaultLoggerFactory()
 
 	a1Chan := make(chan any)
@@ -5810,14 +5735,7 @@ func TestAssociationFastRtxWnd(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	require.Eventuallyf(
-		t,
-		func() bool { return dropCounter.Load() >= 15 },
-		5*time.Second,
-		10*time.Millisecond,
-		"drop %d",
-		dropCounter.Load(),
-	)
+	require.Eventuallyf(t, func() bool { return dropCounter.Load() >= 15 }, 5*time.Second, 10*time.Millisecond, "drop %d", dropCounter.Load())
 
 	require.Zero(t, a1.stats.getNumFastRetrans())
 	require.False(t, a1.inFastRecovery)
@@ -6974,12 +6892,7 @@ func TestRACK_SuppressReoWndDuringRecovery_NoReorderingSeen(t *testing.T) {
 	assoc.rack.rackMinRTTWnd.Push(now, 120*time.Millisecond)
 
 	assoc.onRackAfterSACK(false, time.Time{}, 0, &chunkSelectiveAck{})
-	assert.Equal(
-		t,
-		30*time.Millisecond,
-		assoc.rackReoWnd,
-		"reoWnd should re-initialize to base (minRTT/4) after first sample",
-	)
+	assert.Equal(t, 30*time.Millisecond, assoc.rackReoWnd, "reoWnd should re-initialize to base (minRTT/4) after first sample")
 }
 
 func TestRACK_ReoWndBoundedBySRTT(t *testing.T) {
@@ -8017,14 +7930,10 @@ func TestAssociationSNAPInvalidInit(t *testing.T) {
 	init, err := GenerateOutOfBandToken(tokenConfig)
 	assert.NoError(t, err)
 
-	_, err = ClientWithOptions(
-		WithNetConn(br.GetConn0()),
-		WithSNAP([]byte{1, 2}, init))
+	_, err = ClientWithOptions(WithNetConn(br.GetConn0()), WithSNAP([]byte{1, 2}, init))
 	assert.ErrorIs(t, err, ErrChunkHeaderTooSmall)
 
-	_, err = ClientWithOptions(
-		WithNetConn(br.GetConn1()),
-		WithSNAP(init, []byte{1, 2}))
+	_, err = ClientWithOptions(WithNetConn(br.GetConn1()), WithSNAP(init, []byte{1, 2}))
 	assert.ErrorIs(t, err, ErrChunkHeaderTooSmall)
 }
 
@@ -8049,19 +7958,11 @@ func TestAssociationSNAP(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	assocA, err := ClientContext(ctx,
-		WithName("a"),
-		WithNetConn(br.GetConn0()),
-		WithLoggerFactory(loggerFactory),
-		WithSNAP(initA, initB))
+	assocA, err := ClientContext(ctx, WithName("a"), WithNetConn(br.GetConn0()), WithLoggerFactory(loggerFactory), WithSNAP(initA, initB))
 	assert.NoError(t, err)
 	assert.NotNil(t, assocA)
 
-	assocB, err := ClientWithOptions(
-		WithName("b"),
-		WithNetConn(br.GetConn1()),
-		WithLoggerFactory(loggerFactory),
-		WithSNAP(initB, initA))
+	assocB, err := ClientWithOptions(WithName("b"), WithNetConn(br.GetConn1()), WithLoggerFactory(loggerFactory), WithSNAP(initB, initA))
 	assert.NoError(t, err)
 	assert.NotNil(t, assocB)
 
@@ -8157,19 +8058,11 @@ func TestAssociationSNAPInterleavingNegotiationPayloadChunkType(t *testing.T) {
 			remoteInit, err := GenerateOutOfBandToken(WithEnableInterleaving(tt.remoteInterleaving))
 			require.NoError(t, err)
 
-			assocA, err := ClientWithOptions(
-				WithName("a"),
-				WithNetConn(br.GetConn0()),
-				WithLoggerFactory(loggerFactory),
-				WithSNAP(localInit, remoteInit))
+			assocA, err := ClientWithOptions(WithName("a"), WithNetConn(br.GetConn0()), WithLoggerFactory(loggerFactory), WithSNAP(localInit, remoteInit))
 			require.NoError(t, err)
 			require.NotNil(t, assocA)
 
-			assocB, err := ClientWithOptions(
-				WithName("b"),
-				WithNetConn(br.GetConn1()),
-				WithLoggerFactory(loggerFactory),
-				WithSNAP(remoteInit, localInit))
+			assocB, err := ClientWithOptions(WithName("b"), WithNetConn(br.GetConn1()), WithLoggerFactory(loggerFactory), WithSNAP(remoteInit, localInit))
 			require.NoError(t, err)
 			require.NotNil(t, assocB)
 			defer closeAssociationPair(br, assocA, assocB)
@@ -8313,8 +8206,7 @@ func TestAssociationPeerRestartEndToEnd(t *testing.T) {
 			conn, err := net.DialUDP("udp4", local, remote)
 			require.NoError(t, err)
 			require.NoError(t, conn.SetReadDeadline(time.Now().Add(5*time.Second)))
-			replacement, err := ClientWithOptions(WithNetConn(conn),
-				WithEnableInterleaving(interleaving), WithEnableZeroChecksum(zeroChecksum))
+			replacement, err := ClientWithOptions(WithNetConn(conn), WithEnableInterleaving(interleaving), WithEnableZeroChecksum(zeroChecksum))
 			require.NoError(t, err)
 			peer = replacement
 			require.NoError(t, conn.SetReadDeadline(time.Time{}))
