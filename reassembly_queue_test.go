@@ -331,11 +331,11 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx,cyclop
 		assert.Equal(t, 2, rq.getNumBytes(), "num bytes mismatch")
 	})
 
-	t.Run("detect buffer too short", func(t *testing.T) {
-		rq := newReassemblyQueue(0, 0)
+	t.Run("ignore ordered fragment duplicates through a short read", func(t *testing.T) {
+		rq := newReassemblyQueue(0, 3)
 		orgPpi := PayloadTypeWebRTCBinary
 
-		for _, chunk := range []*chunkPayloadData{
+		chunks := []*chunkPayloadData{
 			{
 				payloadType:          orgPpi,
 				beginningFragment:    true,
@@ -356,8 +356,15 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx,cyclop
 				streamSequenceNumber: 0,
 				userData:             []byte("789"),
 			},
-		} {
-			rq.push(chunk)
+		}
+		for i, chunk := range chunks {
+			complete, err := rq.pushWithError(chunk)
+			require.NoError(t, err)
+			assert.Equal(t, i == len(chunks)-1, complete)
+
+			complete, err = rq.pushWithError(chunk)
+			require.NoError(t, err)
+			assert.False(t, complete, "ignore duplicate fragments")
 		}
 
 		assert.Equal(t, 10, rq.getNumBytes())
@@ -368,11 +375,21 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx,cyclop
 		assert.Equal(t, PayloadTypeUnknown, ppi)
 		assert.Equal(t, 10, n)
 
+		complete, err := rq.pushWithError(chunks[0])
+		require.NoError(t, err, "ignore a duplicate at the descriptor cap after a short read")
+		assert.False(t, complete)
+		assert.Equal(t, 10, rq.getNumBytes())
+
 		buf = make([]byte, n)
 		n, ppi, err = rq.read(buf)
 		assert.NoError(t, err)
 		assert.Equal(t, orgPpi, ppi)
 		assert.Equal(t, 10, n)
+		assert.Equal(t, "0123456789", string(buf))
+		assert.Equal(t, 0, rq.getNumBytes())
+		assert.Empty(t, rq.orderedIndex)
+		_, _, err = rq.read(buf)
+		assert.ErrorIs(t, err, errTryAgain)
 	})
 
 	t.Run("forwardTSN for ordered fragments", func(t *testing.T) {
@@ -385,13 +402,19 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx,cyclop
 		var ssnComplete uint16 = 5
 		var ssnDropped uint16 = 6
 
-		chunk = &chunkPayloadData{
+		assert.False(t, rq.push(&chunkPayloadData{
 			payloadType:          orgPpi,
 			beginningFragment:    true,
+			tsn:                  9,
+			streamSequenceNumber: ssnComplete,
+			userData:             []byte("1"),
+		}))
+		chunk = &chunkPayloadData{
+			payloadType:          orgPpi,
 			endingFragment:       true,
 			tsn:                  10,
 			streamSequenceNumber: ssnComplete,
-			userData:             []byte("123"),
+			userData:             []byte("23"),
 		}
 
 		complete = rq.push(chunk)
@@ -421,10 +444,20 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx,cyclop
 		assert.False(t, complete, "chunk set should not be complete yet")
 		assert.Equal(t, 9, rq.getNumBytes(), "num bytes mismatch")
 
+		sets := rq.ordered
 		rq.forwardTSNForOrdered(ssnDropped)
 
 		assert.Equal(t, 1, len(rq.ordered), "there should be one chunk left")
 		assert.Equal(t, 3, rq.getNumBytes(), "num bytes mismatch")
+		assert.Nil(t, sets[1], "the backing array should release the abandoned set")
+		assert.NotContains(t, rq.orderedIndex, ssnDropped)
+		assert.Contains(t, rq.orderedIndex, ssnComplete)
+
+		buf := make([]byte, 3)
+		_, _, err := rq.read(buf)
+		require.NoError(t, err)
+		assert.Equal(t, "123", string(buf))
+		assert.Empty(t, rq.orderedIndex)
 	})
 
 	t.Run("forwardTSN for unordered fragments", func(t *testing.T) {
@@ -477,11 +510,15 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx,cyclop
 
 		// At this point, there are 3 chunks in the rq.unorderedChunks.
 		// This call should remove chunks with tsn equals to 13 or older.
+		pending := rq.unorderedChunks
 		rq.forwardTSNForUnordered(13)
 
 		// As a result, there should be one chunk (tsn=14)
 		assert.Equal(t, 1, len(rq.unorderedChunks), "there should be one chunk kept")
 		assert.Equal(t, 3, rq.getNumBytes(), "num bytes mismatch")
+		assert.Nil(t, pending[0])
+		assert.Nil(t, pending[1])
+		assert.Equal(t, map[uint32]*chunkPayloadData{14: chunk}, rq.unorderedIndex)
 	})
 
 	t.Run("fragmented and unfragmented chunks with the same ssn", func(t *testing.T) {

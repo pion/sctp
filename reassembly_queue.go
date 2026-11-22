@@ -6,6 +6,7 @@ package sctp
 import (
 	"errors"
 	"io"
+	"slices"
 	"sort"
 	"sync/atomic"
 )
@@ -188,7 +189,7 @@ type reassemblyQueue struct {
 	nextSSN         uint16 // expected SSN for next ordered message RFC 9260 sec 6.5, 6.6
 	nextMID         uint32 // expected MID for next ordered I-DATA
 	ordered         []*chunkSet
-	orderedIndex    map[uint16]*chunkSet
+	orderedIndex    map[uint16]*chunkSet // Fragmented sets, including those ready to read.
 	unordered       []*chunkSet
 	unorderedIndex  map[uint32]*chunkPayloadData
 	unorderedChunks []*chunkPayloadData
@@ -355,7 +356,7 @@ func (r *reassemblyQueue) pushWithError(chunk *chunkPayloadData) (bool, error) {
 
 	// Check if a fragmented chunkSet with the fragmented SSN already exists
 	if chunk.isFragmented() {
-		// O(1) lookup of an in-progress fragmented set.
+		// O(1) lookup of a queued fragmented set.
 		if set, ok := r.orderedIndex[chunk.streamSequenceNumber]; ok && len(set.chunks) > 0 && set.chunks[0].isFragmented() {
 			cset = set
 		}
@@ -379,13 +380,7 @@ func (r *reassemblyQueue) pushWithError(chunk *chunkPayloadData) (bool, error) {
 
 	atomic.AddUint64(&r.nBytes, uint64(len(chunk.userData)))
 
-	complete := cset.push(chunk)
-	if complete && chunk.isFragmented() {
-		// No more fragments will be added, drop from index.
-		delete(r.orderedIndex, cset.ssn)
-	}
-
-	return complete, nil
+	return cset.push(chunk), nil
 }
 
 func (r *reassemblyQueue) pushIData(chunk *chunkPayloadData) (bool, error) {
@@ -521,23 +516,13 @@ func (r *reassemblyQueue) findCompleteUnorderedChunkSet() *chunkSet {
 		return nil
 	}
 
-	// Extract the contiguous range [startIdx, startIdx+nChunks)
-	chunks := append([]*chunkPayloadData(nil), r.unorderedChunks[startIdx:startIdx+nChunks]...)
-
-	// Remove them from unorderedChunks
-	r.unorderedChunks = append(
-		r.unorderedChunks[:startIdx],
-		r.unorderedChunks[startIdx+nChunks:]...)
-
-	// Drop from index (all these TSNs are now consumed into a complete set).
-	for _, c := range chunks {
-		delete(r.unorderedIndex, c.tsn)
+	chunks := slices.Clone(r.unorderedChunks[startIdx : startIdx+nChunks])
+	r.unorderedChunks = slices.Delete(r.unorderedChunks, startIdx, startIdx+nChunks)
+	for _, chunk := range chunks {
+		delete(r.unorderedIndex, chunk.tsn)
 	}
 
-	chunkSet := newChunkSet(0) // SSN ignored for unordered (RFC 9260 sec 6.6)
-	chunkSet.chunks = chunks
-
-	return chunkSet
+	return &chunkSet{chunks: chunks}
 }
 
 func (r *reassemblyQueue) isReadable() bool {
@@ -561,7 +546,7 @@ func (r *reassemblyQueue) isReadable() bool {
 		return true
 	}
 
-	// Ordered delivery: only the complete set whose SSN == nextSSN is eligible. RFC 9260 sec 6.6.
+	// FORWARD-TSN can leave complete messages with an SSN before nextSSN.
 	if len(r.ordered) > 0 {
 		cset := r.ordered[0]
 		if cset.isComplete() && sna16LTE(cset.ssn, r.nextSSN) {
@@ -636,7 +621,6 @@ func (r *reassemblyQueue) read(buf []byte) (int, PayloadProtocolIdentifier, erro
 			return 0, 0, errTryAgain
 		}
 
-		// For ordered, gate on exact SSN == nextSSN (hold higher SSNs). RFC 9260 sec 6.6.
 		if sna16GT(cset.ssn, r.nextSSN) {
 			return 0, 0, errTryAgain
 		}
@@ -658,11 +642,15 @@ func (r *reassemblyQueue) read(buf []byte) (int, PayloadProtocolIdentifier, erro
 	case err != nil:
 		return nTotal, 0, err
 	case isUnordered:
+		r.unordered[0] = nil
 		r.unordered = r.unordered[1:]
 	default:
+		if r.orderedIndex[cset.ssn] == cset {
+			delete(r.orderedIndex, cset.ssn)
+		}
+		r.ordered[0] = nil
 		r.ordered = r.ordered[1:]
 
-		// Advance only when we delivered the exact expected SSN
 		if cset.ssn == r.nextSSN {
 			r.nextSSN++
 		}
@@ -684,13 +672,13 @@ func (r *reassemblyQueue) forwardTSNForOrdered(lastSSN uint16) {
 				r.subtractNumBytes(len(c.userData))
 			}
 
-			// ensure index is clean too
 			delete(r.orderedIndex, set.ssn)
 
 			continue
 		}
 		keep = append(keep, set)
 	}
+	clear(r.ordered[len(keep):])
 	r.ordered = keep
 
 	// Finally, forward nextSSN
@@ -714,10 +702,12 @@ func (r *reassemblyQueue) forwardTSNForUnordered(newCumulativeTSN uint32) {
 	}
 
 	if lastIdx >= 0 {
-		for _, c := range r.unorderedChunks[0 : lastIdx+1] {
+		dropped := r.unorderedChunks[:lastIdx+1]
+		for _, c := range dropped {
 			r.subtractNumBytes(len(c.userData))
 			delete(r.unorderedIndex, c.tsn)
 		}
+		clear(dropped)
 		r.unorderedChunks = r.unorderedChunks[lastIdx+1:]
 	}
 }
