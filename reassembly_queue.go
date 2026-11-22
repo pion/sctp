@@ -11,9 +11,13 @@ import (
 	"sync/atomic"
 )
 
-func sortChunksByTSN(a []*chunkPayloadData) {
-	sort.Slice(a, func(i, j int) bool {
-		return sna32LT(a[i].tsn, a[j].tsn)
+func chunkTSNInsertIndex(chunks []*chunkPayloadData, tsn uint32) int {
+	if len(chunks) == 0 || sna32LT(chunks[len(chunks)-1].tsn, tsn) {
+		return len(chunks)
+	}
+
+	return sort.Search(len(chunks), func(i int) bool {
+		return !sna32LT(chunks[i].tsn, tsn)
 	})
 }
 
@@ -35,83 +39,29 @@ func insertChunkSetByMID(a []*chunkSetMID, cset *chunkSetMID) []*chunkSetMID {
 	return a
 }
 
-// chunkSet is a set of chunks that share the same SSN.
+// chunkSet holds the DATA chunks of one message in TSN order.
 type chunkSet struct {
-	ssn    uint16 // used only with the ordered chunks
+	ssn    uint16 // used only for ordered messages
 	chunks []*chunkPayloadData
 }
 
-func newChunkSet(ssn uint16) *chunkSet {
-	return &chunkSet{
-		ssn:    ssn,
-		chunks: []*chunkPayloadData{},
-	}
-}
-
-func (set *chunkSet) push(chunk *chunkPayloadData) bool {
-	// check if dup
-	if set.hasTSN(chunk.tsn) {
-		return false
-	}
-
-	return set.pushNoDuplicate(chunk)
-}
-
-func (set *chunkSet) pushNoDuplicate(chunk *chunkPayloadData) bool {
-	// append and sort
-	set.chunks = append(set.chunks, chunk)
-	sortChunksByTSN(set.chunks)
-
-	// Check if we now have a complete set
-	return set.isComplete()
-}
-
-func (set *chunkSet) hasTSN(tsn uint32) bool {
-	for _, c := range set.chunks {
-		if c.tsn == tsn {
-			return true
-		}
-	}
-
-	return false
-}
-
 func (set *chunkSet) isComplete() bool {
-	// Complete when:
-	//   0) has at least one fragment
-	//   1) first has beginningFragment=1, endingFragment=0
-	//   2) last  has beginningFragment=0, endingFragment=1
-	//   3) all TSNs are strictly sequential (monotonically increasing) RFC 9260 sec 6.9
 	nChunks := len(set.chunks)
 	if nChunks == 0 {
 		return false
 	}
 
-	// 1.
-	if !set.chunks[0].beginningFragment {
+	// A single chunk can have both flags set (RFC 9260 Section 3.3.1).
+	if !set.chunks[0].beginningFragment || !set.chunks[nChunks-1].endingFragment {
 		return false
 	}
 
-	// 2.
-	if !set.chunks[nChunks-1].endingFragment {
-		return false
-	}
-
-	// 3.
-	var lastTSN uint32
-	for i, chunk := range set.chunks {
-		if i > 0 {
-			// RFC 9260 sec 3.3.1:
-			// When a user message is fragmented into multiple chunks, the TSNs are
-			// used by the receiver to reassemble the message. This means that the
-			// TSNs for each fragment of a fragmented user message MUST be strictly
-			// sequential.
-			if chunk.tsn != lastTSN+1 {
-				// mid or end fragment is missing
-				return false
-			}
+	// A fragmented message has consecutive TSNs (RFC 9260 Section 6.9).
+	lastTSN := set.chunks[0].tsn
+	for _, chunk := range set.chunks[1:] {
+		if chunk.tsn != lastTSN+1 {
+			return false
 		}
-
 		lastTSN = chunk.tsn
 	}
 
@@ -191,7 +141,7 @@ type reassemblyQueue struct {
 	ordered         []*chunkSet
 	orderedIndex    map[uint16]*chunkSet // Fragmented sets, including those ready to read.
 	unordered       []*chunkSet
-	unorderedIndex  map[uint32]*chunkPayloadData
+	unorderedIndex  map[uint32]struct{} // TSNs of unordered DATA awaiting reassembly.
 	unorderedChunks []*chunkPayloadData
 	orderedMID      []*chunkSetMID
 	unorderedMID    []*chunkSetMID
@@ -228,8 +178,6 @@ func newReassemblyQueue(si uint16, maxEntries uint32) *reassemblyQueue {
 		unorderedMID:    make([]*chunkSetMID, 0),
 		orderedMIDMap:   map[uint32]*chunkSetMID{},
 		unorderedMIDMap: map[uint32]*chunkSetMID{},
-		orderedIndex:    make(map[uint16]*chunkSet),
-		unorderedIndex:  make(map[uint32]*chunkPayloadData),
 		maxEntries:      maxEntries,
 	}
 }
@@ -242,8 +190,12 @@ func (r *reassemblyQueue) isDataLimitReached(nEntries int) bool {
 	return isReassemblyQueueLimitReached(r.maxEntries, nEntries)
 }
 
-func (r *reassemblyQueue) hasDataLimit() bool {
-	return r.maxEntries > 0
+func (r *reassemblyQueue) isOrderedDataLimitReached() bool {
+	return r.maxEntries > 0 && r.isDataLimitReached(r.orderedDataEntryCount())
+}
+
+func (r *reassemblyQueue) isUnorderedDataLimitReached() bool {
+	return r.maxEntries > 0 && r.isDataLimitReached(r.unorderedDataEntryCount())
 }
 
 func (r *reassemblyQueue) isMIDLimitReached(nEntries int) bool {
@@ -274,43 +226,15 @@ func (r *reassemblyQueue) push(chunk *chunkPayloadData) bool {
 	return complete
 }
 
-// insertChunkByTSN keeps r.unorderedChunks sorted by TSN with a binary insertion.
-func (r *reassemblyQueue) insertChunkByTSN(chunk *chunkPayloadData) {
-	lo, hi := 0, len(r.unorderedChunks)
-	for lo < hi {
-		mid := (lo + hi) >> 1
-		if sna32LT(r.unorderedChunks[mid].tsn, chunk.tsn) {
-			lo = mid + 1
-		} else {
-			hi = mid
-		}
-	}
-
-	r.unorderedChunks = append(r.unorderedChunks, nil)
-	copy(r.unorderedChunks[lo+1:], r.unorderedChunks[lo:])
-	r.unorderedChunks[lo] = chunk
-}
-
 // insertSetBySSN keeps r.ordered sorted by SSN.
-func (r *reassemblyQueue) insertSetBySSN(cs *chunkSet) {
-	lo, hi := 0, len(r.ordered)
-	for lo < hi {
-		mid := (lo + hi) >> 1
-		if sna16LT(r.ordered[mid].ssn, cs.ssn) {
-			lo = mid + 1
-		} else {
-			hi = mid
-		}
-	}
-
-	r.ordered = append(r.ordered, nil)
-	copy(r.ordered[lo+1:], r.ordered[lo:])
-	r.ordered[lo] = cs
+func (r *reassemblyQueue) insertSetBySSN(set *chunkSet) {
+	insertAt := sort.Search(len(r.ordered), func(i int) bool {
+		return !sna16LT(r.ordered[i].ssn, set.ssn)
+	})
+	r.ordered = slices.Insert(r.ordered, insertAt, set)
 }
 
-func (r *reassemblyQueue) pushWithError(chunk *chunkPayloadData) (bool, error) { //nolint:cyclop
-	var cset *chunkSet
-
+func (r *reassemblyQueue) pushWithError(chunk *chunkPayloadData) (bool, error) {
 	if chunk.isIData() {
 		r.useInterleaving = true
 
@@ -322,65 +246,76 @@ func (r *reassemblyQueue) pushWithError(chunk *chunkPayloadData) (bool, error) {
 	}
 
 	if chunk.unordered {
-		// O(1) duplicate filter by TSN.
-		if _, dup := r.unorderedIndex[chunk.tsn]; dup {
+		return r.pushUnorderedData(chunk)
+	}
+
+	return r.pushOrderedData(chunk)
+}
+
+func (r *reassemblyQueue) pushOrderedData(chunk *chunkPayloadData) (bool, error) {
+	ssn := chunk.streamSequenceNumber
+	if sna16LT(ssn, r.nextSSN) {
+		return false, nil
+	}
+
+	var (
+		set      *chunkSet
+		insertAt int
+	)
+	fragmented := chunk.isFragmented()
+	if fragmented {
+		set = r.orderedIndex[ssn]
+	}
+	if set != nil {
+		insertAt = chunkTSNInsertIndex(set.chunks, chunk.tsn)
+		if insertAt < len(set.chunks) && set.chunks[insertAt].tsn == chunk.tsn {
 			return false, nil
 		}
-
-		if r.hasDataLimit() && r.isDataLimitReached(r.unorderedDataEntryCount()) {
-			return false, errReassemblyQueueLimitExceeded
-		}
-
-		r.unorderedIndex[chunk.tsn] = chunk
-		// Maintain TSN order without full re-sort each time.
-		r.insertChunkByTSN(chunk)
-		atomic.AddUint64(&r.nBytes, uint64(len(chunk.userData)))
-
-		// Scan unorderedChunks that are contiguous (in TSN)
-		cset = r.findCompleteUnorderedChunkSet()
-
-		// If found, append the complete set to the unordered array
-		if cset != nil {
-			r.unordered = append(r.unordered, cset)
-
-			return true, nil
-		}
-
-		return false, nil
 	}
 
-	// This is an ordered chunk
-	if sna16LT(chunk.streamSequenceNumber, r.nextSSN) {
-		return false, nil
-	}
-
-	// Check if a fragmented chunkSet with the fragmented SSN already exists
-	if chunk.isFragmented() {
-		// O(1) lookup of a queued fragmented set.
-		if set, ok := r.orderedIndex[chunk.streamSequenceNumber]; ok && len(set.chunks) > 0 && set.chunks[0].isFragmented() {
-			cset = set
-		}
-	}
-
-	// Reject a new queued DATA entry once the descriptor cap is reached.
-	if cset != nil && cset.hasTSN(chunk.tsn) {
-		return false, nil
-	}
-	if r.hasDataLimit() && r.isDataLimitReached(r.orderedDataEntryCount()) {
+	if r.isOrderedDataLimitReached() {
 		return false, errReassemblyQueueLimitExceeded
 	}
-	if cset == nil {
-		cset = newChunkSet(chunk.streamSequenceNumber)
-		// Index only fragmented sequences, single-chunk messages don't need lookup.
-		if chunk.isFragmented() {
-			r.orderedIndex[cset.ssn] = cset
+	if set == nil {
+		set = &chunkSet{ssn: ssn}
+		if fragmented {
+			if r.orderedIndex == nil {
+				r.orderedIndex = make(map[uint16]*chunkSet)
+			}
+			r.orderedIndex[ssn] = set
 		}
-		r.insertSetBySSN(cset)
+		r.insertSetBySSN(set)
 	}
 
+	set.chunks = slices.Insert(set.chunks, insertAt, chunk)
 	atomic.AddUint64(&r.nBytes, uint64(len(chunk.userData)))
 
-	return cset.push(chunk), nil
+	return set.isComplete(), nil
+}
+
+func (r *reassemblyQueue) pushUnorderedData(chunk *chunkPayloadData) (bool, error) {
+	if _, duplicate := r.unorderedIndex[chunk.tsn]; duplicate {
+		return false, nil
+	}
+	if r.isUnorderedDataLimitReached() {
+		return false, errReassemblyQueueLimitExceeded
+	}
+	if r.unorderedIndex == nil {
+		r.unorderedIndex = make(map[uint32]struct{})
+	}
+	r.unorderedIndex[chunk.tsn] = struct{}{}
+
+	insertAt := chunkTSNInsertIndex(r.unorderedChunks, chunk.tsn)
+	r.unorderedChunks = slices.Insert(r.unorderedChunks, insertAt, chunk)
+	atomic.AddUint64(&r.nBytes, uint64(len(chunk.userData)))
+
+	set := r.findCompleteUnorderedChunkSet()
+	if set == nil {
+		return false, nil
+	}
+	r.unordered = append(r.unordered, set)
+
+	return true, nil
 }
 
 func (r *reassemblyQueue) pushIData(chunk *chunkPayloadData) (bool, error) {
