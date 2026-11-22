@@ -2284,11 +2284,12 @@ func TestAssocReliable(t *testing.T) { //nolint:maintidx
 }
 
 func TestAssocUnreliable(t *testing.T) { //nolint:maintidx
+	const fragmentedMessageSize = 2000
 	// sbuf1, sbuf2:
 	//    large enough to be fragmented into two chunks and each chunks are
 	//    large enough not to be bundled
-	sbuf1 := make([]byte, 2000)
-	sbuf2 := make([]byte, 2000)
+	sbuf1 := make([]byte, fragmentedMessageSize)
+	sbuf2 := make([]byte, fragmentedMessageSize)
 	for i := range sbuf1 {
 		sbuf1[i] = byte(i & 0xff)
 	}
@@ -2358,13 +2359,15 @@ func TestAssocUnreliable(t *testing.T) { //nolint:maintidx
 		defer lim.Stop()
 
 		const si uint16 = 1
+		const receiveBufferSize = 8192
 		br := test.NewBridge()
 
-		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, 0)
-		assert.NoError(t, err, "failed to create associations")
+		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, receiveBufferSize)
+		require.NoError(t, err, "failed to create associations")
+		defer closeAssociationPair(br, a0, a1)
 
 		s0, s1, err := establishSessionPair(br, a0, a1, si)
-		assert.NoError(t, err, "failed to establish session pair")
+		require.NoError(t, err, "failed to establish session pair")
 
 		// lock RTO value at 100 [msec]
 		a0.rtoMgr.setRTO(100.0, true)
@@ -2372,7 +2375,7 @@ func TestAssocUnreliable(t *testing.T) { //nolint:maintidx
 		// When we set the reliability value to 0 [times], then it will cause
 		// the chunk to be abandoned immediately after the first transmission.
 		s0.SetReliabilityParams(false, ReliabilityTypeRexmit, 0)
-		s1.SetReliabilityParams(false, ReliabilityTypeRexmit, 0) // doesn't matter
+		s1.SetReliabilityParams(true, ReliabilityTypeReliable, 0)
 
 		br.DropNextNWrites(0, 1) // drop the first fragment of the first chunk (second chunk should be sacked)
 
@@ -2386,20 +2389,18 @@ func TestAssocUnreliable(t *testing.T) { //nolint:maintidx
 		assert.Equal(t, len(sbuf2), n, "unexpected length of written data")
 
 		flushBuffers(br, a0, a1)
+		assert.Equal(t, uint32(receiveBufferSize-fragmentedMessageSize), a0.RWND(), "abandoned fragments should not occupy receive-window credit")
 
 		rbuf := make([]byte, 2000)
+		require.NoError(t, s1.SetReadDeadline(time.Now().Add(time.Second)))
 		n, ppi, err := s1.ReadSCTP(rbuf)
-		assert.NoError(t, err, "ReadSCTP failed")
+		require.NoError(t, err, "ReadSCTP failed")
 
 		// should receive the second one only
 		assert.Equal(t, sbuf2, rbuf[:n], "unexpected received data")
 		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
 
-		br.Process()
-
-		assert.False(t, s0.reassemblyQueue.isReadable(), "should no longer be readable")
-		assert.Equal(t, 0, len(s0.reassemblyQueue.ordered), "should be nothing in the ordered queue")
-		closeAssociationPair(br, a0, a1)
+		assert.Zero(t, s1.getNumBytesInReassemblyQueue())
 	})
 
 	t.Run("Rexmit unordered no fragment", func(t *testing.T) { // nolint:dupl
@@ -2454,18 +2455,22 @@ func TestAssocUnreliable(t *testing.T) { //nolint:maintidx
 		defer lim.Stop()
 
 		const si uint16 = 1
+		const receiveBufferSize = 8192
 		br := test.NewBridge()
 
-		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, 0)
-		assert.NoError(t, err, "failed to create associations")
+		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, receiveBufferSize)
+		require.NoError(t, err, "failed to create associations")
+		defer closeAssociationPair(br, a0, a1)
 
 		s0, s1, err := establishSessionPair(br, a0, a1, si)
-		assert.NoError(t, err, "failed to establish session pair")
+		require.NoError(t, err, "failed to establish session pair")
 
 		// When we set the reliability value to 0 [times], then it will cause
 		// the chunk to be abandoned immediately after the first transmission.
 		s0.SetReliabilityParams(true, ReliabilityTypeRexmit, 0)
-		s1.SetReliabilityParams(true, ReliabilityTypeRexmit, 0) // doesn't matter
+		s1.SetReliabilityParams(false, ReliabilityTypeReliable, 0)
+
+		br.DropNextNWrites(0, 1)
 
 		var n int
 		n, err = s0.WriteSCTP(sbuf1, PayloadTypeWebRTCBinary)
@@ -2476,24 +2481,19 @@ func TestAssocUnreliable(t *testing.T) { //nolint:maintidx
 		assert.NoError(t, err)
 		assert.Equal(t, len(sbuf2), n, "unexpected length of written data")
 
-		time.Sleep(10 * time.Millisecond)
-		br.Drop(0, 0, 2) // drop the second fragment of the first chunk (second chunk should be sacked)
 		flushBuffers(br, a0, a1)
+		assert.Equal(t, uint32(receiveBufferSize-fragmentedMessageSize), a0.RWND(), "abandoned fragments should not occupy receive-window credit")
 
 		rbuf := make([]byte, 2000)
+		require.NoError(t, s1.SetReadDeadline(time.Now().Add(time.Second)))
 		n, ppi, err := s1.ReadSCTP(rbuf)
-		assert.NoError(t, err, "ReadSCTP failed")
+		require.NoError(t, err, "ReadSCTP failed")
 
 		// should receive the second one only
 		assert.Equal(t, sbuf2, rbuf[:n], "unexpected received data")
 		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
 
-		br.Process()
-
-		assert.False(t, s0.reassemblyQueue.isReadable(), "should no longer be readable")
-		assert.Equal(t, 0, len(s0.reassemblyQueue.unordered), "should be nothing in the unordered queue")
-		assert.Equal(t, 0, len(s0.reassemblyQueue.unorderedChunks), "should be nothing in the unorderedChunks list")
-		closeAssociationPair(br, a0, a1)
+		assert.Zero(t, s1.getNumBytesInReassemblyQueue())
 	})
 
 	t.Run("Timed ordered", func(t *testing.T) { // nolint:dupl

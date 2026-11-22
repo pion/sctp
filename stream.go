@@ -97,7 +97,7 @@ func (s *Stream) SetDefaultPayloadType(defaultPayloadType PayloadProtocolIdentif
 	atomic.StoreUint32((*uint32)(&s.defaultPayloadType), uint32(defaultPayloadType))
 }
 
-// SetReliabilityParams sets reliability parameters for this stream.
+// SetReliabilityParams sets ordering and reliability for outgoing messages on this stream.
 func (s *Stream) SetReliabilityParams(unordered bool, relType byte, relVal uint32) {
 	s.lock.Lock()
 	defer s.lock.Unlock()
@@ -225,46 +225,22 @@ func (s *Stream) handleData(pd *chunkPayloadData) error {
 }
 
 func (s *Stream) handleForwardTSNForOrdered(ssn uint16) {
-	var readable bool
+	s.lock.Lock()
+	s.reassemblyQueue.forwardTSNForOrdered(ssn)
+	readable := s.reassemblyQueue.isReadable()
+	s.lock.Unlock()
 
-	func() {
-		s.lock.Lock()
-		defer s.lock.Unlock()
-
-		if s.unordered {
-			return // unordered chunks are handled by handleForwardUnordered method
-		}
-
-		// Remove all chunks older than or equal to the new TSN from
-		// the reassemblyQueue.
-		s.reassemblyQueue.forwardTSNForOrdered(ssn)
-		readable = s.reassemblyQueue.isReadable()
-	}()
-
-	// Notify the reader asynchronously if there's a data chunk to read.
 	if readable {
 		s.readNotifier.Signal()
 	}
 }
 
 func (s *Stream) handleForwardTSNForUnordered(newCumulativeTSN uint32) {
-	var readable bool
+	s.lock.Lock()
+	s.reassemblyQueue.forwardTSNForUnordered(newCumulativeTSN)
+	readable := s.reassemblyQueue.isReadable()
+	s.lock.Unlock()
 
-	func() {
-		s.lock.Lock()
-		defer s.lock.Unlock()
-
-		if !s.unordered {
-			return // ordered chunks are handled by handleForwardTSNOrdered method
-		}
-
-		// Remove all chunks older than or equal to the new TSN from
-		// the reassemblyQueue.
-		s.reassemblyQueue.forwardTSNForUnordered(newCumulativeTSN)
-		readable = s.reassemblyQueue.isReadable()
-	}()
-
-	// Notify the reader asynchronously if there's a data chunk to read.
 	if readable {
 		s.readNotifier.Signal()
 	}
