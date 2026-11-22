@@ -4671,9 +4671,10 @@ func TestReconfigRequestLimitAcrossTSNWraparound(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			assoc := createTestAssociation(t, Config{})
 			assoc.payloadQueue.init(tc.peerLastTSN)
-			for sequence := uint32(0); sequence < maxReconfigRequests; sequence++ {
-				assoc.reconfigRequests[sequence] = &paramOutgoingResetRequest{
-					reconfigRequestSequenceNumber: sequence,
+			for sequence := range maxReconfigRequests {
+				sequenceNumber := uint32(sequence)
+				assoc.reconfigRequests[sequenceNumber] = &paramOutgoingResetRequest{
+					reconfigRequestSequenceNumber: sequenceNumber,
 					senderLastTSN:                 tc.peerLastTSN + 1,
 				}
 			}
