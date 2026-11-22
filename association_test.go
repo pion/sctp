@@ -3215,6 +3215,7 @@ func TestAssociationForwardTSNBeforeStreamData(t *testing.T) {
 
 func TestAssociationForwardTSNForUnopenedStream(t *testing.T) {
 	const (
+		resetSID    uint16 = 3
 		unopenedSID uint16 = 100
 		skipped            = 7
 	)
@@ -3275,6 +3276,36 @@ func TestAssociationForwardTSNForUnopenedStream(t *testing.T) {
 			stream := assoc.getOrCreateStream(unopenedSID, false, PayloadTypeWebRTCBinary)
 			require.NotNil(t, stream)
 			assert.Equal(t, uint32(skipped+1), nextSequence(stream))
+		})
+
+		t.Run(tc.name+" repeated after an inbound reset", func(t *testing.T) {
+			assoc := newAssociation(t)
+			require.NotNil(t, assoc.createStream(resetSID, false))
+
+			forward(assoc, resetSID)
+			resetRequest := &paramOutgoingResetRequest{
+				reconfigRequestSequenceNumber: 1,
+				senderLastTSN:                 assoc.peerLastTSN(),
+				streamIdentifiers:             []uint16{resetSID},
+			}
+			require.NotNil(t, assoc.resetStreamsIfAny(resetRequest))
+			require.NotContains(t, assoc.streams, resetSID)
+
+			// The peer missed the SACK, so its next FORWARD-TSN repeats the
+			// entry for the stream it has since reset.
+			forward(assoc, resetSID, unopenedSID)
+
+			recreated := assoc.getOrCreateStream(resetSID, false, PayloadTypeWebRTCBinary)
+			require.NotNil(t, recreated)
+			assert.Zero(t, nextSequence(recreated), "an entry from before the reset should not skip new messages")
+
+			unopened := assoc.getOrCreateStream(unopenedSID, false, PayloadTypeWebRTCBinary)
+			require.NotNil(t, unopened)
+			assert.Equal(t, uint32(skipped+1), nextSequence(unopened))
+
+			// Once the stream exists again, later entries apply to it as usual.
+			forward(assoc, resetSID)
+			assert.Equal(t, uint32(skipped+1), nextSequence(recreated))
 		})
 	}
 }
@@ -4693,6 +4724,7 @@ func TestAssocResetResetsInterleavingCounters(t *testing.T) {
 		require.NotContains(t, assoc.streams, si, "inbound reset should remove the visible stream")
 		assert.Equal(t, map[uint16]uint16{unaffectedSID: 3}, assoc.pendingInboundSSNs)
 		assert.Equal(t, map[uint16]uint32{unaffectedSID: 4}, assoc.pendingInboundMIDs)
+		assert.Equal(t, map[uint16]struct{}{si: {}, unopenedSID: {}}, assoc.resetInboundStreams)
 
 		stream.lock.RLock()
 		assert.Equal(t, io.EOF, stream.readErr, "inbound reset should close reads on the old stream")

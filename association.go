@@ -360,6 +360,9 @@ type Association struct {
 	// Next ordered sequence numbers for streams forwarded before they were opened.
 	pendingInboundSSNs map[uint16]uint16
 	pendingInboundMIDs map[uint16]uint32
+	// Streams the peer reset that have not been opened again. A FORWARD-TSN
+	// can repeat an entry from before the reset, so it is not recorded above.
+	resetInboundStreams map[uint16]struct{}
 
 	acceptCh             chan *Stream
 	readLoopCloseCh      chan struct{}
@@ -1205,6 +1208,7 @@ func (a *Association) readLoop() {
 		}
 		a.pendingInboundSSNs = nil
 		a.pendingInboundMIDs = nil
+		a.resetInboundStreams = nil
 		a.unblockPendingWrites()
 		a.lock.Unlock()
 		close(a.acceptCh)
@@ -2309,6 +2313,7 @@ func (a *Association) restartAssociation(candidate restartCookie, init *chunkIni
 	clear(a.reconfigRequests)
 	a.pendingInboundSSNs = nil
 	a.pendingInboundMIDs = nil
+	a.resetInboundStreams = nil
 
 	a.myVerificationTag = candidate.LocalTag
 	a.initialTSN, a.myNextTSN = candidate.LocalTSN, candidate.LocalTSN
@@ -2883,8 +2888,21 @@ func (a *Association) createStream(streamIdentifier uint16, accept bool) *Stream
 
 	delete(a.pendingInboundSSNs, streamIdentifier)
 	delete(a.pendingInboundMIDs, streamIdentifier)
+	delete(a.resetInboundStreams, streamIdentifier)
 
 	return stream
+}
+
+// forgetPendingInboundStream drops the sequence numbers forwarded for a stream
+// the peer reset, and ignores further ones until the stream is opened. The
+// caller should hold the lock.
+func (a *Association) forgetPendingInboundStream(streamIdentifier uint16) {
+	delete(a.pendingInboundSSNs, streamIdentifier)
+	delete(a.pendingInboundMIDs, streamIdentifier)
+	if a.resetInboundStreams == nil {
+		a.resetInboundStreams = make(map[uint16]struct{})
+	}
+	a.resetInboundStreams[streamIdentifier] = struct{}{}
 }
 
 // getOrCreateStream gets or creates a stream. The caller should hold the lock.
@@ -3788,7 +3806,8 @@ func (a *Association) handleForwardTSN(chunkTSN *chunkForwardTSN) []*packet {
 
 			continue
 		}
-		if !sna16LTE(a.pendingInboundSSNs[forwarded.identifier], forwarded.sequence) {
+		if _, reset := a.resetInboundStreams[forwarded.identifier]; reset ||
+			!sna16LTE(a.pendingInboundSSNs[forwarded.identifier], forwarded.sequence) {
 			continue
 		}
 		if a.pendingInboundSSNs == nil {
@@ -3842,7 +3861,7 @@ func (a *Association) handleIForwardTSN(chunkTSN *chunkIForwardTSN) []*packet {
 
 			continue
 		}
-		if forwarded.unordered ||
+		if _, reset := a.resetInboundStreams[forwarded.identifier]; reset || forwarded.unordered ||
 			!sna32LTE(a.pendingInboundMIDs[forwarded.identifier], forwarded.messageIdentifier) {
 			continue
 		}
@@ -3961,12 +3980,15 @@ func (a *Association) resetStreamsIfAny(resetRequest *paramOutgoingResetRequest)
 		a.log.Debugf("[%s] resetStream(): senderLastTSN=%d <= peerLastTSN=%d",
 			a.name, resetRequest.senderLastTSN, a.peerLastTSN())
 		if len(resetRequest.streamIdentifiers) == 0 {
-			a.pendingInboundSSNs = nil
-			a.pendingInboundMIDs = nil
+			for id := range a.pendingInboundSSNs {
+				a.forgetPendingInboundStream(id)
+			}
+			for id := range a.pendingInboundMIDs {
+				a.forgetPendingInboundStream(id)
+			}
 		}
 		for _, id := range resetRequest.streamIdentifiers {
-			delete(a.pendingInboundSSNs, id)
-			delete(a.pendingInboundMIDs, id)
+			a.forgetPendingInboundStream(id)
 			s, ok := a.streams[id]
 			if !ok {
 				continue
