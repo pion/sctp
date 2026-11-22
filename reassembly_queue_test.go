@@ -5,9 +5,11 @@ package sctp
 
 import (
 	"io"
+	"math"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestReassemblyQueue(t *testing.T) { //nolint:maintidx,cyclop
@@ -1357,14 +1359,58 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx,cyclop
 	})
 }
 
+func TestReassemblyQueueFragmentedDataPPID(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		unordered bool
+	}{
+		{name: "ordered"},
+		{name: "unordered", unordered: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rq := newReassemblyQueue(0, 0)
+			begin := &chunkPayloadData{
+				unordered:         tc.unordered,
+				beginningFragment: true,
+				tsn:               math.MaxUint32,
+				payloadType:       PayloadTypeWebRTCBinary,
+				userData:          []byte("hello "),
+			}
+			end := &chunkPayloadData{
+				unordered:      tc.unordered,
+				endingFragment: true,
+				tsn:            0,
+				payloadType:    PayloadTypeWebRTCString,
+				userData:       []byte("world"),
+			}
+
+			assert.False(t, rq.push(end))
+			assert.False(t, rq.push(end), "ignore a duplicate before completion")
+			assert.Equal(t, len(end.userData), rq.getNumBytes())
+			require.True(t, rq.push(begin))
+
+			buf := make([]byte, len("hello world"))
+			n, ppid, err := rq.read(buf)
+			require.NoError(t, err)
+			assert.Equal(t, "hello world", string(buf[:n]))
+			assert.Equal(t, begin.payloadType, ppid)
+			assert.Equal(t, 0, rq.getNumBytes())
+			assert.Empty(t, rq.orderedIndex)
+			assert.Empty(t, rq.unorderedIndex)
+			_, _, err = rq.read(buf)
+			assert.ErrorIs(t, err, errTryAgain)
+		})
+	}
+}
+
 func TestChunkSet(t *testing.T) {
 	t.Run("Empty chunkSet", func(t *testing.T) {
-		cset := newChunkSet(0, 0)
+		cset := newChunkSet(0)
 		assert.False(t, cset.isComplete(), "empty chunkSet cannot be complete")
 	})
 
 	t.Run("Push dup chunks to chunkSet", func(t *testing.T) {
-		cset := newChunkSet(0, 0)
+		cset := newChunkSet(0)
 		cset.push(&chunkPayloadData{
 			tsn:               100,
 			beginningFragment: true,
@@ -1381,7 +1427,6 @@ func TestChunkSet(t *testing.T) {
 	t.Run("Incomplete chunkSet: no beginning", func(t *testing.T) {
 		cset := &chunkSet{
 			ssn:    0,
-			ppi:    0,
 			chunks: []*chunkPayloadData{{}},
 		}
 		assert.False(t, cset.isComplete(), "chunkSet not starting with B=1 cannot be complete")
@@ -1390,7 +1435,6 @@ func TestChunkSet(t *testing.T) {
 	t.Run("Incomplete chunkSet: no contiguous tsn", func(t *testing.T) {
 		cset := &chunkSet{
 			ssn: 0,
-			ppi: 0,
 			chunks: []*chunkPayloadData{
 				{
 					tsn:               100,

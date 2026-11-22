@@ -37,24 +37,17 @@ func insertChunkSetByMID(a []*chunkSetMID, cset *chunkSetMID) []*chunkSetMID {
 // chunkSet is a set of chunks that share the same SSN.
 type chunkSet struct {
 	ssn    uint16 // used only with the ordered chunks
-	ppi    PayloadProtocolIdentifier
 	chunks []*chunkPayloadData
 }
 
-func newChunkSet(ssn uint16, ppi PayloadProtocolIdentifier) *chunkSet {
+func newChunkSet(ssn uint16) *chunkSet {
 	return &chunkSet{
 		ssn:    ssn,
-		ppi:    ppi,
 		chunks: []*chunkPayloadData{},
 	}
 }
 
 func (set *chunkSet) push(chunk *chunkPayloadData) bool {
-	// Enforce same PPI for all fragments of a user message (deliver one PPI). RFC 9260 sec 6.9.
-	if chunk.payloadType != set.ppi {
-		return false
-	}
-
 	// check if dup
 	if set.hasTSN(chunk.tsn) {
 		return false
@@ -376,7 +369,7 @@ func (r *reassemblyQueue) pushWithError(chunk *chunkPayloadData) (bool, error) {
 		return false, errReassemblyQueueLimitExceeded
 	}
 	if cset == nil {
-		cset = newChunkSet(chunk.streamSequenceNumber, chunk.payloadType)
+		cset = newChunkSet(chunk.streamSequenceNumber)
 		// Index only fragmented sequences, single-chunk messages don't need lookup.
 		if chunk.isFragmented() {
 			r.orderedIndex[cset.ssn] = cset
@@ -486,7 +479,6 @@ func (r *reassemblyQueue) findCompleteUnorderedChunkSet() *chunkSet {
 	startIdx := -1
 	nChunks := 0
 	var lastTSN uint32
-	var ppi PayloadProtocolIdentifier
 	var found bool
 
 	for i, chunk := range r.unorderedChunks {
@@ -495,7 +487,6 @@ func (r *reassemblyQueue) findCompleteUnorderedChunkSet() *chunkSet {
 			startIdx = i
 			nChunks = 1
 			lastTSN = chunk.tsn
-			ppi = chunk.payloadType
 
 			if chunk.endingFragment {
 				found = true
@@ -510,8 +501,7 @@ func (r *reassemblyQueue) findCompleteUnorderedChunkSet() *chunkSet {
 			continue
 		}
 
-		// same PPI and strictly contiguous TSN required across fragments. RFC 9260 sec 6.9.
-		if chunk.payloadType != ppi || chunk.tsn != lastTSN+1 {
+		if chunk.tsn != lastTSN+1 {
 			startIdx = -1
 
 			continue
@@ -544,7 +534,7 @@ func (r *reassemblyQueue) findCompleteUnorderedChunkSet() *chunkSet {
 		delete(r.unorderedIndex, c.tsn)
 	}
 
-	chunkSet := newChunkSet(0, chunks[0].payloadType) // SSN ignored for unordered (RFC 9260 sec 6.6)
+	chunkSet := newChunkSet(0) // SSN ignored for unordered (RFC 9260 sec 6.6)
 	chunkSet.chunks = chunks
 
 	return chunkSet
@@ -680,7 +670,8 @@ func (r *reassemblyQueue) read(buf []byte) (int, PayloadProtocolIdentifier, erro
 
 	r.subtractNumBytes(nTotal)
 
-	return nTotal, cset.ppi, err
+	// Use the PPID from the beginning fragment regardless of arrival order.
+	return nTotal, cset.chunks[0].payloadType, nil
 }
 
 func (r *reassemblyQueue) forwardTSNForOrdered(lastSSN uint16) {
