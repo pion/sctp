@@ -70,8 +70,9 @@ type chunkPayloadData struct {
 	missIndicator uint32
 
 	// Partial-reliability parameters used only by sender
-	since        time.Time
-	nSent        uint32 // number of transmission made for this chunk
+	since        time.Time // most recent transmission, for RTT and RACK
+	firstSent    time.Time // message lifetime origin, set only on the head
+	nSent        uint32    // number of transmission made for this chunk
 	_abandoned   bool
 	_allInflight bool // valid only with the first fragment
 
