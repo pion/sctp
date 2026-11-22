@@ -4658,6 +4658,79 @@ func TestAssocResetResetsInterleavingCounters(t *testing.T) {
 	})
 }
 
+func TestReconfigRequestLimitAcrossTSNWraparound(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		peerLastTSN   uint32
+		senderLastTSN uint32
+		expectedErr   error
+	}{
+		{"future TSN", math.MaxUint32, 0, ErrTooManyReconfigRequests},
+		{"acknowledged TSN", 0, math.MaxUint32, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assoc := createTestAssociation(t, Config{})
+			assoc.payloadQueue.init(tc.peerLastTSN)
+			for sequence := uint32(0); sequence < maxReconfigRequests; sequence++ {
+				assoc.reconfigRequests[sequence] = &paramOutgoingResetRequest{
+					reconfigRequestSequenceNumber: sequence,
+					senderLastTSN:                 tc.peerLastTSN + 1,
+				}
+			}
+
+			request := &paramOutgoingResetRequest{
+				reconfigRequestSequenceNumber: maxReconfigRequests,
+				senderLastTSN:                 tc.senderLastTSN,
+			}
+			reply, err := assoc.handleReconfigParam(request)
+			if tc.expectedErr != nil {
+				require.ErrorIs(t, err, tc.expectedErr)
+				require.Nil(t, reply)
+			} else {
+				require.NoError(t, err)
+				require.NotNil(t, reply)
+			}
+			require.Len(t, assoc.reconfigRequests, maxReconfigRequests)
+			require.NotContains(t, assoc.reconfigRequests, request.reconfigRequestSequenceNumber)
+		})
+	}
+}
+
+func TestDeferredResetRespondsOnCompletion(t *testing.T) {
+	assoc := createTestAssociation(t, Config{})
+	assoc.payloadQueue.init(math.MaxUint32 - 1)
+
+	request := &paramOutgoingResetRequest{
+		reconfigRequestSequenceNumber: 1,
+		senderLastTSN:                 0,
+	}
+	reply, err := assoc.handleReconfigParam(request)
+	require.NoError(t, err)
+	require.NotNil(t, reply)
+	require.Len(t, reply.chunks, 1)
+	progressChunk, ok := reply.chunks[0].(*chunkReconfig)
+	require.True(t, ok)
+	progress, ok := progressChunk.paramA.(*paramReconfigResponse)
+	require.True(t, ok)
+	require.Equal(t, reconfigResultInProgress, progress.result)
+
+	require.True(t, assoc.payloadQueue.push(math.MaxUint32))
+	require.Empty(t, assoc.handlePeerLastTSNAndAcknowledgement(false))
+	require.Contains(t, assoc.reconfigRequests, request.reconfigRequestSequenceNumber)
+
+	require.True(t, assoc.payloadQueue.push(0))
+	replies := assoc.handlePeerLastTSNAndAcknowledgement(false)
+	require.Len(t, replies, 1)
+	require.Len(t, replies[0].chunks, 1)
+	completionChunk, ok := replies[0].chunks[0].(*chunkReconfig)
+	require.True(t, ok)
+	response, ok := completionChunk.paramA.(*paramReconfigResponse)
+	require.True(t, ok)
+	require.Equal(t, reconfigResultSuccessPerformed, response.result)
+	require.Equal(t, request.reconfigRequestSequenceNumber, response.reconfigResponseSequenceNumber)
+	require.Empty(t, assoc.reconfigRequests)
+}
+
 func TestAssocAbort(t *testing.T) {
 	lim := test.TimeOut(time.Second * 10)
 	defer lim.Stop()

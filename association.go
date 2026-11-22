@@ -2752,12 +2752,17 @@ func (a *Association) handlePeerLastTSNAndAcknowledgement(sackImmediately bool) 
 	//   if possible
 	// Meaning, if peerLastTSN+1 points to a chunk that is received,
 	// advance peerLastTSN until peerLastTSN+1 points to unreceived chunk.
-	for {
-		if popOk := a.payloadQueue.pop(false); !popOk {
-			break
-		}
+	previousTSN := a.peerLastTSN()
+	for a.payloadQueue.pop(false) {
+	}
 
+	if a.peerLastTSN() != previousTSN {
+		// Revisit pending resets once after advancing the cumulative TSN.
+		// Requests that are still pending already received an In Progress reply.
 		for _, rstReq := range a.reconfigRequests {
+			if !sna32LTE(rstReq.senderLastTSN, a.peerLastTSN()) {
+				continue
+			}
 			resp := a.resetStreamsIfAny(rstReq)
 			if resp != nil {
 				a.log.Debugf("[%s] RESET RESPONSE: %+v", a.name, resp)
@@ -3850,7 +3855,7 @@ func (a *Association) handleReconfigParam(raw param) (*packet, error) {
 	switch par := raw.(type) {
 	case *paramOutgoingResetRequest:
 		a.log.Tracef("[%s] handleReconfigParam (OutgoingResetRequest)", a.name)
-		if a.peerLastTSN() < par.senderLastTSN && len(a.reconfigRequests) >= maxReconfigRequests {
+		if !sna32LTE(par.senderLastTSN, a.peerLastTSN()) && len(a.reconfigRequests) >= maxReconfigRequests {
 			// We have too many reconfig requests outstanding. Drop the request and let
 			// the peer retransmit. A well behaved peer should only have 1 outstanding
 			// reconfig request.
