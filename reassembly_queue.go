@@ -210,6 +210,8 @@ type reassemblyQueue struct {
 	useInterleaving bool
 	nBytes          uint64
 	maxEntries      uint32
+	maxMessageBytes uint32
+	onRelease       func(uint32)
 }
 
 var (
@@ -281,6 +283,12 @@ func (r *reassemblyQueue) push(chunk *chunkPayloadData) bool {
 }
 
 func (r *reassemblyQueue) pushWithError(chunk *chunkPayloadData) (bool, error) { //nolint:cyclop
+	if r.isDuplicate(chunk) {
+		return false, nil
+	}
+	if r.maxMessageBytes > 0 && uint64(r.queuedMessageBytes(chunk))+uint64(len(chunk.userData)) > uint64(r.maxMessageBytes) {
+		return false, errInboundMessageLimitExceeded
+	}
 	var cset *chunkSet
 
 	if chunk.isIData() {
@@ -360,6 +368,71 @@ func (r *reassemblyQueue) pushWithError(chunk *chunkPayloadData) (bool, error) {
 	atomic.AddUint64(&r.nBytes, uint64(len(chunk.userData)))
 
 	return cset.pushNoDuplicate(chunk), nil
+}
+
+func (r *reassemblyQueue) isDuplicate(chunk *chunkPayloadData) bool {
+	if chunk.isIData() {
+		sets := []*chunkSetMID{r.orderedMIDMap[chunk.messageIdentifier], r.unorderedMIDMap[chunk.messageIdentifier]}
+		for _, set := range sets {
+			if set == nil {
+				continue
+			}
+			for _, c := range set.chunks {
+				if c.fragmentSequenceNumber == chunk.fragmentSequenceNumber {
+					return true
+				}
+			}
+		}
+		return r.hasQueuedUnorderedMID(chunk.messageIdentifier)
+	}
+	for _, sets := range [][]*chunkSet{r.ordered, r.unordered} {
+		for _, set := range sets {
+			if set.ssn == chunk.streamSequenceNumber && set.hasTSN(chunk.tsn) {
+				return true
+			}
+		}
+	}
+	for _, c := range r.unorderedChunks {
+		if c.tsn == chunk.tsn {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *reassemblyQueue) queuedMessageBytes(chunk *chunkPayloadData) int {
+	total := 0
+	visit := func(c *chunkPayloadData) {
+		if c.tsn != chunk.tsn && c.isIData() == chunk.isIData() &&
+			((chunk.isIData() && c.messageIdentifier == chunk.messageIdentifier) ||
+				(!chunk.isIData() && c.streamSequenceNumber == chunk.streamSequenceNumber)) {
+			total += len(c.userData)
+		}
+	}
+	for _, set := range r.ordered {
+		for _, c := range set.chunks {
+			visit(c)
+		}
+	}
+	for _, set := range r.unordered {
+		for _, c := range set.chunks {
+			visit(c)
+		}
+	}
+	for _, c := range r.unorderedChunks {
+		visit(c)
+	}
+	for _, set := range r.orderedMIDMap {
+		for _, c := range set.chunks {
+			visit(c)
+		}
+	}
+	for _, set := range r.unorderedMIDMap {
+		for _, c := range set.chunks {
+			visit(c)
+		}
+	}
+	return total
 }
 
 func (r *reassemblyQueue) pushIData(chunk *chunkPayloadData) (bool, error) {
@@ -593,6 +666,7 @@ func (r *reassemblyQueue) read(buf []byte) (int, PayloadProtocolIdentifier, erro
 		}
 
 		r.subtractNumBytes(nTotal)
+		r.release(uint32(len(iSet.chunks)))
 
 		return nTotal, iSet.ppi, err
 	}
@@ -636,6 +710,7 @@ func (r *reassemblyQueue) read(buf []byte) (int, PayloadProtocolIdentifier, erro
 	}
 
 	r.subtractNumBytes(nTotal)
+	r.release(uint32(len(cset.chunks)))
 
 	return nTotal, cset.ppi, err
 }
@@ -651,6 +726,7 @@ func (r *reassemblyQueue) forwardTSNForOrdered(lastSSN uint16) {
 				for _, c := range set.chunks {
 					r.subtractNumBytes(len(c.userData))
 				}
+				r.release(uint32(len(set.chunks)))
 
 				continue
 			}
@@ -682,6 +758,7 @@ func (r *reassemblyQueue) forwardTSNForUnordered(newCumulativeTSN uint32) {
 		for _, c := range r.unorderedChunks[0 : lastIdx+1] {
 			r.subtractNumBytes(len(c.userData))
 		}
+		r.release(uint32(lastIdx + 1))
 		r.unorderedChunks = r.unorderedChunks[lastIdx+1:]
 	}
 }
@@ -694,6 +771,7 @@ func (r *reassemblyQueue) forwardTSNForOrderedMID(lastMID uint32) {
 				for _, c := range set.chunks {
 					r.subtractNumBytes(len(c.userData))
 				}
+				r.release(uint32(len(set.chunks)))
 				delete(r.orderedMIDMap, set.mid)
 
 				continue
@@ -714,8 +792,15 @@ func (r *reassemblyQueue) forwardTSNForUnorderedMID(lastMID uint32) {
 			for _, c := range set.chunks {
 				r.subtractNumBytes(len(c.userData))
 			}
+			r.release(uint32(len(set.chunks)))
 			delete(r.unorderedMIDMap, mid)
 		}
+	}
+}
+
+func (r *reassemblyQueue) release(n uint32) {
+	if r.onRelease != nil && n > 0 {
+		r.onRelease(n)
 	}
 }
 

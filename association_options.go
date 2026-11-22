@@ -146,6 +146,18 @@ func WithMaxReassemblyQueueEntries(maxEntries uint32) AssociationOption {
 	})
 }
 
+func WithStreamLimits(inbound, outbound uint16) AssociationOption {
+	return sharedOption(func(c *Config) error { c.maxInboundStreams, c.maxOutboundStreams = inbound, outbound; return nil })
+}
+
+func WithMaxInboundMessageSize(size uint32) AssociationOption {
+	return sharedOption(func(c *Config) error { c.maxInboundMessageSize = size; return nil })
+}
+
+func WithMaxRetainedPayloadChunks(chunks uint32) AssociationOption {
+	return sharedOption(func(c *Config) error { c.maxRetainedPayloadChunks = chunks; return nil })
+}
+
 // WithRTOMax sets the max retransmission timeout in ms for the association.
 func WithRTOMax(rtoMax float64) AssociationOption {
 	return sharedOption(func(c *Config) error {
