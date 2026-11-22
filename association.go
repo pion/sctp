@@ -356,7 +356,11 @@ type Association struct {
 	storedInit       *chunkInit
 	storedCookieEcho *chunkCookieEcho
 
-	streams              map[uint16]*Stream
+	streams map[uint16]*Stream
+	// Next ordered sequence numbers for streams forwarded before they were opened.
+	pendingInboundSSNs map[uint16]uint16
+	pendingInboundMIDs map[uint16]uint32
+
 	acceptCh             chan *Stream
 	readLoopCloseCh      chan struct{}
 	awakeWriteLoopCh     chan struct{}
@@ -1199,6 +1203,8 @@ func (a *Association) readLoop() {
 		for _, s := range a.streams {
 			a.unregisterStream(s, closeErr)
 		}
+		a.pendingInboundSSNs = nil
+		a.pendingInboundMIDs = nil
 		a.unblockPendingWrites()
 		a.lock.Unlock()
 		close(a.acceptCh)
@@ -2301,6 +2307,8 @@ func (a *Association) restartAssociation(candidate restartCookie, init *chunkIni
 	a.controlQueue = newControlQueue()
 	clear(a.reconfigs)
 	clear(a.reconfigRequests)
+	a.pendingInboundSSNs = nil
+	a.pendingInboundMIDs = nil
 
 	a.myVerificationTag = candidate.LocalTag
 	a.initialTSN, a.myNextTSN = candidate.LocalTSN, candidate.LocalTSN
@@ -2853,6 +2861,8 @@ func (a *Association) createStream(streamIdentifier uint16, accept bool) *Stream
 		writeDeadline: deadline.New(),
 	}
 
+	stream.reassemblyQueue.nextSSN = a.pendingInboundSSNs[streamIdentifier]
+	stream.reassemblyQueue.nextMID = a.pendingInboundMIDs[streamIdentifier]
 	stream.readNotifier = sync.NewCond(&stream.lock)
 
 	if accept {
@@ -2870,6 +2880,9 @@ func (a *Association) createStream(streamIdentifier uint16, accept bool) *Stream
 	} else {
 		a.streams[streamIdentifier] = stream
 	}
+
+	delete(a.pendingInboundSSNs, streamIdentifier)
+	delete(a.pendingInboundMIDs, streamIdentifier)
 
 	return stream
 }
@@ -3772,7 +3785,17 @@ func (a *Association) handleForwardTSN(chunkTSN *chunkForwardTSN) []*packet {
 	for _, forwarded := range chunkTSN.streams {
 		if s, ok := a.streams[forwarded.identifier]; ok {
 			s.handleForwardTSNForOrdered(forwarded.sequence)
+
+			continue
 		}
+		if forwarded.identifier >= a.myMaxNumInboundStreams ||
+			!sna16LTE(a.pendingInboundSSNs[forwarded.identifier], forwarded.sequence) {
+			continue
+		}
+		if a.pendingInboundSSNs == nil {
+			a.pendingInboundSSNs = make(map[uint16]uint16)
+		}
+		a.pendingInboundSSNs[forwarded.identifier] = forwarded.sequence + 1
 	}
 
 	// TSN may be forewared for unordered chunks. ForwardTSN chunk does not
@@ -3817,7 +3840,17 @@ func (a *Association) handleIForwardTSN(chunkTSN *chunkIForwardTSN) []*packet {
 			} else {
 				s.handleForwardTSNForOrderedMID(forwarded.messageIdentifier)
 			}
+
+			continue
 		}
+		if forwarded.unordered || forwarded.identifier >= a.myMaxNumInboundStreams ||
+			!sna32LTE(a.pendingInboundMIDs[forwarded.identifier], forwarded.messageIdentifier) {
+			continue
+		}
+		if a.pendingInboundMIDs == nil {
+			a.pendingInboundMIDs = make(map[uint16]uint32)
+		}
+		a.pendingInboundMIDs[forwarded.identifier] = forwarded.messageIdentifier + 1
 	}
 
 	return a.handlePeerLastTSNAndAcknowledgement(false)
@@ -3928,7 +3961,13 @@ func (a *Association) resetStreamsIfAny(resetRequest *paramOutgoingResetRequest)
 	if sna32LTE(resetRequest.senderLastTSN, a.peerLastTSN()) {
 		a.log.Debugf("[%s] resetStream(): senderLastTSN=%d <= peerLastTSN=%d",
 			a.name, resetRequest.senderLastTSN, a.peerLastTSN())
+		if len(resetRequest.streamIdentifiers) == 0 {
+			a.pendingInboundSSNs = nil
+			a.pendingInboundMIDs = nil
+		}
 		for _, id := range resetRequest.streamIdentifiers {
+			delete(a.pendingInboundSSNs, id)
+			delete(a.pendingInboundMIDs, id)
 			s, ok := a.streams[id]
 			if !ok {
 				continue

@@ -3166,6 +3166,53 @@ func TestCreateIForwardTSN(t *testing.T) {
 	})
 }
 
+func TestAssociationForwardTSNBeforeStreamData(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		interleaving bool
+	}{
+		{name: "DATA"},
+		{name: "I-DATA", interleaving: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lim := test.TimeOut(10 * time.Second)
+			defer lim.Stop()
+
+			br := test.NewBridge()
+			sender, receiver, err := createNewAssociationPairWithInterleaving(br, ackModeNoDelay, 0, tc.interleaving, tc.interleaving)
+			require.NoError(t, err)
+			defer closeAssociationPair(br, sender, receiver)
+			sender.rtoMgr.setRTO(100, true)
+
+			outbound, err := sender.OpenStream(1, PayloadTypeWebRTCBinary)
+			require.NoError(t, err)
+			outbound.SetReliabilityParams(false, ReliabilityTypeRexmit, 0)
+			for _, msg := range []string{"first", "second"} {
+				br.DropNextNWrites(0, 1)
+				_, err = outbound.WriteSCTP([]byte(msg), PayloadTypeWebRTCBinary)
+				require.NoError(t, err)
+				flushBuffers(br, sender, receiver)
+			}
+			assert.Empty(t, receiver.acceptCh, "forwarding alone should not offer a stream")
+
+			outbound.SetReliabilityParams(false, ReliabilityTypeReliable, 0)
+			const message = "received"
+			_, err = outbound.WriteSCTP([]byte(message), PayloadTypeWebRTCBinary)
+			require.NoError(t, err)
+			flushBuffers(br, sender, receiver)
+
+			inbound, err := receiver.AcceptStream()
+			require.NoError(t, err)
+			require.NoError(t, inbound.SetReadDeadline(time.Now().Add(time.Second)))
+			buf := make([]byte, len(message))
+			n, ppid, err := inbound.ReadSCTP(buf)
+			require.NoError(t, err)
+			assert.Equal(t, message, string(buf[:n]))
+			assert.Equal(t, PayloadTypeWebRTCBinary, ppid)
+		})
+	}
+}
+
 func TestHandleForwardTSN(t *testing.T) {
 	loggerFactory := logging.NewDefaultLoggerFactory()
 
@@ -4541,10 +4588,16 @@ func TestAssocResetResetsInterleavingCounters(t *testing.T) {
 	})
 
 	t.Run("inbound reset removes stream so recreated stream starts from zero", func(t *testing.T) {
-		const si uint16 = 1
+		const (
+			si            uint16 = 1
+			unopenedSID   uint16 = 2
+			unaffectedSID uint16 = 3
+		)
 		assoc := &Association{
 			payloadQueue:        newReceivePayloadQueue(64),
 			streams:             map[uint16]*Stream{},
+			pendingInboundSSNs:  map[uint16]uint16{unopenedSID: 5, unaffectedSID: 3},
+			pendingInboundMIDs:  map[uint16]uint32{unopenedSID: 9, unaffectedSID: 4},
 			reconfigRequests:    map[uint32]*paramOutgoingResetRequest{},
 			log:                 logging.NewDefaultLoggerFactory().NewLogger("sctp-test"),
 			sourcePort:          5000,
@@ -4563,7 +4616,7 @@ func TestAssocResetResetsInterleavingCounters(t *testing.T) {
 		resetRequest := &paramOutgoingResetRequest{
 			reconfigRequestSequenceNumber: 1,
 			senderLastTSN:                 0,
-			streamIdentifiers:             []uint16{si},
+			streamIdentifiers:             []uint16{si, unopenedSID},
 		}
 		assoc.reconfigRequests[resetRequest.reconfigRequestSequenceNumber] = resetRequest
 
@@ -4572,6 +4625,8 @@ func TestAssocResetResetsInterleavingCounters(t *testing.T) {
 		assoc.lock.Unlock()
 		require.NotNil(t, resp)
 		require.NotContains(t, assoc.streams, si, "inbound reset should remove the visible stream")
+		assert.Equal(t, map[uint16]uint16{unaffectedSID: 3}, assoc.pendingInboundSSNs)
+		assert.Equal(t, map[uint16]uint32{unaffectedSID: 4}, assoc.pendingInboundMIDs)
 
 		stream.lock.RLock()
 		assert.Equal(t, io.EOF, stream.readErr, "inbound reset should close reads on the old stream")
