@@ -3213,6 +3213,72 @@ func TestAssociationForwardTSNBeforeStreamData(t *testing.T) {
 	}
 }
 
+func TestAssociationForwardTSNForUnopenedStream(t *testing.T) {
+	const (
+		unopenedSID uint16 = 100
+		skipped            = 7
+	)
+
+	for _, tc := range []struct {
+		name         string
+		interleaving bool
+	}{
+		{name: "DATA"},
+		{name: "I-DATA", interleaving: true},
+	} {
+		// forward advances the cumulative TSN by one and skips through `skipped` on each stream.
+		forward := func(assoc *Association, identifiers ...uint16) {
+			newCumulativeTSN := assoc.peerLastTSN() + 1
+			if tc.interleaving {
+				chunk := &chunkIForwardTSN{newCumulativeTSN: newCumulativeTSN}
+				for _, identifier := range identifiers {
+					chunk.streams = append(chunk.streams, chunkIForwardTSNStream{
+						identifier: identifier, messageIdentifier: skipped,
+					})
+				}
+				assoc.handleIForwardTSN(chunk)
+
+				return
+			}
+			chunk := &chunkForwardTSN{newCumulativeTSN: newCumulativeTSN}
+			for _, identifier := range identifiers {
+				chunk.streams = append(chunk.streams, chunkForwardTSNStream{identifier: identifier, sequence: skipped})
+			}
+			assoc.handleForwardTSN(chunk)
+		}
+		nextSequence := func(stream *Stream) uint32 {
+			if tc.interleaving {
+				return stream.reassemblyQueue.nextMID
+			}
+
+			return uint32(stream.reassemblyQueue.nextSSN)
+		}
+		newAssociation := func(t *testing.T) *Association {
+			t.Helper()
+
+			assoc := createTestAssociation(t, Config{})
+			assoc.useForwardTSN = !tc.interleaving
+			assoc.useIForwardTSN = tc.interleaving
+			assoc.lock.Lock()
+			t.Cleanup(assoc.lock.Unlock)
+
+			return assoc
+		}
+
+		t.Run(tc.name+" above the peer's inbound stream count", func(t *testing.T) {
+			assoc := newAssociation(t)
+			// The peer can send on more streams than it accepts.
+			assoc.myMaxNumInboundStreams = 16
+
+			forward(assoc, unopenedSID)
+
+			stream := assoc.getOrCreateStream(unopenedSID, false, PayloadTypeWebRTCBinary)
+			require.NotNil(t, stream)
+			assert.Equal(t, uint32(skipped+1), nextSequence(stream))
+		})
+	}
+}
+
 func TestHandleForwardTSN(t *testing.T) {
 	loggerFactory := logging.NewDefaultLoggerFactory()
 

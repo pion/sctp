@@ -3788,8 +3788,7 @@ func (a *Association) handleForwardTSN(chunkTSN *chunkForwardTSN) []*packet {
 
 			continue
 		}
-		if forwarded.identifier >= a.myMaxNumInboundStreams ||
-			!sna16LTE(a.pendingInboundSSNs[forwarded.identifier], forwarded.sequence) {
+		if !sna16LTE(a.pendingInboundSSNs[forwarded.identifier], forwarded.sequence) {
 			continue
 		}
 		if a.pendingInboundSSNs == nil {
@@ -3843,7 +3842,7 @@ func (a *Association) handleIForwardTSN(chunkTSN *chunkIForwardTSN) []*packet {
 
 			continue
 		}
-		if forwarded.unordered || forwarded.identifier >= a.myMaxNumInboundStreams ||
+		if forwarded.unordered ||
 			!sna32LTE(a.pendingInboundMIDs[forwarded.identifier], forwarded.messageIdentifier) {
 			continue
 		}
