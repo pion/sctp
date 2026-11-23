@@ -2284,11 +2284,12 @@ func TestAssocReliable(t *testing.T) { //nolint:maintidx
 }
 
 func TestAssocUnreliable(t *testing.T) { //nolint:maintidx
+	const fragmentedMessageSize = 2000
 	// sbuf1, sbuf2:
 	//    large enough to be fragmented into two chunks and each chunks are
 	//    large enough not to be bundled
-	sbuf1 := make([]byte, 2000)
-	sbuf2 := make([]byte, 2000)
+	sbuf1 := make([]byte, fragmentedMessageSize)
+	sbuf2 := make([]byte, fragmentedMessageSize)
 	for i := range sbuf1 {
 		sbuf1[i] = byte(i & 0xff)
 	}
@@ -2358,13 +2359,15 @@ func TestAssocUnreliable(t *testing.T) { //nolint:maintidx
 		defer lim.Stop()
 
 		const si uint16 = 1
+		const receiveBufferSize = 8192
 		br := test.NewBridge()
 
-		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, 0)
-		assert.NoError(t, err, "failed to create associations")
+		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, receiveBufferSize)
+		require.NoError(t, err, "failed to create associations")
+		defer closeAssociationPair(br, a0, a1)
 
 		s0, s1, err := establishSessionPair(br, a0, a1, si)
-		assert.NoError(t, err, "failed to establish session pair")
+		require.NoError(t, err, "failed to establish session pair")
 
 		// lock RTO value at 100 [msec]
 		a0.rtoMgr.setRTO(100.0, true)
@@ -2372,7 +2375,7 @@ func TestAssocUnreliable(t *testing.T) { //nolint:maintidx
 		// When we set the reliability value to 0 [times], then it will cause
 		// the chunk to be abandoned immediately after the first transmission.
 		s0.SetReliabilityParams(false, ReliabilityTypeRexmit, 0)
-		s1.SetReliabilityParams(false, ReliabilityTypeRexmit, 0) // doesn't matter
+		s1.SetReliabilityParams(true, ReliabilityTypeReliable, 0)
 
 		br.DropNextNWrites(0, 1) // drop the first fragment of the first chunk (second chunk should be sacked)
 
@@ -2386,20 +2389,18 @@ func TestAssocUnreliable(t *testing.T) { //nolint:maintidx
 		assert.Equal(t, len(sbuf2), n, "unexpected length of written data")
 
 		flushBuffers(br, a0, a1)
+		assert.Equal(t, uint32(receiveBufferSize-fragmentedMessageSize), a0.RWND(), "abandoned fragments should not occupy receive-window credit")
 
 		rbuf := make([]byte, 2000)
+		require.NoError(t, s1.SetReadDeadline(time.Now().Add(time.Second)))
 		n, ppi, err := s1.ReadSCTP(rbuf)
-		assert.NoError(t, err, "ReadSCTP failed")
+		require.NoError(t, err, "ReadSCTP failed")
 
 		// should receive the second one only
 		assert.Equal(t, sbuf2, rbuf[:n], "unexpected received data")
 		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
 
-		br.Process()
-
-		assert.False(t, s0.reassemblyQueue.isReadable(), "should no longer be readable")
-		assert.Equal(t, 0, len(s0.reassemblyQueue.ordered), "should be nothing in the ordered queue")
-		closeAssociationPair(br, a0, a1)
+		assert.Zero(t, s1.getNumBytesInReassemblyQueue())
 	})
 
 	t.Run("Rexmit unordered no fragment", func(t *testing.T) { // nolint:dupl
@@ -2454,18 +2455,22 @@ func TestAssocUnreliable(t *testing.T) { //nolint:maintidx
 		defer lim.Stop()
 
 		const si uint16 = 1
+		const receiveBufferSize = 8192
 		br := test.NewBridge()
 
-		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, 0)
-		assert.NoError(t, err, "failed to create associations")
+		a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, receiveBufferSize)
+		require.NoError(t, err, "failed to create associations")
+		defer closeAssociationPair(br, a0, a1)
 
 		s0, s1, err := establishSessionPair(br, a0, a1, si)
-		assert.NoError(t, err, "failed to establish session pair")
+		require.NoError(t, err, "failed to establish session pair")
 
 		// When we set the reliability value to 0 [times], then it will cause
 		// the chunk to be abandoned immediately after the first transmission.
 		s0.SetReliabilityParams(true, ReliabilityTypeRexmit, 0)
-		s1.SetReliabilityParams(true, ReliabilityTypeRexmit, 0) // doesn't matter
+		s1.SetReliabilityParams(false, ReliabilityTypeReliable, 0)
+
+		br.DropNextNWrites(0, 1)
 
 		var n int
 		n, err = s0.WriteSCTP(sbuf1, PayloadTypeWebRTCBinary)
@@ -2476,24 +2481,19 @@ func TestAssocUnreliable(t *testing.T) { //nolint:maintidx
 		assert.NoError(t, err)
 		assert.Equal(t, len(sbuf2), n, "unexpected length of written data")
 
-		time.Sleep(10 * time.Millisecond)
-		br.Drop(0, 0, 2) // drop the second fragment of the first chunk (second chunk should be sacked)
 		flushBuffers(br, a0, a1)
+		assert.Equal(t, uint32(receiveBufferSize-fragmentedMessageSize), a0.RWND(), "abandoned fragments should not occupy receive-window credit")
 
 		rbuf := make([]byte, 2000)
+		require.NoError(t, s1.SetReadDeadline(time.Now().Add(time.Second)))
 		n, ppi, err := s1.ReadSCTP(rbuf)
-		assert.NoError(t, err, "ReadSCTP failed")
+		require.NoError(t, err, "ReadSCTP failed")
 
 		// should receive the second one only
 		assert.Equal(t, sbuf2, rbuf[:n], "unexpected received data")
 		assert.Equal(t, ppi, PayloadTypeWebRTCBinary, "unexpected ppi")
 
-		br.Process()
-
-		assert.False(t, s0.reassemblyQueue.isReadable(), "should no longer be readable")
-		assert.Equal(t, 0, len(s0.reassemblyQueue.unordered), "should be nothing in the unordered queue")
-		assert.Equal(t, 0, len(s0.reassemblyQueue.unorderedChunks), "should be nothing in the unorderedChunks list")
-		closeAssociationPair(br, a0, a1)
+		assert.Zero(t, s1.getNumBytesInReassemblyQueue())
 	})
 
 	t.Run("Timed ordered", func(t *testing.T) { // nolint:dupl
@@ -3164,6 +3164,150 @@ func TestCreateIForwardTSN(t *testing.T) {
 			},
 		}, fwdtsn.streams, "should report the highest MID per stream and ordering")
 	})
+}
+
+func TestAssociationForwardTSNBeforeStreamData(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		interleaving bool
+	}{
+		{name: "DATA"},
+		{name: "I-DATA", interleaving: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lim := test.TimeOut(10 * time.Second)
+			defer lim.Stop()
+
+			br := test.NewBridge()
+			sender, receiver, err := createNewAssociationPairWithInterleaving(br, ackModeNoDelay, 0, tc.interleaving, tc.interleaving)
+			require.NoError(t, err)
+			defer closeAssociationPair(br, sender, receiver)
+			sender.rtoMgr.setRTO(100, true)
+
+			outbound, err := sender.OpenStream(1, PayloadTypeWebRTCBinary)
+			require.NoError(t, err)
+			outbound.SetReliabilityParams(false, ReliabilityTypeRexmit, 0)
+			for _, msg := range []string{"first", "second"} {
+				br.DropNextNWrites(0, 1)
+				_, err = outbound.WriteSCTP([]byte(msg), PayloadTypeWebRTCBinary)
+				require.NoError(t, err)
+				flushBuffers(br, sender, receiver)
+			}
+			assert.Empty(t, receiver.acceptCh, "forwarding alone should not offer a stream")
+
+			outbound.SetReliabilityParams(false, ReliabilityTypeReliable, 0)
+			const message = "received"
+			_, err = outbound.WriteSCTP([]byte(message), PayloadTypeWebRTCBinary)
+			require.NoError(t, err)
+			flushBuffers(br, sender, receiver)
+
+			inbound, err := receiver.AcceptStream()
+			require.NoError(t, err)
+			require.NoError(t, inbound.SetReadDeadline(time.Now().Add(time.Second)))
+			buf := make([]byte, len(message))
+			n, ppid, err := inbound.ReadSCTP(buf)
+			require.NoError(t, err)
+			assert.Equal(t, message, string(buf[:n]))
+			assert.Equal(t, PayloadTypeWebRTCBinary, ppid)
+		})
+	}
+}
+
+func TestAssociationForwardTSNForUnopenedStream(t *testing.T) {
+	const (
+		resetSID    uint16 = 3
+		unopenedSID uint16 = 100
+		skipped            = 7
+	)
+
+	for _, tc := range []struct {
+		name         string
+		interleaving bool
+	}{
+		{name: "DATA"},
+		{name: "I-DATA", interleaving: true},
+	} {
+		// forward advances the cumulative TSN by one and skips through `skipped` on each stream.
+		forward := func(assoc *Association, identifiers ...uint16) {
+			newCumulativeTSN := assoc.peerLastTSN() + 1
+			if tc.interleaving {
+				chunk := &chunkIForwardTSN{newCumulativeTSN: newCumulativeTSN}
+				for _, identifier := range identifiers {
+					chunk.streams = append(chunk.streams, chunkIForwardTSNStream{
+						identifier: identifier, messageIdentifier: skipped,
+					})
+				}
+				assoc.handleIForwardTSN(chunk)
+
+				return
+			}
+			chunk := &chunkForwardTSN{newCumulativeTSN: newCumulativeTSN}
+			for _, identifier := range identifiers {
+				chunk.streams = append(chunk.streams, chunkForwardTSNStream{identifier: identifier, sequence: skipped})
+			}
+			assoc.handleForwardTSN(chunk)
+		}
+		nextSequence := func(stream *Stream) uint32 {
+			if tc.interleaving {
+				return stream.reassemblyQueue.nextMID
+			}
+
+			return uint32(stream.reassemblyQueue.nextSSN)
+		}
+		newAssociation := func(t *testing.T) *Association {
+			t.Helper()
+
+			assoc := createTestAssociation(t, Config{})
+			assoc.useForwardTSN = !tc.interleaving
+			assoc.useIForwardTSN = tc.interleaving
+			assoc.lock.Lock()
+			t.Cleanup(assoc.lock.Unlock)
+
+			return assoc
+		}
+
+		t.Run(tc.name+" above the peer's inbound stream count", func(t *testing.T) {
+			assoc := newAssociation(t)
+			// The peer can send on more streams than it accepts.
+			assoc.myMaxNumInboundStreams = 16
+
+			forward(assoc, unopenedSID)
+
+			stream := assoc.getOrCreateStream(unopenedSID, false, PayloadTypeWebRTCBinary)
+			require.NotNil(t, stream)
+			assert.Equal(t, uint32(skipped+1), nextSequence(stream))
+		})
+
+		t.Run(tc.name+" repeated after an inbound reset", func(t *testing.T) {
+			assoc := newAssociation(t)
+			require.NotNil(t, assoc.createStream(resetSID, false))
+
+			forward(assoc, resetSID)
+			resetRequest := &paramOutgoingResetRequest{
+				reconfigRequestSequenceNumber: 1,
+				senderLastTSN:                 assoc.peerLastTSN(),
+				streamIdentifiers:             []uint16{resetSID},
+			}
+			require.NotNil(t, assoc.resetStreamsIfAny(resetRequest))
+			require.NotContains(t, assoc.streams, resetSID)
+
+			// The peer missed the SACK, so its next FORWARD-TSN repeats the
+			// entry for the stream it has since reset.
+			forward(assoc, resetSID, unopenedSID)
+
+			recreated := assoc.getOrCreateStream(resetSID, false, PayloadTypeWebRTCBinary)
+			require.NotNil(t, recreated)
+			assert.Zero(t, nextSequence(recreated), "an entry from before the reset should not skip new messages")
+
+			unopened := assoc.getOrCreateStream(unopenedSID, false, PayloadTypeWebRTCBinary)
+			require.NotNil(t, unopened)
+			assert.Equal(t, uint32(skipped+1), nextSequence(unopened))
+
+			// Once the stream exists again, later entries apply to it as usual.
+			forward(assoc, resetSID)
+			assert.Equal(t, uint32(skipped+1), nextSequence(recreated))
+		})
+	}
 }
 
 func TestHandleForwardTSN(t *testing.T) {
@@ -4541,10 +4685,16 @@ func TestAssocResetResetsInterleavingCounters(t *testing.T) {
 	})
 
 	t.Run("inbound reset removes stream so recreated stream starts from zero", func(t *testing.T) {
-		const si uint16 = 1
+		const (
+			si            uint16 = 1
+			unopenedSID   uint16 = 2
+			unaffectedSID uint16 = 3
+		)
 		assoc := &Association{
 			payloadQueue:        newReceivePayloadQueue(64),
 			streams:             map[uint16]*Stream{},
+			pendingInboundSSNs:  map[uint16]uint16{unopenedSID: 5, unaffectedSID: 3},
+			pendingInboundMIDs:  map[uint16]uint32{unopenedSID: 9, unaffectedSID: 4},
 			reconfigRequests:    map[uint32]*paramOutgoingResetRequest{},
 			log:                 logging.NewDefaultLoggerFactory().NewLogger("sctp-test"),
 			sourcePort:          5000,
@@ -4563,7 +4713,7 @@ func TestAssocResetResetsInterleavingCounters(t *testing.T) {
 		resetRequest := &paramOutgoingResetRequest{
 			reconfigRequestSequenceNumber: 1,
 			senderLastTSN:                 0,
-			streamIdentifiers:             []uint16{si},
+			streamIdentifiers:             []uint16{si, unopenedSID},
 		}
 		assoc.reconfigRequests[resetRequest.reconfigRequestSequenceNumber] = resetRequest
 
@@ -4572,6 +4722,9 @@ func TestAssocResetResetsInterleavingCounters(t *testing.T) {
 		assoc.lock.Unlock()
 		require.NotNil(t, resp)
 		require.NotContains(t, assoc.streams, si, "inbound reset should remove the visible stream")
+		assert.Equal(t, map[uint16]uint16{unaffectedSID: 3}, assoc.pendingInboundSSNs)
+		assert.Equal(t, map[uint16]uint32{unaffectedSID: 4}, assoc.pendingInboundMIDs)
+		assert.Equal(t, map[uint16]struct{}{si: {}, unopenedSID: {}}, assoc.resetInboundStreams)
 
 		stream.lock.RLock()
 		assert.Equal(t, io.EOF, stream.readErr, "inbound reset should close reads on the old stream")

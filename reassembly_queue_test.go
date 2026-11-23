@@ -5,9 +5,13 @@ package sctp
 
 import (
 	"io"
+	"math"
+	"math/rand/v2"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestReassemblyQueue(t *testing.T) { //nolint:maintidx,cyclop
@@ -329,11 +333,11 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx,cyclop
 		assert.Equal(t, 2, rq.getNumBytes(), "num bytes mismatch")
 	})
 
-	t.Run("detect buffer too short", func(t *testing.T) {
-		rq := newReassemblyQueue(0, 0)
+	t.Run("ignore ordered fragment duplicates through a short read", func(t *testing.T) {
+		rq := newReassemblyQueue(0, 3)
 		orgPpi := PayloadTypeWebRTCBinary
 
-		for _, chunk := range []*chunkPayloadData{
+		chunks := []*chunkPayloadData{
 			{
 				payloadType:          orgPpi,
 				beginningFragment:    true,
@@ -354,8 +358,15 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx,cyclop
 				streamSequenceNumber: 0,
 				userData:             []byte("789"),
 			},
-		} {
-			rq.push(chunk)
+		}
+		for i, chunk := range chunks {
+			complete, err := rq.pushWithError(chunk)
+			require.NoError(t, err)
+			assert.Equal(t, i == len(chunks)-1, complete)
+
+			complete, err = rq.pushWithError(chunk)
+			require.NoError(t, err)
+			assert.False(t, complete, "ignore duplicate fragments")
 		}
 
 		assert.Equal(t, 10, rq.getNumBytes())
@@ -366,11 +377,21 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx,cyclop
 		assert.Equal(t, PayloadTypeUnknown, ppi)
 		assert.Equal(t, 10, n)
 
+		complete, err := rq.pushWithError(chunks[0])
+		require.NoError(t, err, "ignore a duplicate at the descriptor cap after a short read")
+		assert.False(t, complete)
+		assert.Equal(t, 10, rq.getNumBytes())
+
 		buf = make([]byte, n)
 		n, ppi, err = rq.read(buf)
 		assert.NoError(t, err)
 		assert.Equal(t, orgPpi, ppi)
 		assert.Equal(t, 10, n)
+		assert.Equal(t, "0123456789", string(buf))
+		assert.Equal(t, 0, rq.getNumBytes())
+		assert.Empty(t, rq.orderedIndex)
+		_, _, err = rq.read(buf)
+		assert.ErrorIs(t, err, errTryAgain)
 	})
 
 	t.Run("forwardTSN for ordered fragments", func(t *testing.T) {
@@ -383,13 +404,19 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx,cyclop
 		var ssnComplete uint16 = 5
 		var ssnDropped uint16 = 6
 
-		chunk = &chunkPayloadData{
+		assert.False(t, rq.push(&chunkPayloadData{
 			payloadType:          orgPpi,
 			beginningFragment:    true,
+			tsn:                  9,
+			streamSequenceNumber: ssnComplete,
+			userData:             []byte("1"),
+		}))
+		chunk = &chunkPayloadData{
+			payloadType:          orgPpi,
 			endingFragment:       true,
 			tsn:                  10,
 			streamSequenceNumber: ssnComplete,
-			userData:             []byte("123"),
+			userData:             []byte("23"),
 		}
 
 		complete = rq.push(chunk)
@@ -419,10 +446,20 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx,cyclop
 		assert.False(t, complete, "chunk set should not be complete yet")
 		assert.Equal(t, 9, rq.getNumBytes(), "num bytes mismatch")
 
+		sets := rq.ordered
 		rq.forwardTSNForOrdered(ssnDropped)
 
 		assert.Equal(t, 1, len(rq.ordered), "there should be one chunk left")
 		assert.Equal(t, 3, rq.getNumBytes(), "num bytes mismatch")
+		assert.Nil(t, sets[1], "the backing array should release the abandoned set")
+		assert.NotContains(t, rq.orderedIndex, ssnDropped)
+		assert.Contains(t, rq.orderedIndex, ssnComplete)
+
+		buf := make([]byte, 3)
+		_, _, err := rq.read(buf)
+		require.NoError(t, err)
+		assert.Equal(t, "123", string(buf))
+		assert.Empty(t, rq.orderedIndex)
 	})
 
 	t.Run("forwardTSN for unordered fragments", func(t *testing.T) {
@@ -475,11 +512,15 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx,cyclop
 
 		// At this point, there are 3 chunks in the rq.unorderedChunks.
 		// This call should remove chunks with tsn equals to 13 or older.
+		pending := rq.unorderedChunks
 		rq.forwardTSNForUnordered(13)
 
 		// As a result, there should be one chunk (tsn=14)
 		assert.Equal(t, 1, len(rq.unorderedChunks), "there should be one chunk kept")
 		assert.Equal(t, 3, rq.getNumBytes(), "num bytes mismatch")
+		assert.Nil(t, pending[0])
+		assert.Nil(t, pending[1])
+		assert.Equal(t, map[uint32]struct{}{14: {}}, rq.unorderedIndex)
 	})
 
 	t.Run("fragmented and unfragmented chunks with the same ssn", func(t *testing.T) {
@@ -1357,31 +1398,111 @@ func TestReassemblyQueue(t *testing.T) { //nolint:maintidx,cyclop
 	})
 }
 
+func TestReassemblyQueueFragmentedDataPPID(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		unordered bool
+	}{
+		{name: "ordered"},
+		{name: "unordered", unordered: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rq := newReassemblyQueue(0, 0)
+			begin := &chunkPayloadData{
+				unordered:         tc.unordered,
+				beginningFragment: true,
+				tsn:               math.MaxUint32,
+				payloadType:       PayloadTypeWebRTCBinary,
+				userData:          []byte("hello "),
+			}
+			end := &chunkPayloadData{
+				unordered:      tc.unordered,
+				endingFragment: true,
+				tsn:            0,
+				payloadType:    PayloadTypeWebRTCString,
+				userData:       []byte("world"),
+			}
+
+			assert.False(t, rq.push(end))
+			assert.False(t, rq.push(end), "ignore a duplicate before completion")
+			assert.Equal(t, len(end.userData), rq.getNumBytes())
+			require.True(t, rq.push(begin))
+
+			buf := make([]byte, len("hello world"))
+			n, ppid, err := rq.read(buf)
+			require.NoError(t, err)
+			assert.Equal(t, "hello world", string(buf[:n]))
+			assert.Equal(t, begin.payloadType, ppid)
+			assert.Equal(t, 0, rq.getNumBytes())
+			assert.Empty(t, rq.orderedIndex)
+			assert.Empty(t, rq.unorderedIndex)
+			_, _, err = rq.read(buf)
+			assert.ErrorIs(t, err, errTryAgain)
+		})
+	}
+}
+
+func TestReassemblyQueueOrderedSSNWrap(t *testing.T) {
+	rq := newReassemblyQueue(0, 0)
+	rq.nextSSN = math.MaxUint16
+
+	assert.False(t, rq.push(&chunkPayloadData{
+		endingFragment: true,
+		tsn:            4,
+		userData:       []byte("ter"),
+	}))
+	assert.True(t, rq.push(&chunkPayloadData{
+		beginningFragment: true,
+		tsn:               3,
+		userData:          []byte("af"),
+	}))
+	assert.False(t, rq.isReadable(), "SSN 0 should wait for SSN 65535")
+
+	assert.False(t, rq.push(&chunkPayloadData{
+		streamSequenceNumber: math.MaxUint16,
+		endingFragment:       true,
+		tsn:                  2,
+		userData:             []byte("fore"),
+	}))
+	assert.True(t, rq.push(&chunkPayloadData{
+		unordered:            true,
+		streamSequenceNumber: math.MaxUint16,
+		beginningFragment:    true,
+		endingFragment:       true,
+		tsn:                  5,
+		userData:             []byte("unordered"),
+	}))
+
+	buf := make([]byte, 16)
+	n, _, err := rq.read(buf)
+	require.NoError(t, err)
+	assert.Equal(t, "unordered", string(buf[:n]))
+	assert.Equal(t, uint16(math.MaxUint16), rq.nextSSN)
+
+	require.True(t, rq.push(&chunkPayloadData{
+		streamSequenceNumber: math.MaxUint16,
+		beginningFragment:    true,
+		tsn:                  1,
+		userData:             []byte("be"),
+	}))
+	for _, want := range []string{"before", "after"} {
+		n, _, err = rq.read(buf)
+		require.NoError(t, err)
+		assert.Equal(t, want, string(buf[:n]))
+	}
+	assert.Equal(t, uint16(1), rq.nextSSN)
+	assert.Equal(t, 0, rq.getNumBytes())
+	assert.Empty(t, rq.orderedIndex)
+}
+
 func TestChunkSet(t *testing.T) {
 	t.Run("Empty chunkSet", func(t *testing.T) {
-		cset := newChunkSet(0, 0)
+		cset := &chunkSet{}
 		assert.False(t, cset.isComplete(), "empty chunkSet cannot be complete")
-	})
-
-	t.Run("Push dup chunks to chunkSet", func(t *testing.T) {
-		cset := newChunkSet(0, 0)
-		cset.push(&chunkPayloadData{
-			tsn:               100,
-			beginningFragment: true,
-		})
-		complete := cset.push(&chunkPayloadData{
-			tsn:            100,
-			endingFragment: true,
-		})
-		assert.False(t, complete, "chunk with dup TSN is not complete")
-		nChunks := len(cset.chunks)
-		assert.Equal(t, 1, nChunks, "chunk with dup TSN should be ignored")
 	})
 
 	t.Run("Incomplete chunkSet: no beginning", func(t *testing.T) {
 		cset := &chunkSet{
-			ssn:    0,
-			ppi:    0,
 			chunks: []*chunkPayloadData{{}},
 		}
 		assert.False(t, cset.isComplete(), "chunkSet not starting with B=1 cannot be complete")
@@ -1389,8 +1510,6 @@ func TestChunkSet(t *testing.T) {
 
 	t.Run("Incomplete chunkSet: no contiguous tsn", func(t *testing.T) {
 		cset := &chunkSet{
-			ssn: 0,
-			ppi: 0,
 			chunks: []*chunkPayloadData{
 				{
 					tsn:               100,
@@ -1407,4 +1526,83 @@ func TestChunkSet(t *testing.T) {
 		}
 		assert.False(t, cset.isComplete(), "chunkSet not starting with incontiguous tsn cannot be complete")
 	})
+}
+
+func BenchmarkReassemblyQueueDATA(b *testing.B) {
+	for _, workload := range []struct {
+		name      string
+		messages  uint16
+		fragments uint16
+	}{
+		{name: "one-message", messages: 1, fragments: 4},
+		{name: "large-message", messages: 1, fragments: 256},
+		{name: "backlog", messages: 256, fragments: 4},
+	} {
+		b.Run(workload.name, func(b *testing.B) {
+			b.Run("ordered", func(b *testing.B) {
+				benchmarkReassemblyQueueDATA(b, workload.messages, workload.fragments, false)
+			})
+			b.Run("unordered", func(b *testing.B) {
+				benchmarkReassemblyQueueDATA(b, workload.messages, workload.fragments, true)
+			})
+		})
+	}
+}
+
+func benchmarkReassemblyQueueDATA(b *testing.B, messages, fragments uint16, unordered bool) {
+	b.Helper()
+
+	const fragmentSize = 128
+	data := make([]byte, fragmentSize)
+	chunks := make([]*chunkPayloadData, 0, int(messages)*int(fragments))
+	var tsn uint32
+	for ssn := range messages {
+		for fragment := range fragments {
+			chunks = append(chunks, &chunkPayloadData{
+				tsn:                  tsn,
+				streamSequenceNumber: ssn,
+				unordered:            unordered,
+				beginningFragment:    fragment == 0,
+				endingFragment:       fragment == fragments-1,
+				payloadType:          PayloadTypeWebRTCBinary,
+				userData:             data,
+			})
+			tsn++
+		}
+	}
+
+	reverse := slices.Clone(chunks)
+	slices.Reverse(reverse)
+	shuffled := slices.Clone(chunks)
+	random := rand.New(rand.NewPCG(0, 1)) //nolint:gosec // Deterministic benchmark input.
+	random.Shuffle(len(shuffled), func(i, j int) {
+		shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
+	})
+
+	for _, arrival := range []struct {
+		name   string
+		chunks []*chunkPayloadData
+	}{
+		{name: "in-order", chunks: chunks},
+		{name: "reverse", chunks: reverse},
+		{name: "random", chunks: shuffled},
+	} {
+		b.Run(arrival.name, func(b *testing.B) {
+			buf := make([]byte, int(fragments)*fragmentSize)
+			b.ReportAllocs()
+			b.SetBytes(int64(len(buf)) * int64(messages))
+			for b.Loop() {
+				rq := newReassemblyQueue(0, 0)
+				for _, chunk := range arrival.chunks {
+					rq.push(chunk)
+				}
+				for range messages {
+					n, _, err := rq.read(buf)
+					if err != nil || n != len(buf) {
+						b.Fatalf("read %d bytes, want %d, error %v", n, len(buf), err)
+					}
+				}
+			}
+		})
+	}
 }
