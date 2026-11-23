@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func testChunkReconfigResponce() []byte {
@@ -82,120 +83,49 @@ func TestReconfigResultString(t *testing.T) {
 }
 
 func TestParamReconfigResponse_OptionalFields(t *testing.T) {
-	type tc struct {
-		name                string
-		raw                 []byte
-		wantRSN             uint32
-		wantResult          reconfigResult
-		wantSenderPresent   bool
-		wantSender          uint32
-		wantReceiverPresent bool
-		wantReceiver        uint32
-		wantParamHeaderLen  int
+	withTSNs := []byte{
+		0x00, 0x10, 0x00, 0x14, // type and parameter length
+		0x00, 0x00, 0x00, 0x07, // response sequence number
+		0x00, 0x00, 0x00, 0x01, // result
+		0xA1, 0xB2, 0xC3, 0xD4, // sender's next TSN
+		0x0A, 0x0B, 0x0C, 0x0D, // receiver's next TSN
 	}
 
-	// build a parameter with optional fields.
-	build := func(rsn uint32, res reconfigResult, sender *uint32, receiver *uint32) []byte {
-		// +4 if sender and +4 if receiver)
-		valLen := 8
-		if sender != nil {
-			valLen += 4
-		}
+	var response paramReconfigResponse
+	_, err := response.unmarshal(withTSNs)
+	require.NoError(t, err)
+	assert.Equal(t, reconfigResp, response.typ)
+	assert.Equal(t, 20, response.length())
+	assert.Equal(t, withTSNs[4:], response.raw)
+	assert.Equal(t, uint32(7), response.reconfigResponseSequenceNumber)
+	assert.Equal(t, reconfigResultSuccessPerformed, response.result)
+	assert.True(t, response.senderNextTSNPresent)
+	assert.Equal(t, uint32(0xA1B2C3D4), response.senderNextTSN)
+	assert.True(t, response.receiverNextTSNPresent)
+	assert.Equal(t, uint32(0x0A0B0C0D), response.receiverNextTSN)
 
-		if receiver != nil {
-			valLen += 4
-		}
+	out, err := response.marshal()
+	require.NoError(t, err)
+	assert.Equal(t, withTSNs, out)
 
-		total := 4 + valLen // header + value
-		b := make([]byte, total)
+	withoutTSNs := testChunkReconfigResponce()
+	_, err = response.unmarshal(withoutTSNs)
+	require.NoError(t, err)
+	assert.False(t, response.senderNextTSNPresent)
+	assert.Zero(t, response.senderNextTSN)
+	assert.False(t, response.receiverNextTSNPresent)
+	assert.Zero(t, response.receiverNextTSN)
 
-		// header
-		binary.BigEndian.PutUint16(b[0:], uint16(reconfigResp))
-		binary.BigEndian.PutUint16(b[2:], uint16(total)) //nolint:gosec
-
-		// value
-		binary.BigEndian.PutUint32(b[4:], rsn)
-		binary.BigEndian.PutUint32(b[8:], uint32(res))
-
-		off := 12
-		if sender != nil {
-			binary.BigEndian.PutUint32(b[off:], *sender)
-			off += 4
-		}
-
-		if receiver != nil {
-			binary.BigEndian.PutUint32(b[off:], *receiver)
-		}
-
-		return b
-	}
-
-	senderOnly := uint32(0x01020304)
-	bothSender := uint32(0xA1B2C3D4)
-	bothReceiver := uint32(0x0A0B0C0D)
-
-	tests := []tc{
-		{
-			name:                "sender_next_only",
-			raw:                 build(0x0000002A, reconfigResultErrorWrongSSN, &senderOnly, nil),
-			wantRSN:             0x0000002A,
-			wantResult:          reconfigResultErrorWrongSSN,
-			wantSenderPresent:   true,
-			wantSender:          senderOnly,
-			wantReceiverPresent: false,
-			wantParamHeaderLen:  16, // 4 (hdr) + 12 (value)
-		},
-		{
-			name:                "sender_and_receiver_next",
-			raw:                 build(0x00000007, reconfigResultSuccessPerformed, &bothSender, &bothReceiver),
-			wantRSN:             0x00000007,
-			wantResult:          reconfigResultSuccessPerformed,
-			wantSenderPresent:   true,
-			wantSender:          bothSender,
-			wantReceiverPresent: true,
-			wantReceiver:        bothReceiver,
-			wantParamHeaderLen:  20, // 4 (hdr) + 16 (value)
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var param paramReconfigResponse
-
-			_, err := param.unmarshal(tt.raw)
-			assert.NoError(t, err)
-
-			assert.Equal(t, reconfigResp, param.paramHeader.typ)
-			assert.Equal(t, tt.wantParamHeaderLen, param.paramHeader.len)
-			// param.paramHeader.raw should equal just the value part
-			assert.Equal(t, tt.raw[4:], param.paramHeader.raw)
-
-			assert.Equal(t, tt.wantRSN, param.reconfigResponseSequenceNumber)
-			assert.Equal(t, tt.wantResult, param.result)
-			assert.Equal(t, tt.wantSenderPresent, param.senderNextTSNPresent)
-
-			if tt.wantSenderPresent {
-				assert.Equal(t, tt.wantSender, param.senderNextTSN)
-			}
-
-			assert.Equal(t, tt.wantReceiverPresent, param.receiverNextTSNPresent)
-
-			if tt.wantReceiverPresent {
-				assert.Equal(t, tt.wantReceiver, param.receiverNextTSN)
-			}
-
-			out, err := param.marshal()
-			assert.NoError(t, err)
-			assert.Equal(t, tt.raw, out)
-		})
-	}
+	out, err = response.marshal()
+	require.NoError(t, err)
+	assert.Equal(t, withoutTSNs, out)
 }
 
 func TestParamReconfigResponse_OptionalFields_Roundtrip(t *testing.T) {
 	tcs := []struct {
 		name   string
 		input  paramReconfigResponse
-		valLen int // value length excluding the 4-byte header (8/12/16)
+		valLen int // value length excluding the 4-byte header (8 or 16)
 	}{
 		{
 			name: "NoOptionals",
@@ -204,16 +134,6 @@ func TestParamReconfigResponse_OptionalFields_Roundtrip(t *testing.T) {
 				result:                         reconfigResultSuccessPerformed,
 			},
 			valLen: 8,
-		},
-		{
-			name: "SenderOnly",
-			input: paramReconfigResponse{
-				reconfigResponseSequenceNumber: 0x0B,
-				result:                         reconfigResultDenied,
-				senderNextTSNPresent:           true,
-				senderNextTSN:                  0x12345678,
-			},
-			valLen: 12,
 		},
 		{
 			name: "SenderAndReceiver",
@@ -232,8 +152,8 @@ func TestParamReconfigResponse_OptionalFields_Roundtrip(t *testing.T) {
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
 			b, err := tc.input.marshal()
-			assert.NoError(t, err)
-			assert.GreaterOrEqual(t, len(b), 4)
+			require.NoError(t, err)
+			require.GreaterOrEqual(t, len(b), 4)
 
 			pt := binary.BigEndian.Uint16(b[0:2])
 			pl := binary.BigEndian.Uint16(b[2:4])
@@ -245,9 +165,9 @@ func TestParamReconfigResponse_OptionalFields_Roundtrip(t *testing.T) {
 			var out paramReconfigResponse
 			p, err := out.unmarshal(b)
 
-			assert.NoError(t, err)
+			require.NoError(t, err)
 			got, ok := p.(*paramReconfigResponse)
-			assert.True(t, ok, "expected *paramReconfigResponse, got %T", p)
+			require.True(t, ok, "expected *paramReconfigResponse, got %T", p)
 
 			assert.Equal(t, tc.input.reconfigResponseSequenceNumber, got.reconfigResponseSequenceNumber)
 			assert.Equal(t, tc.input.result, got.result)
@@ -263,40 +183,48 @@ func TestParamReconfigResponse_OptionalFields_Roundtrip(t *testing.T) {
 	}
 }
 
-func TestParamReconfigResponse_Marshal_OrderingGuard(t *testing.T) {
-	// receiver present without sender present must fail
-	r := paramReconfigResponse{
-		reconfigResponseSequenceNumber: 1,
-		result:                         reconfigResultSuccessPerformed,
-		receiverNextTSNPresent:         true,
-		receiverNextTSN:                7,
+func TestParamReconfigResponse_Marshal_RejectsSingleTSN(t *testing.T) {
+	tests := []struct {
+		name            string
+		senderPresent   bool
+		receiverPresent bool
+	}{
+		{name: "SenderOnly", senderPresent: true},
+		{name: "ReceiverOnly", receiverPresent: true},
 	}
 
-	_, err := r.marshal()
-	assert.Error(t, err)
-	assert.ErrorIs(t, err, ErrReconfigRespParamInvalidCombo)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			response := paramReconfigResponse{
+				senderNextTSNPresent:   tt.senderPresent,
+				receiverNextTSNPresent: tt.receiverPresent,
+			}
+			_, err := response.marshal()
+			assert.ErrorIs(t, err, ErrReconfigRespParamInvalidCombo)
+		})
+	}
 }
 
 func TestParamReconfigResponse_Unmarshal_InvalidLengths(t *testing.T) {
-	// too short
-	badShort := make([]byte, 10)
-	binary.BigEndian.PutUint16(badShort[0:], uint16(reconfigResp))
-	binary.BigEndian.PutUint16(badShort[2:], uint16(10))
+	tests := []struct {
+		name    string
+		length  uint16
+		wantErr error
+	}{
+		{"TooShort", 10, ErrReconfigRespParamTooShort},
+		{"PartialTSN", 14, ErrReconfigRespParamInvalidLength},
+		{"SenderOnly", 16, ErrReconfigRespParamInvalidLength},
+		{"TooLong", 24, ErrReconfigRespParamInvalidLength},
+	}
 
-	var a paramReconfigResponse
-	_, err := a.unmarshal(badShort)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := make([]byte, tt.length)
+			binary.BigEndian.PutUint16(raw, uint16(reconfigResp))
+			binary.BigEndian.PutUint16(raw[2:], tt.length)
 
-	assert.Error(t, err)
-	assert.ErrorIs(t, err, ErrReconfigRespParamTooShort)
-
-	// invalid value length
-	badLen := make([]byte, 14)
-	binary.BigEndian.PutUint16(badLen[0:], uint16(reconfigResp))
-	binary.BigEndian.PutUint16(badLen[2:], uint16(14))
-
-	var b paramReconfigResponse
-	_, err = b.unmarshal(badLen)
-
-	assert.Error(t, err)
-	assert.ErrorIs(t, err, ErrReconfigRespParamInvalidLength)
+			_, err := buildParam(reconfigResp, raw)
+			assert.ErrorIs(t, err, tt.wantErr)
+		})
+	}
 }

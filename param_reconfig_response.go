@@ -37,7 +37,7 @@ type paramReconfigResponse struct {
 	// This value describes the result of the processing of the request.
 	result reconfigResult
 
-	// Optional fields (RFC 6525).
+	// These optional fields must be present together (RFC 6525, Section 4.4).
 	senderNextTSNPresent   bool
 	senderNextTSN          uint32
 	receiverNextTSNPresent bool
@@ -60,7 +60,7 @@ const (
 var (
 	ErrReconfigRespParamTooShort      = errors.New("reconfig response parameter too short")
 	ErrReconfigRespParamInvalidLength = errors.New("reconfig response parameter invalid length")
-	ErrReconfigRespParamInvalidCombo  = errors.New("receiverNextTSN present requires senderNextTSN present")
+	ErrReconfigRespParamInvalidCombo  = errors.New("sender and receiver next TSNs must be present together")
 )
 
 func (t reconfigResult) String() string {
@@ -85,63 +85,54 @@ func (t reconfigResult) String() string {
 }
 
 func (r *paramReconfigResponse) marshal() ([]byte, error) {
-	r.typ = reconfigResp
-
-	// Enforce ordering: receiverNextTSN can only be present if senderNextTSN is present.
-	if r.receiverNextTSNPresent && !r.senderNextTSNPresent {
+	if r.senderNextTSNPresent != r.receiverNextTSNPresent {
 		return nil, ErrReconfigRespParamInvalidCombo
 	}
 
 	valueLen := 8
 	if r.senderNextTSNPresent {
-		valueLen += 4
-	}
-	if r.receiverNextTSNPresent {
-		valueLen += 4
+		valueLen = 16
 	}
 
+	r.typ = reconfigResp
 	r.raw = make([]byte, valueLen)
-	binary.BigEndian.PutUint32(r.raw[0:], r.reconfigResponseSequenceNumber)
+	binary.BigEndian.PutUint32(r.raw, r.reconfigResponseSequenceNumber)
 	binary.BigEndian.PutUint32(r.raw[4:], uint32(r.result))
 
-	off := 8
 	if r.senderNextTSNPresent {
-		binary.BigEndian.PutUint32(r.raw[off:], r.senderNextTSN)
-		off += 4
-	}
-
-	if r.receiverNextTSNPresent {
-		binary.BigEndian.PutUint32(r.raw[off:], r.receiverNextTSN)
+		binary.BigEndian.PutUint32(r.raw[8:], r.senderNextTSN)
+		binary.BigEndian.PutUint32(r.raw[12:], r.receiverNextTSN)
 	}
 
 	return r.paramHeader.marshal()
 }
 
 func (r *paramReconfigResponse) unmarshal(raw []byte) (param, error) {
-	if err := r.paramHeader.unmarshal(raw); err != nil {
+	var header paramHeader
+	if err := header.unmarshal(raw); err != nil {
 		return nil, err
 	}
 
-	if len(r.raw) < 8 {
+	if len(header.raw) < 8 {
 		return nil, ErrReconfigRespParamTooShort
 	}
 
-	switch len(r.raw) {
-	case 8, 12, 16:
+	switch len(header.raw) {
+	case 8, 16:
 	default:
 		return nil, ErrReconfigRespParamInvalidLength
 	}
 
-	r.reconfigResponseSequenceNumber = binary.BigEndian.Uint32(r.raw)
-	r.result = reconfigResult(binary.BigEndian.Uint32(r.raw[4:]))
-
-	// Optional fields: Sender's Next TSN, Receiver's Next TSN.
-	if len(r.raw) >= 12 {
-		r.senderNextTSNPresent = true
-		r.senderNextTSN = binary.BigEndian.Uint32(r.raw[8:])
+	// Replace the previous response to clear any optional fields when reusing it.
+	*r = paramReconfigResponse{
+		paramHeader:                    header,
+		reconfigResponseSequenceNumber: binary.BigEndian.Uint32(header.raw),
+		result:                         reconfigResult(binary.BigEndian.Uint32(header.raw[4:])),
 	}
 
 	if len(r.raw) == 16 {
+		r.senderNextTSNPresent = true
+		r.senderNextTSN = binary.BigEndian.Uint32(r.raw[8:])
 		r.receiverNextTSNPresent = true
 		r.receiverNextTSN = binary.BigEndian.Uint32(r.raw[12:])
 	}
