@@ -6190,7 +6190,9 @@ func TestAssociation_HandlePacketInCookieWaitState(t *testing.T) {
 			inputPacket: &packet{
 				sourcePort:      1,
 				destinationPort: 1,
-				chunks:          []chunk{&chunkError{}},
+				chunks: []chunk{&chunkError{
+					errorCauses: []errorCause{&errorCauseUnrecognizedChunkType{}},
+				}},
 			},
 		},
 		"Shutdown": {

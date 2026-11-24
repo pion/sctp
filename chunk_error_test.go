@@ -114,3 +114,11 @@ func TestChunkErrorPadding(t *testing.T) {
 		assert.ErrorIs(t, (&chunkError{}).unmarshal(raw), ErrErrorCauseLengthInvalid)
 	})
 }
+
+func TestChunkErrorNoCauses(t *testing.T) {
+	_, err := (&chunkError{}).marshal()
+	assert.ErrorIs(t, err, ErrErrorNoCauses)
+
+	raw := []byte{byte(ctError), 0x00, 0x00, 0x04}
+	assert.ErrorIs(t, (&chunkError{}).unmarshal(raw), ErrErrorNoCauses)
+}

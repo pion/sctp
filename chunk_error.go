@@ -83,14 +83,14 @@ func (a *chunkError) unmarshal(raw []byte) error { //nolint:cyclop
 		}
 	}
 
-	if len(a.errorCauses) == 0 {
-		return ErrErrorNoCauses
-	}
-
 	return nil
 }
 
 func (a *chunkError) marshal() ([]byte, error) {
+	if len(a.errorCauses) == 0 {
+		return nil, ErrErrorNoCauses
+	}
+
 	out := make([]byte, 0)
 	for i, ec := range a.errorCauses {
 		raw, err := ec.marshal()
