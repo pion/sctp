@@ -10,32 +10,39 @@ import (
 
 // https://www.rfc-editor.org/rfc/rfc6525#section-3.1
 // chunkReconfig represents an SCTP Chunk used to reconfigure streams.
+// It holds at least one parameter and at most two parameters.
 //
 //  0                   1                   2                   3
 //  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-// |   Type=130    |  Chunk Flags  |        Chunk Length           |
+// | Type = 130    |  Chunk Flags  |      Chunk Length             |
 // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 // \                                                               \
-// /                 Re-configuration Parameter(s)                 /
-// \                     (one or more TLVs)                        /
+// /                  Re-configuration Parameter                   /
+// \                                                               \
+// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+// \                                                               \
+// /             Re-configuration Parameter (optional)             /
+// \                                                               \
 // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 
 type chunkReconfig struct {
 	chunkHeader
 	paramA param
 	paramB param
-	// Additional TLVs (RFC 6525 allows multiple).
-	extras []param
 }
 
 // Reconfigure chunk errors.
 var (
-	ErrChunkParseParamTypeFailed             = errors.New("failed to parse param type")
-	ErrChunkMarshalParamAReconfigFailed      = errors.New("unable to marshal parameter A for reconfig")
-	ErrChunkMarshalParamBReconfigFailed      = errors.New("unable to marshal parameter B for reconfig")
-	ErrChunkMarshalParamExtrasReconfigFailed = errors.New("unable to marshal parameter extras for reconfig")
+	ErrChunkParseParamTypeFailed        = errors.New("failed to parse param type")
+	ErrChunkMarshalParamAReconfigFailed = errors.New("unable to marshal parameter A for reconfig")
+	ErrChunkMarshalParamBReconfigFailed = errors.New("unable to marshal parameter B for reconfig")
+	ErrChunkReconfigMissingParam        = errors.New("RE-CONFIG chunk is missing its first parameter")
+	ErrChunkReconfigTooManyParams       = errors.New("RE-CONFIG chunk holds more than two parameters")
 )
+
+// reconfigMaxParams is the most parameters a RE-CONFIG chunk may hold.
+const reconfigMaxParams = 2
 
 func (c *chunkReconfig) unmarshal(raw []byte) error {
 	if err := c.chunkHeader.unmarshal(raw); err != nil {
@@ -44,85 +51,64 @@ func (c *chunkReconfig) unmarshal(raw []byte) error {
 
 	c.paramA = nil
 	c.paramB = nil
-	c.extras = nil
-
-	data := c.raw
-	// RFC 6525 requires one or more TLVs inside RE-CONFIG.
-	// If there's nothing after the chunk header then fail.
-	if len(data) < 4 { // need at least a param header (type,len)
-		return fmt.Errorf("%w: empty RECONFIG body", ErrChunkParseParamTypeFailed)
-	}
 
 	offset := 0
-	idx := 0
+	for count := 0; offset < len(c.raw); count++ {
+		if count == reconfigMaxParams {
+			return ErrChunkReconfigTooManyParams
+		}
 
-	for offset < len(data) {
 		// Ensure we have a complete TLV header before parsing.
-		if len(data)-offset < 4 {
+		if len(c.raw)-offset < paramHeaderLength {
 			return fmt.Errorf("%w: truncated param header", ErrChunkParseParamTypeFailed)
 		}
 
-		pType, err := parseParamType(data[offset:])
+		pType, err := parseParamType(c.raw[offset:])
 		if err != nil {
 			return fmt.Errorf("%w: %w", ErrChunkParseParamTypeFailed, err)
 		}
 
-		par, err := buildParam(pType, data[offset:])
+		par, err := buildParam(pType, c.raw[offset:])
 		if err != nil {
 			return err
 		}
 
-		switch idx {
-		case 0:
+		if count == 0 {
 			c.paramA = par
-		case 1:
+		} else {
 			c.paramB = par
-		default:
-			c.extras = append(c.extras, par)
 		}
-		idx++
 
 		l := par.length()
 		offset += l + getPadding(l)
+	}
+
+	if c.paramA == nil {
+		return ErrChunkReconfigMissingParam
 	}
 
 	return nil
 }
 
 func (c *chunkReconfig) marshal() ([]byte, error) {
-	var list []param
+	var out []byte
 	if c.paramA != nil {
-		list = append(list, c.paramA)
-	}
-
-	if c.paramB != nil {
-		list = append(list, c.paramB)
-	}
-
-	if len(c.extras) > 0 {
-		list = append(list, c.extras...)
-	}
-
-	out := make([]byte, 0)
-	for i, p := range list {
-		b, err := p.marshal()
+		var err error
+		out, err = c.paramA.marshal()
 		if err != nil {
-			// Preserve legacy error types for API stability.
-			if i == 0 {
-				return nil, fmt.Errorf("%w: %w", ErrChunkMarshalParamAReconfigFailed, err)
-			}
-
-			if i == 1 {
-				return nil, fmt.Errorf("%w: %w", ErrChunkMarshalParamBReconfigFailed, err)
-			}
-
-			return nil, fmt.Errorf("%w: %w", ErrChunkMarshalParamExtrasReconfigFailed, err)
+			return nil, fmt.Errorf("%w: %w", ErrChunkMarshalParamAReconfigFailed, err)
 		}
-		out = append(out, b...)
-		// Pad between TLVs (no need to pad after the last one)
-		if i != len(list)-1 {
-			out = padByte(out, getPadding(len(b)))
+	}
+	if c.paramB != nil {
+		// Pad param A
+		out = padByte(out, getPadding(len(out)))
+
+		outB, err := c.paramB.marshal()
+		if err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrChunkMarshalParamBReconfigFailed, err)
 		}
+
+		out = append(out, outB...)
 	}
 
 	c.typ = ctReconfig
@@ -138,25 +124,10 @@ func (c *chunkReconfig) check() (abort bool, err error) {
 
 // String makes chunkReconfig printable.
 func (c *chunkReconfig) String() string {
-	switch {
-	case c.paramA == nil && c.paramB == nil && len(c.extras) == 0:
-		return "RECONFIG: <no params>"
-	default:
-		res := "RECONFIG params:\n"
-		i := 0
-		if c.paramA != nil {
-			res += fmt.Sprintf("  [%d] %s\n", i, c.paramA)
-			i++
-		}
-		if c.paramB != nil {
-			res += fmt.Sprintf("  [%d] %s\n", i, c.paramB)
-			i++
-		}
-		for _, p := range c.extras {
-			res += fmt.Sprintf("  [%d] %s\n", i, p)
-			i++
-		}
-
-		return res
+	res := fmt.Sprintf("Param A:\n %s", c.paramA)
+	if c.paramB != nil {
+		res += fmt.Sprintf("Param B:\n %s", c.paramB)
 	}
+
+	return res
 }

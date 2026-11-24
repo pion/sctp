@@ -43,19 +43,38 @@ func TestChunkReconfigUnmarshal_Failure(t *testing.T) {
 	tt := []struct {
 		name   string
 		binary []byte
+		err    error
 	}{
-		{"chunk header to short", []byte{0x82}},
-		{"missing parse param type (A)", []byte{0x82, 0x0, 0x0, 0x4}},
-		{"wrong param (A)", []byte{0x82, 0x0, 0x0, 0x8, 0x0, 0xd, 0x0, 0x0}},
+		{"chunk header to short", []byte{0x82}, nil},
+		{"no parameters", []byte{0x82, 0x0, 0x0, 0x4}, ErrChunkReconfigMissingParam},
+		{"wrong param (A)", []byte{0x82, 0x0, 0x0, 0x8, 0x0, 0xd, 0x0, 0x0}, nil},
 		{
 			"wrong param (B)",
 			append(append([]byte{0x82, 0x0, 0x0, 0x18}, testChunkReconfigParamB()...), []byte{0x0, 0xd, 0x0, 0x0}...),
+			nil,
+		},
+		{
+			"truncated param header (B)",
+			append(append([]byte{0x82, 0x0, 0x0, 0x12}, testChunkReconfigResponce()...), []byte{0x0, 0x10}...),
+			ErrChunkParseParamTypeFailed,
+		},
+		{
+			"three parameters",
+			append(append(append([]byte{0x82, 0x0, 0x0, 0x28},
+				testChunkReconfigResponce()...), testChunkReconfigResponce()...), testChunkReconfigResponce()...),
+			ErrChunkReconfigTooManyParams,
 		},
 	}
 
-	for i, tc := range tt {
-		actual := &chunkReconfig{}
-		err := actual.unmarshal(tc.binary)
-		assert.Errorf(t, err, "expected unmarshal #%d: '%s' to fail.", i, tc.name)
+	for _, tc := range tt {
+		t.Run(tc.name, func(t *testing.T) {
+			actual := &chunkReconfig{}
+			err := actual.unmarshal(tc.binary)
+			if tc.err != nil {
+				assert.ErrorIs(t, err, tc.err)
+			} else {
+				assert.Error(t, err)
+			}
+		})
 	}
 }
