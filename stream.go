@@ -57,6 +57,9 @@ var (
 )
 
 // Stream represents an SCTP stream.
+//
+// A Stream must not be copied. Keep the *Stream returned by
+// [Association.OpenStream] or [Association.AcceptStream].
 type Stream struct {
 	associationGeneration uint64
 
