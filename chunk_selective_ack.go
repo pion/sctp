@@ -103,7 +103,7 @@ func (s *chunkSelectiveAck) unmarshal(raw []byte) error { //nolint:cyclop
 	blocks := make([]gapAckBlock, nGap)
 	var prevEnd uint16
 
-	for i := 0; i < nGap; i++ {
+	for i := range blocks {
 		start := binary.BigEndian.Uint16(s.raw[offset:])
 		end := binary.BigEndian.Uint16(s.raw[offset+2:])
 		offset += 4
@@ -123,7 +123,7 @@ func (s *chunkSelectiveAck) unmarshal(raw []byte) error { //nolint:cyclop
 	s.gapAckBlocks = blocks
 	s.duplicateTSN = make([]uint32, nDup)
 
-	for i := 0; i < nDup; i++ {
+	for i := range s.duplicateTSN {
 		s.duplicateTSN[i] = binary.BigEndian.Uint32(s.raw[offset:])
 		offset += 4
 	}
