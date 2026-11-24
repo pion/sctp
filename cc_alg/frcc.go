@@ -363,7 +363,7 @@ func (frcc *FRCC) shouldProbe() bool {
 func (frcc *FRCC) getProbeExcess() uint32 {
 	param := &frcc.Param
 
-	targetFlowCount := frcc.getTargetFlowCount()
+	targetFlowCount := max(frcc.getTargetFlowCount(), 1.0)
 	excess := param.ProbeMultiplier * targetFlowCount
 	excess *= float32(int64(frcc.RoundData.MaxRate) * param.UBRTTErr.Microseconds())
 	t1 := uint64(excess)
