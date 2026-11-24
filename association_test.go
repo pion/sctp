@@ -8508,3 +8508,119 @@ func TestAssociation_StreamWriteRacingCloseIsNotQueuedAfterReset(t *testing.T) {
 	require.NoError(t, a2.Close())
 	<-acceptDone
 }
+
+func TestAssociationHandleReconfig_InvalidCombination(t *testing.T) {
+	assoc := createTestAssociation(t, Config{})
+	assoc.setState(established)
+	t.Cleanup(assoc.closeAllTimers)
+
+	assoc.lock.Lock()
+	assoc.createStream(1, false)
+	peerLastTSN := assoc.peerLastTSN()
+	assoc.lock.Unlock()
+
+	// Two Outgoing SSN Reset Requests is not an allowed combination
+	// (RFC 6525 Section 3.1). Either request alone would reset stream 1.
+	reconfig := &chunkReconfig{
+		paramA: &paramOutgoingResetRequest{
+			reconfigRequestSequenceNumber: 1,
+			senderLastTSN:                 peerLastTSN,
+			streamIdentifiers:             []uint16{1},
+		},
+		paramB: &paramOutgoingResetRequest{
+			reconfigRequestSequenceNumber: 2,
+			senderLastTSN:                 peerLastTSN,
+			streamIdentifiers:             []uint16{1},
+		},
+	}
+	require.NoError(t, assoc.handleChunk(&packet{chunks: []chunk{reconfig}}, reconfig))
+
+	assoc.lock.RLock()
+	assert.Contains(t, assoc.streams, uint16(1), "rejected RE-CONFIG must not reset streams")
+	assert.Empty(t, assoc.reconfigRequests, "rejected RE-CONFIG must not record requests")
+	assoc.lock.RUnlock()
+
+	rawPackets, ok := assoc.gatherOutbound()
+	require.True(t, ok)
+	require.Len(t, rawPackets, 1)
+
+	pkt := &packet{}
+	require.NoError(t, pkt.unmarshal(false, rawPackets[0]))
+	require.Len(t, pkt.chunks, 1)
+	errChunk, ok := pkt.chunks[0].(*chunkError)
+	require.True(t, ok, "expected ERROR chunk, got %T", pkt.chunks[0])
+	require.Len(t, errChunk.errorCauses, 1)
+	assert.Equal(t, protocolViolation, errChunk.errorCauses[0].errorCauseCode())
+}
+
+func TestAssociationHandleReconfig_ResponseAndRequest(t *testing.T) {
+	newResponse := func() *paramReconfigResponse {
+		return &paramReconfigResponse{
+			reconfigResponseSequenceNumber: 7,
+			result:                         reconfigResultSuccessPerformed,
+		}
+	}
+	newRequest := func(peerLastTSN uint32) *paramOutgoingResetRequest {
+		return &paramOutgoingResetRequest{
+			reconfigRequestSequenceNumber: 1,
+			senderLastTSN:                 peerLastTSN,
+			streamIdentifiers:             []uint16{1},
+		}
+	}
+
+	for name, build := range map[string]func(peerLastTSN uint32) *chunkReconfig{
+		"response, request": func(peerLastTSN uint32) *chunkReconfig {
+			return &chunkReconfig{paramA: newResponse(), paramB: newRequest(peerLastTSN)}
+		},
+		"request, response": func(peerLastTSN uint32) *chunkReconfig {
+			return &chunkReconfig{paramA: newRequest(peerLastTSN), paramB: newResponse()}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			assoc := createTestAssociation(t, Config{})
+			assoc.setState(established)
+			t.Cleanup(assoc.closeAllTimers)
+
+			assoc.lock.Lock()
+			defer assoc.lock.Unlock()
+
+			assoc.createStream(1, false)
+			assoc.reconfigs[7] = &chunkReconfig{paramA: &paramOutgoingResetRequest{reconfigRequestSequenceNumber: 7}}
+
+			packets, err := assoc.handleReconfig(build(assoc.peerLastTSN()))
+			require.NoError(t, err)
+
+			assert.NotContains(t, assoc.reconfigs, uint32(7), "response must complete our request")
+			assert.NotContains(t, assoc.streams, uint16(1), "request must reset the peer's stream")
+
+			require.Len(t, packets, 1)
+			require.Len(t, packets[0].chunks, 1)
+			reply, ok := packets[0].chunks[0].(*chunkReconfig)
+			require.True(t, ok)
+			resp, ok := reply.paramA.(*paramReconfigResponse)
+			require.True(t, ok)
+			assert.Equal(t, uint32(1), resp.reconfigResponseSequenceNumber)
+			assert.Equal(t, reconfigResultSuccessPerformed, resp.result)
+		})
+	}
+}
+
+func TestAssociationHandleReconfig_TwoResponses(t *testing.T) {
+	assoc := createTestAssociation(t, Config{})
+	assoc.setState(established)
+	t.Cleanup(assoc.closeAllTimers)
+
+	assoc.lock.Lock()
+	defer assoc.lock.Unlock()
+
+	assoc.reconfigs[7] = &chunkReconfig{paramA: &paramOutgoingResetRequest{reconfigRequestSequenceNumber: 7}}
+	assoc.reconfigs[8] = &chunkReconfig{paramA: &paramOutgoingResetRequest{reconfigRequestSequenceNumber: 8}}
+
+	packets, err := assoc.handleReconfig(&chunkReconfig{
+		paramA: &paramReconfigResponse{reconfigResponseSequenceNumber: 7, result: reconfigResultSuccessPerformed},
+		paramB: &paramReconfigResponse{reconfigResponseSequenceNumber: 8, result: reconfigResultSuccessPerformed},
+	})
+	require.NoError(t, err)
+	assert.Empty(t, packets)
+	assert.Empty(t, assoc.reconfigs)
+}

@@ -3718,6 +3718,21 @@ func (a *Association) createPacket(cs []chunk) *packet {
 func (a *Association) handleReconfig(reconfigChunk *chunkReconfig) ([]*packet, error) {
 	a.log.Tracef("[%s] handleReconfig", a.name)
 
+	// RFC 6525 Section 3.1:
+	//   If a sender transmits an unsupported combination, the receiver SHOULD
+	//   send an ERROR chunk with a Protocol Violation cause.
+	// Validate before handling any parameter so that a rejected chunk leaves
+	// the association untouched.
+	if err := reconfigChunk.validateCombination(); err != nil {
+		a.log.Warnf("[%s] rejecting RE-CONFIG chunk: %v", a.name, err)
+
+		return []*packet{a.createPacket([]chunk{&chunkError{
+			errorCauses: []errorCause{&errorCauseProtocolViolation{
+				additionalInformation: []byte(ErrChunkReconfigInvalidCombination.Error()),
+			}},
+		}})}, nil
+	}
+
 	pp := make([]*packet, 0)
 
 	pkt, err := a.handleReconfigParam(reconfigChunk.paramA)
