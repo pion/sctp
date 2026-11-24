@@ -131,25 +131,11 @@ func (s *chunkSelectiveAck) unmarshal(raw []byte) error { //nolint:cyclop
 	return nil
 }
 
-func (s *chunkSelectiveAck) marshal() ([]byte, error) { //nolint:cyclop
-	// validate strictly increasing, non-overlapping (contiguous is ok)
-	var prevEnd uint16
-	for i, g := range s.gapAckBlocks {
-		if g.start == 0 || g.end < g.start {
-			return nil, ErrSackGapBlockInvalidRange
-		}
-
-		if i > 0 && g.start <= prevEnd {
-			return nil, ErrSackGapBlocksNotMonotonic
-		}
-
-		prevEnd = g.end
-	}
-
+func (s *chunkSelectiveAck) marshal() ([]byte, error) {
 	sackRaw := make([]byte, selectiveAckHeaderSize+(4*len(s.gapAckBlocks))+(4*len(s.duplicateTSN)))
 	offset := selectiveAckHeaderSize
 
-	prevEnd = 0
+	var prevEnd uint16
 	for i, g := range s.gapAckBlocks {
 		if g.start == 0 || g.end < g.start {
 			return nil, ErrSackGapBlockInvalidRange
