@@ -78,3 +78,15 @@ func TestChunkReconfigUnmarshal_Failure(t *testing.T) {
 		})
 	}
 }
+
+func TestChunkReconfigMarshal_MissingParam(t *testing.T) {
+	for name, c := range map[string]*chunkReconfig{
+		"no parameters":    {},
+		"only parameter B": {paramB: &paramReconfigResponse{}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := c.marshal()
+			assert.ErrorIs(t, err, ErrChunkReconfigMissingParam)
+		})
+	}
+}

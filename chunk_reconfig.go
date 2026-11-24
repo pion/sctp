@@ -91,13 +91,13 @@ func (c *chunkReconfig) unmarshal(raw []byte) error {
 }
 
 func (c *chunkReconfig) marshal() ([]byte, error) {
-	var out []byte
-	if c.paramA != nil {
-		var err error
-		out, err = c.paramA.marshal()
-		if err != nil {
-			return nil, fmt.Errorf("%w: %w", ErrChunkMarshalParamAReconfigFailed, err)
-		}
+	if c.paramA == nil {
+		return nil, ErrChunkReconfigMissingParam
+	}
+
+	out, err := c.paramA.marshal()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrChunkMarshalParamAReconfigFailed, err)
 	}
 	if c.paramB != nil {
 		// Pad param A
