@@ -30,7 +30,6 @@ var (
 	ErrErrorNoCauses           = errors.New("ERROR chunk contains no error causes")
 	ErrErrorCauseTooShort      = errors.New("remaining bytes smaller than error cause header")
 	ErrErrorCauseLengthInvalid = errors.New("error cause length invalid or exceeds remaining bytes")
-	ErrErrorTrailingNonZero    = errors.New("non-zero trailing bytes after last error cause")
 )
 
 func (a *chunkError) unmarshal(raw []byte) error { //nolint:cyclop
@@ -75,21 +74,11 @@ func (a *chunkError) unmarshal(raw []byte) error { //nolint:cyclop
 		a.errorCauses = append(a.errorCauses, ec)
 		offset += clen
 
-		// skip inter-cause padding to 4-byte boundary.
-		if offset < len(body) { //nolint:nestif
-			pad := getPadding(clen)
-
-			if pad != 0 {
-				if offset+pad > len(body) {
-					// not enough bytes for declared padding.
-					return ErrErrorCauseLengthInvalid
-				}
-
-				// padding must be all zeros.
-				if !allZero(body[offset : offset+pad]) {
-					return ErrErrorTrailingNonZero
-				}
-				offset += pad
+		// Skip alignment padding without interpreting its contents.
+		if offset < len(body) {
+			offset += getPadding(clen)
+			if offset > len(body) {
+				return ErrErrorCauseLengthInvalid
 			}
 		}
 	}

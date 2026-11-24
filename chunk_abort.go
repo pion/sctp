@@ -30,7 +30,6 @@ var (
 	// Stricter parsing.
 	ErrAbortCauseTooShort      = errors.New("remaining bytes smaller than error cause header")
 	ErrAbortCauseLengthInvalid = errors.New("error cause length invalid or exceeds remaining bytes")
-	ErrAbortTrailingNonZero    = errors.New("non-zero trailing bytes after last error cause")
 )
 
 func (a *chunkAbort) unmarshal(raw []byte) error { //nolint:cyclop
@@ -68,18 +67,11 @@ func (a *chunkAbort) unmarshal(raw []byte) error { //nolint:cyclop
 		a.errorCauses = append(a.errorCauses, e)
 		offset += clen
 
-		// 4-byte inter-cause padding (not after last)
-		if offset < len(body) { //nolint:nestif
-			pad := getPadding(clen)
-			if pad != 0 {
-				if offset+pad > len(body) {
-					return ErrAbortCauseLengthInvalid
-				}
-
-				if !allZero(body[offset : offset+pad]) {
-					return ErrAbortTrailingNonZero
-				}
-				offset += pad
+		// Skip alignment padding without interpreting its contents.
+		if offset < len(body) {
+			offset += getPadding(clen)
+			if offset > len(body) {
+				return ErrAbortCauseLengthInvalid
 			}
 		}
 	}

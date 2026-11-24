@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestErrorCauseValidation(t *testing.T) {
@@ -71,5 +72,45 @@ func TestChunkErrorUnrecognizedChunkType(t *testing.T) {
 		raw, err := ec.marshal()
 		assert.Nil(t, err, "marshal should succeed")
 		assert.True(t, reflect.DeepEqual(raw, expected), "unexpected serialization result")
+	})
+}
+
+func TestChunkErrorPadding(t *testing.T) {
+	t.Run("non-zero padding between causes is ignored", func(t *testing.T) {
+		raw := []byte{
+			byte(ctError), 0x00, 0x00, 0x10, // chunk header: type, flags, length=16
+			0xFF, 0xFF, 0x00, 0x05, 0xAA, // cause: code=0xFFFF, length=5, value=0xAA
+			0x01, 0x02, 0x03, // padding, not zeroed by the sender
+			0x00, 0x0D, 0x00, 0x04, // cause: protocolViolation, length=4
+		}
+
+		c := &chunkError{}
+		require.NoError(t, c.unmarshal(raw))
+		require.Len(t, c.errorCauses, 2)
+		assert.Equal(t, errorCauseCode(0xFFFF), c.errorCauses[0].errorCauseCode())
+		assert.Equal(t, protocolViolation, c.errorCauses[1].errorCauseCode())
+	})
+
+	t.Run("non-zero padding after the last cause is ignored", func(t *testing.T) {
+		raw := []byte{
+			byte(ctError), 0x00, 0x00, 0x0C, // chunk header: type, flags, length=12
+			0xFF, 0xFF, 0x00, 0x05, 0xAA, // cause: code=0xFFFF, length=5, value=0xAA
+			0x01, 0x02, 0x03, // padding counted in the chunk length
+		}
+
+		c := &chunkError{}
+		require.NoError(t, c.unmarshal(raw))
+		require.Len(t, c.errorCauses, 1)
+	})
+
+	t.Run("truncated padding between causes is rejected", func(t *testing.T) {
+		raw := []byte{
+			byte(ctError), 0x00, 0x00, 0x0B, // chunk header: type, flags, length=11
+			0xFF, 0xFF, 0x00, 0x05, 0xAA, // cause: code=0xFFFF, length=5, value=0xAA
+			0x01, 0x02, // only 2 of 3 padding bytes
+			0x00, // chunk padding, outside the chunk length
+		}
+
+		assert.ErrorIs(t, (&chunkError{}).unmarshal(raw), ErrErrorCauseLengthInvalid)
 	})
 }
