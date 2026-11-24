@@ -52,6 +52,7 @@ func (c *chunkShutdownAck) unmarshal(raw []byte) error {
 
 func (c *chunkShutdownAck) marshal() ([]byte, error) {
 	c.typ = ctShutdownAck
+	c.flags = 0 // set to 0 on transmit (RFC 9260 section 3.3.9)
 	c.raw = nil // no value/parameters per RFC 9260 section 3.3.9
 
 	return c.chunkHeader.marshal()

@@ -52,7 +52,8 @@ func (c *chunkShutdownComplete) unmarshal(raw []byte) error {
 
 func (c *chunkShutdownComplete) marshal() ([]byte, error) {
 	c.typ = ctShutdownComplete
-	c.raw = nil // no value/parameters per RFC 9260 section 3.3.13
+	c.flags &= 0x01 // keep only the T bit; reserved bits are set to 0 on transmit (RFC 9260 section 3.3.13)
+	c.raw = nil     // no value/parameters per RFC 9260 section 3.3.13
 
 	return c.chunkHeader.marshal()
 }

@@ -15,10 +15,11 @@ func TestChunkShutdownAck_Success(t *testing.T) {
 	tt := []struct {
 		name   string
 		binary []byte
+		want   []byte // expected marshal output
 	}{
-		{"no-flags", []byte{0x08, 0x00, 0x00, 0x04}},
-		// Reserved flags are not defined for SHUTDOWN-ACK; receiver should ignore them.
-		{"flags-set", []byte{0x08, 0x01, 0x00, 0x04}},
+		{"no-flags", []byte{0x08, 0x00, 0x00, 0x04}, []byte{0x08, 0x00, 0x00, 0x04}},
+		// RFC 9260 section 3.3.9: flags are ignored on receipt and set to 0 on transmit.
+		{"flags-set", []byte{0x08, 0x01, 0x00, 0x04}, []byte{0x08, 0x00, 0x00, 0x04}},
 	}
 
 	for i, tc := range tt {
@@ -28,7 +29,7 @@ func TestChunkShutdownAck_Success(t *testing.T) {
 
 		b, err := actual.marshal()
 		require.NoError(t, err)
-		assert.Equalf(t, tc.binary, b, "test %d (%s) roundtrip mismatch", i, tc.name)
+		assert.Equalf(t, tc.want, b, "test %d (%s) marshal mismatch", i, tc.name)
 	}
 }
 
