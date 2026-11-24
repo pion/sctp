@@ -13,9 +13,15 @@ import (
 
 func TestChunkShutdownComplete_Success(t *testing.T) {
 	tt := []struct {
+		name   string
 		binary []byte
+		want   []byte // expected marshal output
 	}{
-		{[]byte{0x0e, 0x00, 0x00, 0x04}},
+		{"no-flags", []byte{0x0e, 0x00, 0x00, 0x04}, []byte{0x0e, 0x00, 0x00, 0x04}},
+		{"t-bit-set", []byte{0x0e, 0x01, 0x00, 0x04}, []byte{0x0e, 0x01, 0x00, 0x04}},
+		// RFC 9260 section 3.3.13: reserved bits are ignored on receipt and set to 0
+		// on transmit; only the T bit is preserved.
+		{"reserved-bits-set", []byte{0x0e, 0xFF, 0x00, 0x04}, []byte{0x0e, 0x01, 0x00, 0x04}},
 	}
 
 	for i, tc := range tt {
@@ -25,7 +31,7 @@ func TestChunkShutdownComplete_Success(t *testing.T) {
 
 		b, err := actual.marshal()
 		require.NoError(t, err)
-		assert.Equalf(t, tc.binary, b, "test %d not equal", i)
+		assert.Equalf(t, tc.want, b, "test %d (%s) marshal mismatch", i, tc.name)
 	}
 }
 
@@ -33,15 +39,19 @@ func TestChunkShutdownComplete_Failure(t *testing.T) { //nolint:dupl
 	tt := []struct {
 		name   string
 		binary []byte
+		err    error
 	}{
-		{"length too short", []byte{0x0e, 0x00, 0x00}},
-		{"length too long", []byte{0x0e, 0x00, 0x00, 0x04, 0x12}},
-		{"invalid type", []byte{0x0f, 0x00, 0x00, 0x04}},
+		// Not enough bytes to even contain the 4-byte header
+		{"length too short", []byte{0x0e, 0x00, 0x00}, ErrChunkHeaderTooSmall},
+		// Wrong type
+		{"invalid type", []byte{0x0f, 0x00, 0x00, 0x04}, ErrChunkTypeNotShutdownComplete},
+		// SHUTDOWN-COMPLETE has no parameters
+		{"unexpected value", []byte{0x0e, 0x00, 0x00, 0x08, 0, 0, 0, 0}, ErrInvalidChunkSize},
 	}
 
 	for i, tc := range tt {
 		actual := &chunkShutdownComplete{}
 		err := actual.unmarshal(tc.binary)
-		require.Errorf(t, err, "expected unmarshal #%d: '%s' to fail.", i, tc.name)
+		require.ErrorIsf(t, err, tc.err, "expected unmarshal #%d: '%s' to fail.", i, tc.name)
 	}
 }

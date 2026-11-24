@@ -13,19 +13,23 @@ import (
 
 func TestChunkShutdownAck_Success(t *testing.T) {
 	tt := []struct {
+		name   string
 		binary []byte
+		want   []byte // expected marshal output
 	}{
-		{[]byte{0x08, 0x00, 0x00, 0x04}},
+		{"no-flags", []byte{0x08, 0x00, 0x00, 0x04}, []byte{0x08, 0x00, 0x00, 0x04}},
+		// RFC 9260 section 3.3.9: flags are ignored on receipt and set to 0 on transmit.
+		{"flags-set", []byte{0x08, 0x01, 0x00, 0x04}, []byte{0x08, 0x00, 0x00, 0x04}},
 	}
 
 	for i, tc := range tt {
 		actual := &chunkShutdownAck{}
 		err := actual.unmarshal(tc.binary)
-		require.NoErrorf(t, err, "failed to unmarshal #%d", i)
+		require.NoErrorf(t, err, "failed to unmarshal #%d (%s)", i, tc.name)
 
 		b, err := actual.marshal()
 		require.NoError(t, err)
-		assert.Equalf(t, tc.binary, b, "test %d not equal", i)
+		assert.Equalf(t, tc.want, b, "test %d (%s) marshal mismatch", i, tc.name)
 	}
 }
 
@@ -33,15 +37,16 @@ func TestChunkShutdownAck_Failure(t *testing.T) {
 	tt := []struct {
 		name   string
 		binary []byte
+		err    error
 	}{
-		{"length too short", []byte{0x08, 0x00, 0x00}},
-		{"length too long", []byte{0x08, 0x00, 0x00, 0x04, 0x12}},
-		{"invalid type", []byte{0x0f, 0x00, 0x00, 0x04}},
+		{"length too short", []byte{0x08, 0x00, 0x00}, ErrChunkHeaderTooSmall},
+		{"invalid type", []byte{0x0f, 0x00, 0x00, 0x04}, ErrChunkTypeNotShutdownAck},
+		{"unexpected value", []byte{0x08, 0x00, 0x00, 0x08, 0, 0, 0, 0}, ErrInvalidChunkSize},
 	}
 
 	for i, tc := range tt {
 		actual := &chunkShutdownAck{}
 		err := actual.unmarshal(tc.binary)
-		assert.Errorf(t, err, "expected unmarshal #%d: '%s' to fail.", i, tc.name)
+		assert.ErrorIsf(t, err, tc.err, "expected unmarshal #%d: '%s' to fail.", i, tc.name)
 	}
 }

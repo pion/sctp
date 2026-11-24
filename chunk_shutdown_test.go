@@ -27,15 +27,29 @@ func TestChunkShutdown_Success(t *testing.T) {
 	}
 }
 
+func TestChunkShutdown_NonZeroFlagsIgnored(t *testing.T) {
+	// RFC 9260 section 3.3.8: flags are ignored on receipt and set to 0 on transmit.
+	actual := &chunkShutdown{}
+	err := actual.unmarshal([]byte{0x07, 0xFF, 0x00, 0x08, 0x12, 0x34, 0x56, 0x78})
+	assert.NoError(t, err)
+	assert.Equal(t, uint32(0x12345678), actual.cumulativeTSNAck)
+
+	b, err := actual.marshal()
+	assert.NoError(t, err)
+	assert.Equal(t, []byte{0x07, 0x00, 0x00, 0x08, 0x12, 0x34, 0x56, 0x78}, b)
+}
+
 func TestChunkShutdown_Failure(t *testing.T) {
 	tt := []struct {
 		name   string
 		binary []byte
 	}{
+		// Length field not equal to 8
 		{"length too short", []byte{0x07, 0x00, 0x00, 0x07, 0x12, 0x34, 0x56, 0x78}},
 		{"length too long", []byte{0x07, 0x00, 0x00, 0x09, 0x12, 0x34, 0x56, 0x78}},
+		// Advertised length 8 but only 7 bytes present (not enough space)
 		{"payload too short", []byte{0x07, 0x00, 0x00, 0x08, 0x12, 0x34, 0x56}},
-		{"payload too long", []byte{0x07, 0x00, 0x00, 0x08, 0x12, 0x34, 0x56, 0x78, 0x9f}},
+		// Wrong chunk type
 		{"invalid type", []byte{0x08, 0x00, 0x00, 0x08, 0x12, 0x34, 0x56, 0x78}},
 	}
 
