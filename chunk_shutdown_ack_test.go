@@ -37,14 +37,16 @@ func TestChunkShutdownAck_Failure(t *testing.T) {
 	tt := []struct {
 		name   string
 		binary []byte
+		err    error
 	}{
-		{"length too short", []byte{0x08, 0x00, 0x00}},
-		{"invalid type", []byte{0x0f, 0x00, 0x00, 0x04}},
+		{"length too short", []byte{0x08, 0x00, 0x00}, ErrChunkHeaderTooSmall},
+		{"invalid type", []byte{0x0f, 0x00, 0x00, 0x04}, ErrChunkTypeNotShutdownAck},
+		{"unexpected value", []byte{0x08, 0x00, 0x00, 0x08, 0, 0, 0, 0}, ErrInvalidChunkSize},
 	}
 
 	for i, tc := range tt {
 		actual := &chunkShutdownAck{}
 		err := actual.unmarshal(tc.binary)
-		assert.Errorf(t, err, "expected unmarshal #%d: '%s' to fail.", i, tc.name)
+		assert.ErrorIsf(t, err, tc.err, "expected unmarshal #%d: '%s' to fail.", i, tc.name)
 	}
 }

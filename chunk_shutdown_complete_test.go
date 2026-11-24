@@ -39,16 +39,19 @@ func TestChunkShutdownComplete_Failure(t *testing.T) { //nolint:dupl
 	tt := []struct {
 		name   string
 		binary []byte
+		err    error
 	}{
 		// Not enough bytes to even contain the 4-byte header
-		{"length too short", []byte{0x0e, 0x00, 0x00}},
+		{"length too short", []byte{0x0e, 0x00, 0x00}, ErrChunkHeaderTooSmall},
 		// Wrong type
-		{"invalid type", []byte{0x0f, 0x00, 0x00, 0x04}},
+		{"invalid type", []byte{0x0f, 0x00, 0x00, 0x04}, ErrChunkTypeNotShutdownComplete},
+		// SHUTDOWN-COMPLETE has no parameters
+		{"unexpected value", []byte{0x0e, 0x00, 0x00, 0x08, 0, 0, 0, 0}, ErrInvalidChunkSize},
 	}
 
 	for i, tc := range tt {
 		actual := &chunkShutdownComplete{}
 		err := actual.unmarshal(tc.binary)
-		require.Errorf(t, err, "expected unmarshal #%d: '%s' to fail.", i, tc.name)
+		require.ErrorIsf(t, err, tc.err, "expected unmarshal #%d: '%s' to fail.", i, tc.name)
 	}
 }
