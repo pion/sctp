@@ -11,31 +11,40 @@ import (
 
 func TestChunkReconfig_Success(t *testing.T) {
 	tt := []struct {
+		name   string
 		binary []byte
 	}{
 		{
 			// Note: chunk trailing padding is added in packet.marshal
-			append([]byte{0x82, 0x0, 0x0, 0x1a}, testChunkReconfigParamA()...),
+			"outgoing reset request", append([]byte{0x82, 0x0, 0x0, 0x1a}, testChunkReconfigParamA()...),
 		},
-		{append([]byte{0x82, 0x0, 0x0, 0x14}, testChunkReconfigParamB()...)},
-		{append([]byte{0x82, 0x0, 0x0, 0x10}, testChunkReconfigResponce()...)},
+		{"outgoing reset request (no padding)", append([]byte{0x82, 0x0, 0x0, 0x14}, testChunkReconfigParamB()...)},
+		{"response", append([]byte{0x82, 0x0, 0x0, 0x10}, testChunkReconfigResponce()...)},
 		{
-			append(append([]byte{0x82, 0x0, 0x0, 0x2c}, padByte(testChunkReconfigParamA(), 2)...), testChunkReconfigParamB()...),
+			"outgoing reset request, response",
+			append(append([]byte{0x82, 0x0, 0x0, 0x28}, padByte(testChunkReconfigParamA(), 2)...), testChunkReconfigResponce()...),
 		},
 		{
 			// Note: chunk trailing padding is added in packet.marshal
-			append(append([]byte{0x82, 0x0, 0x0, 0x2a}, testChunkReconfigParamB()...), testChunkReconfigParamA()...),
+			"response, outgoing reset request",
+			append(append([]byte{0x82, 0x0, 0x0, 0x26}, testChunkReconfigResponce()...), testChunkReconfigParamA()...),
+		},
+		{
+			"response, response",
+			append(append([]byte{0x82, 0x0, 0x0, 0x1c}, testChunkReconfigResponce()...), testChunkReconfigResponce()...),
 		},
 	}
 
-	for i, tc := range tt {
-		actual := &chunkReconfig{}
-		err := actual.unmarshal(tc.binary)
-		assert.NoErrorf(t, err, "failed to unmarshal #%d: %v", i)
+	for _, tc := range tt {
+		t.Run(tc.name, func(t *testing.T) {
+			actual := &chunkReconfig{}
+			assert.NoError(t, actual.unmarshal(tc.binary))
+			assert.NoError(t, actual.validateCombination())
 
-		b, err := actual.marshal()
-		assert.NoError(t, err)
-		assert.Equalf(t, tc.binary, b, "test %d not equal", i)
+			b, err := actual.marshal()
+			assert.NoError(t, err)
+			assert.Equal(t, tc.binary, b)
+		})
 	}
 }
 
@@ -87,6 +96,60 @@ func TestChunkReconfigMarshal_MissingParam(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			_, err := c.marshal()
 			assert.ErrorIs(t, err, ErrChunkReconfigMissingParam)
+		})
+	}
+}
+
+func TestChunkReconfigValidateCombination(t *testing.T) {
+	tt := []struct {
+		name  string
+		chunk *chunkReconfig
+		err   error
+	}{
+		{"outgoing reset request", &chunkReconfig{paramA: &paramOutgoingResetRequest{}}, nil},
+		{"response", &chunkReconfig{paramA: &paramReconfigResponse{}}, nil},
+		{
+			"outgoing reset request, response",
+			&chunkReconfig{paramA: &paramOutgoingResetRequest{}, paramB: &paramReconfigResponse{}},
+			nil,
+		},
+		{
+			"response, outgoing reset request",
+			&chunkReconfig{paramA: &paramReconfigResponse{}, paramB: &paramOutgoingResetRequest{}},
+			nil,
+		},
+		{
+			"response, response",
+			&chunkReconfig{paramA: &paramReconfigResponse{}, paramB: &paramReconfigResponse{}},
+			nil,
+		},
+		{"no parameters", &chunkReconfig{}, ErrChunkReconfigMissingParam},
+		{"only parameter B", &chunkReconfig{paramB: &paramReconfigResponse{}}, ErrChunkReconfigMissingParam},
+		{
+			"outgoing reset request, outgoing reset request",
+			&chunkReconfig{paramA: &paramOutgoingResetRequest{}, paramB: &paramOutgoingResetRequest{}},
+			ErrChunkReconfigInvalidCombination,
+		},
+		{
+			"non-reconfig parameter",
+			&chunkReconfig{paramA: &paramForwardTSNSupported{}},
+			ErrChunkReconfigInvalidCombination,
+		},
+		{
+			"response, non-reconfig parameter",
+			&chunkReconfig{paramA: &paramReconfigResponse{}, paramB: &paramForwardTSNSupported{}},
+			ErrChunkReconfigInvalidCombination,
+		},
+	}
+
+	for _, tc := range tt {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.chunk.validateCombination()
+			if tc.err != nil {
+				assert.ErrorIs(t, err, tc.err)
+			} else {
+				assert.NoError(t, err)
+			}
 		})
 	}
 }

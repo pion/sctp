@@ -39,6 +39,7 @@ var (
 	ErrChunkMarshalParamBReconfigFailed = errors.New("unable to marshal parameter B for reconfig")
 	ErrChunkReconfigMissingParam        = errors.New("RE-CONFIG chunk is missing its first parameter")
 	ErrChunkReconfigTooManyParams       = errors.New("RE-CONFIG chunk holds more than two parameters")
+	ErrChunkReconfigInvalidCombination  = errors.New("RE-CONFIG chunk holds an invalid parameter combination")
 )
 
 // reconfigMaxParams is the most parameters a RE-CONFIG chunk may hold.
@@ -118,8 +119,43 @@ func (c *chunkReconfig) marshal() ([]byte, error) {
 }
 
 func (c *chunkReconfig) check() (abort bool, err error) {
-	// Combinations/semantics are validated when handling individual params.
+	// Parameter combinations are validated by validateCombination in
+	// Association.handleReconfig, which answers an invalid combination with an
+	// ERROR chunk. Returning an error here would abort the association instead.
 	return true, nil
+}
+
+// validateCombination reports whether the parameters form one of the
+// combinations allowed by RFC 6525 Section 3.1. Only the Outgoing SSN Reset
+// Request and Re-configuration Response parameters are implemented, which
+// leaves these allowed combinations:
+//
+//   - Outgoing SSN Reset Request
+//   - Re-configuration Response
+//   - Re-configuration Response and Outgoing SSN Reset Request, in either order
+//   - Re-configuration Response and Re-configuration Response
+func (c *chunkReconfig) validateCombination() error {
+	if c.paramA == nil {
+		return ErrChunkReconfigMissingParam
+	}
+
+	requests := 0
+	for _, p := range []param{c.paramA, c.paramB} {
+		switch p.(type) {
+		case nil:
+		case *paramOutgoingResetRequest:
+			requests++
+		case *paramReconfigResponse:
+		default:
+			return fmt.Errorf("%w: unsupported parameter %T", ErrChunkReconfigInvalidCombination, p)
+		}
+	}
+
+	if requests > 1 {
+		return fmt.Errorf("%w: two Outgoing SSN Reset Requests", ErrChunkReconfigInvalidCombination)
+	}
+
+	return nil
 }
 
 // String makes chunkReconfig printable.
