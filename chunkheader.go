@@ -51,11 +51,14 @@ const (
 var (
 	ErrChunkHeaderTooSmall       = errors.New("raw is too small for a SCTP chunk")
 	ErrChunkHeaderNotEnoughSpace = errors.New("not enough data left in SCTP packet to satisfy requested length")
+	// ErrChunkHeaderPaddingNonZero is no longer returned.
+	//
+	// Deprecated: RFC 9260 section 3.2 requires the receiver to ignore padding bytes.
 	ErrChunkHeaderPaddingNonZero = errors.New("chunk padding is non-zero at offset")
 	ErrChunkHeaderInvalidLength  = errors.New("chunk length field smaller than header length")
 )
 
-func (c *chunkHeader) unmarshal(raw []byte) error { //nolint:cyclop
+func (c *chunkHeader) unmarshal(raw []byte) error {
 	if len(raw) < chunkHeaderSize {
 		return fmt.Errorf(
 			"%w: raw only %d bytes, %d is the minimum length",
@@ -80,18 +83,8 @@ func (c *chunkHeader) unmarshal(raw []byte) error { //nolint:cyclop
 	valueLength := int(length) - chunkHeaderSize
 	c.raw = raw[chunkHeaderSize : chunkHeaderSize+valueLength]
 
-	// Sender pads to a 4-byte boundary with zeros, receiver MUST ignore padding.
-	// If padding bytes are present in this slice, validate they are zero.
-	pad := int((4 - (length & 0x3)) & 0x3) // 0..3 bytes
-	remain := len(raw) - int(length)
-
-	if pad > 0 && remain > 0 {
-		for i := 0; i < min(remain, pad); i++ {
-			if raw[int(length)+i] != 0 {
-				return fmt.Errorf("%w: %d", ErrChunkHeaderPaddingNonZero, int(length)+i)
-			}
-		}
-	}
+	// RFC 9260 section 3.2: the receiver MUST ignore padding bytes, so their
+	// content is not inspected. packet.unmarshal skips over them.
 
 	return nil
 }

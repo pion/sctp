@@ -87,15 +87,16 @@ func TestChunkHeader_Unmarshal_PaddingZeroAccepted(t *testing.T) {
 	assert.Equal(t, value, ch.raw) // value only, padding ignored
 }
 
-func TestChunkHeader_Unmarshal_PaddingNonZeroError(t *testing.T) {
-	// Same as above, but corrupt first pad byte -> error
+func TestChunkHeader_Unmarshal_PaddingNonZeroIgnored(t *testing.T) {
+	// Same as above, but corrupt first pad byte. RFC 9260 section 3.2:
+	// the receiver MUST ignore the padding bytes.
 	value := []byte{0xAB}
 	raw := buildChunkBytes(t, ctAbort, 0x00, value, true, true, 0)
 
 	var ch chunkHeader
 	err := ch.unmarshal(raw)
-	assert.Error(t, err)
-	assert.ErrorIs(t, err, ErrChunkHeaderPaddingNonZero)
+	assert.NoError(t, err)
+	assert.Equal(t, value, ch.raw)
 }
 
 func TestChunkHeader_Unmarshal_NoPad_ExtraBytesIgnored(t *testing.T) {
@@ -128,7 +129,7 @@ func TestChunkHeader_Marshal_RoundTrip_NoPaddingInMarshal(t *testing.T) {
 	assert.Equal(t, uint16(6), binary.BigEndian.Uint16(out[2:]))
 	assert.Equal(t, []byte{0xDE, 0xAD}, out[4:])
 
-	// Unmarshal the exact bytes (remain=0, pad=2 -> not checked).
+	// Unmarshal the exact bytes (no padding present).
 	var ch chunkHeader
 	err = ch.unmarshal(out)
 	assert.NoError(t, err)
@@ -137,9 +138,8 @@ func TestChunkHeader_Marshal_RoundTrip_NoPaddingInMarshal(t *testing.T) {
 	assert.Equal(t, []byte{0xDE, 0xAD}, ch.raw)
 }
 
-func TestChunkHeader_Unmarshal_RemainLessThanPad_AllZerosOK(t *testing.T) {
+func TestChunkHeader_Unmarshal_RemainLessThanPad_OK(t *testing.T) {
 	// hlen=5 -> pad=3 but we only provide remain=2 bytes (common when slicing).
-	// Only the available 2 bytes are validated as zeros.
 	value := []byte{0x7F}
 	raw := buildChunkBytes(t, ctError, 0x00, value, true, false, 0)
 	// Trim to simulate slice that ends mid padding (remain=2 < pad=3)
