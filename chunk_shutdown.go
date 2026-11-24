@@ -10,10 +10,10 @@ import (
 )
 
 /*
-chunkShutdown represents an SCTP Chunk of type SHUTDOWN (Type = 7), per RFC 9260 sec 3.3.7.
+chunkShutdown represents an SCTP Chunk of type SHUTDOWN (Type = 7), per RFC 9260 sec 3.3.8.
 
 Each SHUTDOWN chunk has:
-  - Chunk Flags: MUST be 0
+  - Chunk Flags: set to 0 on transmit and ignored on receipt
   - Chunk Length: MUST be 8 (header 4 + value 4)
   - Value: Cumulative TSN Ack (32 bits)
 
@@ -40,7 +40,6 @@ const (
 var (
 	ErrInvalidChunkSize     = errors.New("invalid chunk size")
 	ErrChunkTypeNotShutdown = errors.New("ChunkType is not of type SHUTDOWN")
-	ErrShutdownFlagsNonZero = errors.New("shutdown chunk flags must be zero")
 )
 
 func (c *chunkShutdown) unmarshal(raw []byte) error {
@@ -52,18 +51,9 @@ func (c *chunkShutdown) unmarshal(raw []byte) error {
 		return fmt.Errorf("%w: actually is %s", ErrChunkTypeNotShutdown, c.typ.String())
 	}
 
-	// Flags MUST be zero (RFC 9260).
-	if c.flags != 0 {
-		return ErrShutdownFlagsNonZero
-	}
-
-	// Declared chunk length MUST be exactly 8 (header 4 + value 4).
-	declared := int(binary.BigEndian.Uint16(raw[2:]))
-	if declared != chunkHeaderSize+cumulativeTSNAckLength {
-		return ErrInvalidChunkSize
-	}
-
-	// Value MUST be exactly 4 bytes (Cumulative TSN Ack).
+	// Flags are ignored on receipt (RFC 9260 section 3.3.8).
+	// Chunk Length MUST be 8, so the value is exactly 4 bytes (Cumulative TSN Ack).
+	// chunkHeader.unmarshal sizes c.raw from the Chunk Length field.
 	if len(c.raw) != cumulativeTSNAckLength {
 		return ErrInvalidChunkSize
 	}
@@ -78,7 +68,7 @@ func (c *chunkShutdown) marshal() ([]byte, error) {
 	binary.BigEndian.PutUint32(out, c.cumulativeTSNAck)
 
 	c.typ = ctShutdown
-	c.flags = 0 // MUST be zero
+	c.flags = 0 // set to 0 on transmit (RFC 9260 section 3.3.8)
 	c.raw = out
 
 	return c.chunkHeader.marshal()
