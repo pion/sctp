@@ -156,9 +156,6 @@ func (p *chunkPayloadData) unmarshal(raw []byte) error {
 		p.streamSequenceNumber = binary.BigEndian.Uint16(p.raw[6:])
 		p.payloadType = PayloadProtocolIdentifier(binary.BigEndian.Uint32(p.raw[8:]))
 		p.userData = p.raw[payloadDataHeaderSize:]
-		if len(p.userData) == 0 {
-			return ErrDATAZeroUserData
-		}
 		p.iData = false
 	case ctIData:
 		if len(p.raw) < iDataHeaderSize {
@@ -181,10 +178,18 @@ func (p *chunkPayloadData) unmarshal(raw []byte) error {
 		return fmt.Errorf("%w: unsupported payload data chunk type %d", ErrChunkTypeUnhandled, p.typ)
 	}
 
+	if len(p.userData) == 0 {
+		return ErrDATAZeroUserData
+	}
+
 	return nil
 }
 
 func (p *chunkPayloadData) marshal() ([]byte, error) { //nolint:cyclop
+	if len(p.userData) == 0 {
+		return nil, ErrDATAZeroUserData
+	}
+
 	if p.isIData() { //nolint:nestif
 		payRaw := make([]byte, iDataHeaderSize+len(p.userData))
 
@@ -218,10 +223,6 @@ func (p *chunkPayloadData) marshal() ([]byte, error) { //nolint:cyclop
 		p.chunkHeader.raw = payRaw
 
 		return p.chunkHeader.marshal()
-	}
-
-	if len(p.userData) == 0 {
-		return nil, ErrDATAZeroUserData
 	}
 
 	payRaw := make([]byte, payloadDataHeaderSize+len(p.userData))

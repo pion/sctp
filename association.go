@@ -1371,17 +1371,17 @@ func (a *Association) unmarshalPacket(raw []byte) (*packet, error) {
 	// carry a zero checksum (skip CRC32c verification). Packets that
 	// still carry a non-zero checksum are verified anyways.
 	// Note that INIT / COOKIE ECHO always force verification inside `packet.unmarshal()`.
-	if err := p.unmarshal(!a.recvZeroChecksum, raw); err != nil {
-		return nil, err
-	}
+	err := p.unmarshal(!a.recvZeroChecksum, raw)
 
-	return p, nil
+	return p, err
 }
 
 // handleInbound parses incoming raw packets.
 func (a *Association) handleInbound(raw []byte) error {
 	pkt, err := a.unmarshalPacket(raw)
-	if err != nil {
+	// An empty DATA chunk still yields a fully parsed packet, see packet.unmarshal.
+	emptyPayload := errors.Is(err, ErrDATAZeroUserData)
+	if err != nil && !emptyPayload {
 		a.log.Warnf("[%s] unable to parse SCTP packet %s", a.name, err)
 
 		return nil
@@ -1389,6 +1389,12 @@ func (a *Association) handleInbound(raw []byte) error {
 
 	if err := checkPacket(pkt); err != nil {
 		a.log.Warnf("[%s] failed validating packet %s", a.name, err)
+
+		return nil
+	}
+
+	if emptyPayload {
+		a.abortOnEmptyPayload(pkt)
 
 		return nil
 	}
@@ -1404,6 +1410,37 @@ func (a *Association) handleInbound(raw []byte) error {
 	a.handleChunksEnd()
 
 	return nil
+}
+
+func (a *Association) abortOnEmptyPayload(pkt *packet) {
+	var emptyPayload *chunkPayloadData
+	for _, c := range pkt.chunks {
+		switch c := c.(type) {
+		case *chunkAbort, *chunkInitAck:
+			// RFC 9260 sections 9.1 and 5.1, respectively.
+			return
+		case *chunkPayloadData:
+			if emptyPayload == nil && len(c.userData) == 0 {
+				emptyPayload = c
+			}
+		}
+	}
+	if emptyPayload == nil {
+		return
+	}
+
+	a.lock.Lock()
+	defer a.lock.Unlock()
+	if !a.canHandleData(a.getState()) || a.willSendAbort || !a.validPacketForAssociation(pkt, emptyPayload) {
+		return
+	}
+
+	// RFC 9260 sections 6.2 and 3.3.10.9.
+	var tsn [4]byte
+	binary.BigEndian.PutUint32(tsn[:], emptyPayload.tsn)
+	a.willSendAbort = true
+	a.willSendAbortCause = &errorCauseHeader{code: noUserData, raw: tsn[:]}
+	a.awakeWriteLoop()
 }
 
 // The caller should hold the lock.
@@ -2356,9 +2393,9 @@ func (a *Association) restartAssociation(candidate restartCookie, init *chunkIni
 	return err
 }
 
-// Reflected tags are permitted on ABORT and SHUTDOWN COMPLETE.
+// The caller should hold the lock. Reflected tags are permitted on ABORT and SHUTDOWN COMPLETE.
 // https://www.rfc-editor.org/rfc/rfc9260.html#section-8.5.1
-func (a *Association) validRestartPacket(pkt *packet, received chunk) bool {
+func (a *Association) validPacketForAssociation(pkt *packet, received chunk) bool {
 	if pkt.sourcePort != a.destinationPort || pkt.destinationPort != a.sourcePort {
 		return false
 	}
@@ -4469,7 +4506,7 @@ func (a *Association) handleChunk(receivedPacket *packet, receivedChunk chunk) e
 	a.lock.Lock()
 	defer a.lock.Unlock()
 
-	if a.restartGeneration != 0 && !a.validRestartPacket(receivedPacket, receivedChunk) {
+	if a.restartGeneration != 0 && !a.validPacketForAssociation(receivedPacket, receivedChunk) {
 		return nil
 	}
 

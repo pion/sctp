@@ -95,6 +95,7 @@ func (p *packet) unmarshal(doChecksum bool, raw []byte) error { //nolint:cyclop
 	p.destinationPort = binary.BigEndian.Uint16(raw[2:])
 	p.verificationTag = binary.BigEndian.Uint32(raw[4:])
 
+	var emptyPayloadErr error
 	for offset < len(raw) {
 		// guaranteed to be safe by loop condition
 		remaining := raw[offset:] // nolint:gosec
@@ -145,7 +146,13 @@ func (p *packet) unmarshal(doChecksum bool, raw []byte) error { //nolint:cyclop
 		}
 
 		if err := dataChunk.unmarshal(remaining); err != nil {
-			return err
+			if !errors.Is(err, ErrDATAZeroUserData) {
+				return err
+			}
+
+			// Keep the decoded TSN and validate the rest of the packet before
+			// letting the association decide whether to send an ABORT.
+			emptyPayloadErr = err
 		}
 
 		p.chunks = append(p.chunks, dataChunk)
@@ -168,7 +175,7 @@ func (p *packet) unmarshal(doChecksum bool, raw []byte) error { //nolint:cyclop
 			ErrParseSCTPChunkNotEnoughData, remaining, offset, len(raw))
 	}
 
-	return nil
+	return emptyPayloadErr
 }
 
 func (p *packet) marshal(doChecksum bool) ([]byte, error) {
