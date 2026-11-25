@@ -6,6 +6,7 @@ package sctp
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -112,12 +113,52 @@ func TestPacketMarshal(t *testing.T) {
 	assert.Equal(t, headerOnly, headerOnlyMarshaled)
 }
 
+func TestTryMarshalUnmarshalZeroChecksum(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		chunk chunk
+		want  int
+	}{
+		{"COOKIE ACK", &chunkCookieAck{}, 1},
+		{"COOKIE ECHO", &chunkCookieEcho{cookie: []byte{1, 2, 3, 4}}, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, err := (&packet{
+				sourcePort:      5000,
+				destinationPort: 5000,
+				verificationTag: 1,
+				chunks:          []chunk{tc.chunk},
+			}).marshal(true)
+			require.NoError(t, err)
+			require.Equal(t, 1, TryMarshalUnmarshal(raw))
+
+			// A zero checksum is accepted except for packets that must carry a CRC32c.
+			clear(raw[8:packetHeaderSize])
+			assert.Equal(t, tc.want, TryMarshalUnmarshal(raw))
+		})
+	}
+}
+
 func BenchmarkPacketGenerateChecksum(b *testing.B) {
 	var data [1024]byte
 
 	for i := 0; i < b.N; i++ {
 		_ = generatePacketChecksum(data[:])
 	}
+}
+
+// withPacketChecksum returns a copy of raw with a valid CRC32c, so fuzzed inputs
+// reach the chunk parsers instead of failing checksum verification.
+// Inputs shorter than the common header are returned unchanged.
+func withPacketChecksum(raw []byte) []byte {
+	if len(raw) < packetHeaderSize {
+		return raw
+	}
+
+	raw = bytes.Clone(raw)
+	binary.LittleEndian.PutUint32(raw[8:], generatePacketChecksum(raw))
+
+	return raw
 }
 
 func FuzzPacketStrictRoundTrip(f *testing.F) {
@@ -131,6 +172,8 @@ func FuzzPacketStrictRoundTrip(f *testing.F) {
 	f.Add(raw)
 
 	f.Fuzz(func(t *testing.T, data []byte) {
+		data = withPacketChecksum(data)
+
 		var pkt packet
 		if err := pkt.unmarshal(true, data); err != nil {
 			return
@@ -157,6 +200,8 @@ func FuzzPacketZeroChecksumAcceptance(f *testing.F) {
 	f.Add(raw)
 
 	f.Fuzz(func(t *testing.T, data []byte) {
+		data = withPacketChecksum(data)
+
 		if err := (&packet{}).unmarshal(true, data); err != nil {
 			return
 		}
@@ -196,6 +241,61 @@ func FuzzTryMarshalUnmarshal(f *testing.F) {
 	f.Add(raw)
 
 	f.Fuzz(func(_ *testing.T, data []byte) {
-		TryMarshalUnmarshal(data)
+		TryMarshalUnmarshal(withPacketChecksum(data))
+	})
+}
+
+// FuzzPacketChecksumVerification keeps the fuzzed checksum, unlike the targets
+// above, and checks which packets unmarshal rejects with ErrChecksumMismatch.
+func FuzzPacketChecksumVerification(f *testing.F) {
+	f.Add([]byte{0, 0, 0, 0})
+
+	for _, c := range []chunk{&chunkCookieAck{}, &chunkCookieEcho{cookie: []byte{1, 2, 3, 4}}} {
+		raw, err := (&packet{
+			sourcePort:      5000,
+			destinationPort: 5000,
+			verificationTag: 1,
+			chunks:          []chunk{c},
+		}).marshal(true)
+		require.NoError(f, err)
+		f.Add(raw)
+
+		rawZero := bytes.Clone(raw)
+		clear(rawZero[8:packetHeaderSize])
+		f.Add(rawZero)
+	}
+
+	// Too short for a chunk header, so the INIT type byte must not force verification.
+	f.Add([]byte{0x13, 0x88, 0x13, 0x88, 0, 0, 0, 1, 0, 0, 0, 0, byte(ctInit), 0})
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		strictErr := (&packet{}).unmarshal(true, data)
+		relaxedErr := (&packet{}).unmarshal(false, data)
+
+		if len(data) < packetHeaderSize {
+			assert.ErrorIs(t, strictErr, ErrPacketRawTooSmall)
+			assert.ErrorIs(t, relaxedErr, ErrPacketRawTooSmall)
+
+			return
+		}
+
+		theirChecksum := binary.LittleEndian.Uint32(data[8:])
+		valid := theirChecksum == generatePacketChecksum(data)
+
+		mandatory := false
+		if len(data) >= packetHeaderSize+chunkHeaderSize {
+			switch chunkType(data[packetHeaderSize]) {
+			case ctInit, ctCookieEcho:
+				mandatory = true
+			default:
+			}
+		}
+
+		// With requireChecksum, every packet needs a valid CRC32c.
+		assert.Equal(t, !valid, errors.Is(strictErr, ErrChecksumMismatch), "strict: %v", strictErr)
+
+		// Without it, a zero checksum is also accepted unless the packet starts with INIT or COOKIE ECHO.
+		relaxedValid := valid || (theirChecksum == 0 && !mandatory)
+		assert.Equal(t, !relaxedValid, errors.Is(relaxedErr, ErrChecksumMismatch), "relaxed: %v", relaxedErr)
 	})
 }

@@ -255,12 +255,12 @@ func (p *packet) String() string {
 // TryMarshalUnmarshal attempts to marshal and unmarshal a message. Added for fuzzing.
 func TryMarshalUnmarshal(msg []byte) int {
 	p := &packet{}
-	err := p.unmarshal(true, msg)
+	err := p.unmarshal(false, msg)
 	if err != nil {
 		return 0
 	}
 
-	_, err = p.marshal(true)
+	_, err = p.marshal(false)
 	if err != nil {
 		return 0
 	}
