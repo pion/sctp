@@ -1347,22 +1347,9 @@ func (a *Association) unregisterStream(s *Stream, err error) {
 	s.readNotifier.Broadcast()
 }
 
-func chunkMandatoryChecksum(cc []chunk) bool {
-	for _, c := range cc {
-		switch c.(type) {
-		case *chunkInit, *chunkCookieEcho:
-			return true
-		}
-	}
-
-	return false
-}
-
 func (a *Association) marshalPacket(p *packet) ([]byte, error) {
 	// Replies to a restarting peer cannot use the old peer's checksum negotiation.
-	// INIT and COOKIE ECHO also always carry a real CRC32c checksum.
-	// https://www.rfc-editor.org/rfc/rfc9653.html#section-5.2
-	return p.marshal(p.verificationTag != a.peerVerificationTag || !a.sendZeroChecksum || chunkMandatoryChecksum(p.chunks))
+	return p.marshal(p.verificationTag != a.peerVerificationTag || !a.sendZeroChecksum)
 }
 
 func (a *Association) unmarshalPacket(raw []byte) (*packet, error) {
