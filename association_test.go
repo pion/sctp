@@ -897,6 +897,218 @@ func TestAssociationInterleavingProtocolViolationWrongPayloadChunkType(t *testin
 	}
 }
 
+// marshalEmptyPayloadPacket builds a packet with a single DATA or I-DATA chunk
+// that carries no user data.
+func marshalEmptyPayloadPacket(
+	t *testing.T, sourcePort, destinationPort uint16, verificationTag uint32, iData bool, tsn uint32,
+) []byte {
+	t.Helper()
+
+	return marshalRawPacket(t, sourcePort, destinationPort, verificationTag, emptyPayloadChunk(t, iData, tsn))
+}
+
+// captureAbortCauses reports the marshaled error causes of every ABORT sent by fromID.
+func captureAbortCauses(t *testing.T, br *test.Bridge, fromID int) <-chan []byte {
+	t.Helper()
+
+	causes := make(chan []byte, 4)
+	br.Filter(fromID, func(raw []byte) bool {
+		p := &packet{}
+		if err := p.unmarshal(true, raw); err != nil {
+			return true
+		}
+		for _, c := range p.chunks {
+			abort, ok := c.(*chunkAbort)
+			if !ok {
+				continue
+			}
+			for _, cause := range abort.errorCauses {
+				causeRaw, err := cause.marshal()
+				if err != nil {
+					continue
+				}
+				select {
+				case causes <- causeRaw:
+				default:
+				}
+			}
+		}
+
+		return true
+	})
+
+	return causes
+}
+
+func TestAssociationAbortsOnEmptyUserData(t *testing.T) {
+	const tsn uint32 = 0x01020304
+	// RFC 9260 section 3.3.10.9: No User Data (9), length 8, TSN of the empty chunk.
+	expectedCause := []byte{0x00, 0x09, 0x00, 0x08, 0x01, 0x02, 0x03, 0x04}
+
+	for name, iData := range map[string]bool{"DATA": false, "I-DATA": true} {
+		t.Run(name, func(t *testing.T) {
+			lim := test.TimeOut(time.Second * 10)
+			defer lim.Stop()
+
+			br := test.NewBridge()
+			a0, a1, err := createNewAssociationPairWithInterleaving(br, ackModeNoDelay, 0, iData, iData)
+			require.NoError(t, err, "failed to create associations")
+			defer closeAssociationPair(br, a0, a1)
+
+			causes := captureAbortCauses(t, br, 1)
+			require.True(t, br.Push(
+				marshalEmptyPayloadPacket(t, a0.sourcePort, a0.destinationPort, a0.peerVerificationTag, iData, tsn), 0,
+			))
+
+			timer := time.NewTimer(time.Second)
+			defer timer.Stop()
+			ticker := time.NewTicker(10 * time.Millisecond)
+			defer ticker.Stop()
+
+			for {
+				select {
+				case cause := <-causes:
+					require.Equal(t, expectedCause, cause)
+
+					return
+				case <-ticker.C:
+					br.Tick()
+				case <-timer.C:
+					require.Fail(t, "timed out waiting for No User Data abort")
+
+					return
+				}
+			}
+		})
+	}
+}
+
+func TestAssociationEmptyUserDataAbortConditions(t *testing.T) {
+	const (
+		localPort  uint16 = 5000
+		peerPort   uint16 = 5001
+		localTag   uint32 = 0x11111111
+		foreignTag uint32 = 0x22222222
+	)
+
+	tests := []struct {
+		name            string
+		state           uint32
+		verificationTag uint32
+		expectAbort     bool
+	}{
+		{name: "established", state: established, verificationTag: localTag, expectAbort: true},
+		{name: "wrong verification tag", state: established, verificationTag: foreignTag},
+		{name: "before established", state: cookieEchoed, verificationTag: localTag},
+		{name: "shutdown received", state: shutdownReceived, verificationTag: localTag},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assoc := createTestAssociation(t, Config{})
+			assoc.sourcePort = localPort
+			assoc.destinationPort = peerPort
+			assoc.myVerificationTag = localTag
+			assoc.setState(tt.state)
+
+			raw := marshalEmptyPayloadPacket(t, peerPort, localPort, tt.verificationTag, false, 1)
+			require.NoError(t, assoc.handleInbound(raw))
+
+			assoc.lock.RLock()
+			defer assoc.lock.RUnlock()
+			require.Equal(t, tt.expectAbort, assoc.willSendAbort)
+			if tt.expectAbort {
+				require.Equal(t, noUserData, assoc.willSendAbortCause.errorCauseCode())
+			}
+		})
+	}
+}
+
+func TestAssociationEmptyUserDataBundledWithAbort(t *testing.T) {
+	lim := test.TimeOut(time.Second * 10)
+	defer lim.Stop()
+
+	br := test.NewBridge()
+	a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, 0)
+	require.NoError(t, err, "failed to create associations")
+	defer closeAssociationPair(br, a0, a1)
+
+	causes := captureAbortCauses(t, br, 1)
+	abortRaw, err := (&chunkAbort{}).marshal()
+	require.NoError(t, err)
+	require.True(t, br.Push(marshalRawPacket(t, a0.sourcePort, a0.destinationPort, a0.peerVerificationTag,
+		emptyPayloadChunk(t, false, 1), abortRaw,
+	), 0))
+
+	// The peer's ABORT is still handled, and no ABORT is sent in response to it.
+	deadline := time.Now().Add(time.Second)
+	for a1.getState() != closed {
+		require.True(t, time.Now().Before(deadline), "timed out waiting for the ABORT to be handled")
+		br.Tick()
+		time.Sleep(10 * time.Millisecond)
+	}
+	br.Tick()
+
+	a1.lock.RLock()
+	willSendAbort := a1.willSendAbort
+	a1.lock.RUnlock()
+	require.False(t, willSendAbort)
+	select {
+	case cause := <-causes:
+		require.Failf(t, "unexpected ABORT", "cause %x", cause)
+	default:
+	}
+}
+
+func TestAssociationEmptyUserDataBundledWithCookieAck(t *testing.T) {
+	const (
+		localPort uint16 = 5000
+		peerPort  uint16 = 5001
+		localTag  uint32 = 0x11111111
+	)
+	// RFC 9260 section 3.3.10.9: No User Data (9), length 8, TSN of the empty chunk.
+	expectedCause := []byte{0x00, 0x09, 0x00, 0x08, 0x00, 0x00, 0x00, 0x07}
+
+	cookieAckRaw, err := (&chunkCookieAck{}).marshal()
+	require.NoError(t, err)
+	emptyDataRaw := emptyPayloadChunk(t, false, 7)
+
+	tests := []struct {
+		name        string
+		chunks      [][]byte
+		expectAbort bool
+	}{
+		// The empty DATA arrives before the association is established, so it is dropped.
+		{name: "empty DATA first", chunks: [][]byte{emptyDataRaw, cookieAckRaw}},
+		{name: "COOKIE ACK first", chunks: [][]byte{cookieAckRaw, emptyDataRaw}, expectAbort: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assoc := createTestAssociation(t, Config{})
+			assoc.handshakeCompletedCh = make(chan error, 1)
+			assoc.sourcePort = localPort
+			assoc.destinationPort = peerPort
+			assoc.myVerificationTag = localTag
+			assoc.setState(cookieEchoed)
+
+			require.NoError(t, assoc.handleInbound(marshalRawPacket(t, peerPort, localPort, localTag, tt.chunks...)))
+
+			require.Equal(t, established, assoc.getState())
+			require.NoError(t, <-assoc.handshakeCompletedCh)
+
+			assoc.lock.RLock()
+			defer assoc.lock.RUnlock()
+			require.Equal(t, tt.expectAbort, assoc.willSendAbort)
+			if tt.expectAbort {
+				causeRaw, err := assoc.willSendAbortCause.marshal()
+				require.NoError(t, err)
+				require.Equal(t, expectedCause, causeRaw)
+			}
+		})
+	}
+}
+
 func TestAssociationInterleavingFinalizedOnEstablishedTransition(t *testing.T) {
 	t.Run("cookie ack", func(t *testing.T) {
 		assoc := createTestAssociation(t, Config{})
@@ -6127,11 +6339,13 @@ func TestAssociation_HandlePacketInCookieWaitState(t *testing.T) {
 			// Prevent "use of close network connection" error on close.
 			skipClose: true,
 		},
-		"CoockeEcho": {
+		"CookieEcho": {
 			inputPacket: &packet{
 				sourcePort:      1,
 				destinationPort: 1,
-				chunks:          []chunk{&chunkCookieEcho{}},
+				chunks: []chunk{&chunkCookieEcho{
+					cookie: []byte{0x01},
+				}},
 			},
 		},
 		"HeartBeat": {
@@ -6145,7 +6359,11 @@ func TestAssociation_HandlePacketInCookieWaitState(t *testing.T) {
 			inputPacket: &packet{
 				sourcePort:      1,
 				destinationPort: 1,
-				chunks:          []chunk{&chunkPayloadData{}},
+				chunks: []chunk{&chunkPayloadData{
+					beginningFragment: true,         // B = 1
+					endingFragment:    true,         // E = 1
+					userData:          []byte{0x00}, // L > 0
+				}},
 			},
 		},
 		"Sack": {
@@ -6184,7 +6402,9 @@ func TestAssociation_HandlePacketInCookieWaitState(t *testing.T) {
 			inputPacket: &packet{
 				sourcePort:      1,
 				destinationPort: 1,
-				chunks:          []chunk{&chunkError{}},
+				chunks: []chunk{&chunkError{
+					errorCauses: []errorCause{&errorCauseUnrecognizedChunkType{}},
+				}},
 			},
 		},
 		"Shutdown": {

@@ -10,32 +10,11 @@ import (
 )
 
 /*
-Operation Error (ERROR) (9)
+Operation Error (ERROR) (Type = 9) - RFC 9260 section 3.3
 
-An endpoint sends this chunk to its peer endpoint to notify it of
-certain error conditions.  It contains one or more error causes.  An
-Operation Error is not considered fatal in and of itself, but may be
-used with an ERROR chunk to report a fatal condition.  It has the
-following parameters:
-
-	 0                   1                   2                   3
-	 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-	+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-	|   Type = 9    | Chunk  Flags  |           Length              |
-	+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-	\                                                               \
-	/                    one or more Error Causes                   /
-	\                                                               \
-	+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-
-Chunk Flags: 8 bits
-
-	Set to 0 on transmit and ignored on receipt.
-
-Length: 16 bits (unsigned integer)
-
-	Set to the size of the chunk in bytes, including the chunk header
-	and all the Error Cause fields present.
+An endpoint sends this chunk to notify its peer of one or more error
+conditions. Contains one or more Error Causes (TLVs). Flags are set to
+0 on transmit and ignored on receipt.
 */
 type chunkError struct {
 	chunkHeader
@@ -46,6 +25,7 @@ type chunkError struct {
 var (
 	ErrChunkTypeNotCtError   = errors.New("ChunkType is not of type ctError")
 	ErrBuildErrorChunkFailed = errors.New("failed build Error Chunk")
+	ErrErrorNoCauses         = errors.New("ERROR chunk contains no error causes")
 )
 
 func (a *chunkError) unmarshal(raw []byte) error {
@@ -57,31 +37,52 @@ func (a *chunkError) unmarshal(raw []byte) error {
 		return fmt.Errorf("%w, actually is %s", ErrChunkTypeNotCtError, a.typ.String())
 	}
 
-	offset := chunkHeaderSize
-	for len(raw)-offset >= 4 {
-		e, err := buildErrorCause(raw[offset:])
+	// flags are reserved: sender sets to 0, receiver ignores.
+
+	a.errorCauses = a.errorCauses[:0]
+
+	// An ERROR without causes is accepted. Trailing bytes too short for
+	// another cause, including padding that is cut short by the chunk
+	// length, are ignored.
+	body := a.raw
+	for offset := 0; len(body)-offset >= errorCauseHeaderLength; {
+		ec, err := buildErrorCause(body[offset:])
 		if err != nil {
 			return fmt.Errorf("%w: %v", ErrBuildErrorChunkFailed, err) //nolint:errorlint
 		}
 
-		offset += int(e.length())
-		a.errorCauses = append(a.errorCauses, e)
+		a.errorCauses = append(a.errorCauses, ec)
+
+		// Skip alignment padding without interpreting its contents.
+		clen := int(ec.length())
+		offset += clen + getPadding(clen)
 	}
 
 	return nil
 }
 
 func (a *chunkError) marshal() ([]byte, error) {
-	a.chunkHeader.typ = ctError
-	a.flags = 0x00
-	a.raw = []byte{}
-	for _, ec := range a.errorCauses {
+	if len(a.errorCauses) == 0 {
+		return nil, ErrErrorNoCauses
+	}
+
+	out := make([]byte, 0)
+	for i, ec := range a.errorCauses {
 		raw, err := ec.marshal()
 		if err != nil {
 			return nil, err
 		}
-		a.raw = append(a.raw, raw...)
+		out = append(out, raw...)
+
+		// Include padding for all but the last cause
+		if i != len(a.errorCauses)-1 {
+			out = padByte(out, getPadding(len(raw)))
+		}
 	}
+
+	a.chunkHeader.typ = ctError
+	a.chunkHeader.flags = 0x00 // sender MUST set to 0
+	a.chunkHeader.raw = out
 
 	return a.chunkHeader.marshal()
 }

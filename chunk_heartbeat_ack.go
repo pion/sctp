@@ -9,32 +9,16 @@ import (
 )
 
 /*
-chunkHeartbeatAck represents an SCTP Chunk of type HEARTBEAT ACK
+chunkHeartbeatAck represents an SCTP Chunk of type HEARTBEAT ACK (RFC 9260 section 3.3.6).
 
-An endpoint should send this chunk to its peer endpoint as a response
-to a HEARTBEAT chunk (see Section 8.3).  A HEARTBEAT ACK is always
-sent to the source IP address of the IP datagram containing the
-HEARTBEAT chunk to which this ack is responding.
-
-The parameter field contains a variable-length opaque data structure.
-
-	 0                   1                   2                   3
-	 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-	+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-	|   Type = 5    | Chunk  Flags  |    Heartbeat Ack Length       |
-	+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-	|                                                               |
-	|            Heartbeat Information TLV (Variable-Length)        |
-	|                                                               |
-	+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-
-Defined as a variable-length parameter using the format described
-in Section 3.2.1, i.e.:
+An endpoint sends this chunk in response to a HEARTBEAT. The chunk body MUST
+contain exactly one variable-length parameter:
 
 Variable Parameters                  Status     Type Value
 -------------------------------------------------------------
 Heartbeat Info                       Mandatory   1
-.
+
+nolint:godot
 */
 type chunkHeartbeatAck struct {
 	chunkHeader
@@ -60,7 +44,7 @@ func (h *chunkHeartbeatAck) unmarshal(raw []byte) error { //nolint:cyclop
 		return fmt.Errorf("%w %s", ErrChunkTypeNotHeartbeatAck, h.typ.String())
 	}
 
-	// allow for an empty heartbeat: no RTT info -> ActiveHeartbeat just won't update SRTT.
+	// Accept an empty acknowledgment for compatibility and leave the RTT estimate as is.
 	if len(h.raw) == 0 {
 		h.params = nil
 
@@ -106,37 +90,19 @@ func (h *chunkHeartbeatAck) marshal() ([]byte, error) {
 	if len(h.params) != 1 {
 		return nil, ErrHeartbeatAckParams
 	}
-
-	switch h.params[0].(type) {
-	case *paramHeartbeatInfo:
-		// ParamHeartbeatInfo is valid
-	default:
+	if _, ok := h.params[0].(*paramHeartbeatInfo); !ok {
 		return nil, ErrHeartbeatAckNotHeartbeatInfo
 	}
 
-	out := make([]byte, 0)
-	for idx, p := range h.params {
-		pp, err := p.marshal()
-		if err != nil {
-			return nil, fmt.Errorf("%w: %v", ErrHeartbeatAckMarshalParam, err) //nolint:errorlint
-		}
-
-		out = append(out, pp...)
-
-		// Chunks (including Type, Length, and Value fields) are padded out
-		// by the sender with all zero bytes to be a multiple of 4 bytes
-		// long.  This padding MUST NOT be more than 3 bytes in total.  The
-		// Chunk Length value does not include terminating padding of the
-		// chunk.  *However, it does include padding of any variable-length
-		// parameter except the last parameter in the chunk.*  The receiver
-		// MUST ignore the padding.
-		if idx != len(h.params)-1 {
-			out = padByte(out, getPadding(len(pp)))
-		}
+	pp, err := h.params[0].marshal()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrHeartbeatAckMarshalParam, err) //nolint:errorlint
 	}
 
+	// single TLV: no inter-parameter padding within the chunk body.
 	h.chunkHeader.typ = ctHeartbeatAck
-	h.chunkHeader.raw = out
+	h.chunkHeader.flags = 0 // sender MUST set to 0
+	h.chunkHeader.raw = append([]byte(nil), pp...)
 
 	return h.chunkHeader.marshal()
 }

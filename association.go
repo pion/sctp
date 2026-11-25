@@ -1406,6 +1406,36 @@ func (a *Association) handleInbound(raw []byte) error {
 	return nil
 }
 
+// handleEmptyData drops a DATA or I-DATA chunk that carries no user data and,
+// when this packet is allowed to trigger one, queues a No User Data ABORT.
+// The rest of the packet is still processed.
+// The caller should hold the lock.
+func (a *Association) handleEmptyData(pkt *packet, chunkPayload *chunkPayloadData) {
+	for _, c := range pkt.chunks {
+		switch c.(type) {
+		case *chunkAbort, *chunkInitAck:
+			// RFC 9260 sections 9.1 and 5.1, respectively.
+			a.log.Debugf("[%s] dropping DATA without user data: tsn=%d", a.name, chunkPayload.tsn)
+
+			return
+		}
+	}
+
+	if !a.canHandleData(a.getState()) || a.willSendAbort || !a.validPacketForAssociation(pkt, chunkPayload) {
+		a.log.Debugf("[%s] dropping DATA without user data: tsn=%d", a.name, chunkPayload.tsn)
+
+		return
+	}
+
+	// RFC 9260 sections 6.2 and 3.3.10.9.
+	a.log.Warnf("[%s] received DATA without user data, aborting: tsn=%d", a.name, chunkPayload.tsn)
+	var tsn [4]byte
+	binary.BigEndian.PutUint32(tsn[:], chunkPayload.tsn)
+	a.willSendAbort = true
+	a.willSendAbortCause = &errorCauseHeader{code: noUserData, raw: tsn[:]}
+	a.awakeWriteLoop()
+}
+
 // The caller should hold the lock.
 func (a *Association) gatherDataPacketsToRetransmit(rawPackets [][]byte, budgetUnits *int64, consumed *bool) [][]byte {
 	for _, p := range a.getDataPacketsToRetransmit(budgetUnits, consumed) {
@@ -2356,9 +2386,9 @@ func (a *Association) restartAssociation(candidate restartCookie, init *chunkIni
 	return err
 }
 
-// Reflected tags are permitted on ABORT and SHUTDOWN COMPLETE.
+// The caller should hold the lock. Reflected tags are permitted on ABORT and SHUTDOWN COMPLETE.
 // https://www.rfc-editor.org/rfc/rfc9260.html#section-8.5.1
-func (a *Association) validRestartPacket(pkt *packet, received chunk) bool {
+func (a *Association) validPacketForAssociation(pkt *packet, received chunk) bool {
 	if pkt.sourcePort != a.destinationPort || pkt.destinationPort != a.sourcePort {
 		return false
 	}
@@ -4469,7 +4499,7 @@ func (a *Association) handleChunk(receivedPacket *packet, receivedChunk chunk) e
 	a.lock.Lock()
 	defer a.lock.Unlock()
 
-	if a.restartGeneration != 0 && !a.validRestartPacket(receivedPacket, receivedChunk) {
+	if a.restartGeneration != 0 && !a.validPacketForAssociation(receivedPacket, receivedChunk) {
 		return nil
 	}
 
@@ -4524,7 +4554,11 @@ func (a *Association) handleChunk(receivedPacket *packet, receivedChunk chunk) e
 		a.handleCookieAck()
 
 	case *chunkPayloadData:
-		packets = a.handleData(receivedChunk)
+		if len(receivedChunk.userData) == 0 {
+			a.handleEmptyData(receivedPacket, receivedChunk)
+		} else {
+			packets = a.handleData(receivedChunk)
+		}
 
 	case *chunkSelectiveAck:
 		err = a.handleSack(receivedChunk)

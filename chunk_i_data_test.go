@@ -4,10 +4,34 @@
 package sctp
 
 import (
+	"encoding/binary"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+// emptyPayloadChunk builds a DATA or I-DATA chunk that carries no user data,
+// which chunkPayloadData.marshal refuses to produce.
+func emptyPayloadChunk(t *testing.T, iData bool, tsn uint32) []byte {
+	t.Helper()
+
+	header := chunkHeader{
+		typ:   ctPayloadData,
+		flags: payloadDataBeginingFragmentBitmask | payloadDataEndingFragmentBitmask,
+		raw:   make([]byte, payloadDataHeaderSize),
+	}
+	if iData {
+		header.typ = ctIData
+		header.raw = make([]byte, iDataHeaderSize)
+	}
+	binary.BigEndian.PutUint32(header.raw, tsn)
+
+	raw, err := header.marshal()
+	require.NoError(t, err)
+
+	return raw
+}
 
 func TestChunkIDataMarshalUnmarshal(t *testing.T) {
 	t.Run("beginning fragment", func(t *testing.T) {
@@ -76,21 +100,40 @@ func TestPayloadDataHeaderSizeAccounting(t *testing.T) {
 		data := &chunkPayloadData{
 			beginningFragment: true,
 			endingFragment:    true,
+			userData:          []byte{0x01},
 		}
 		dataRaw, err := data.marshal()
 		assert.NoError(t, err)
-		assert.Equal(t, int(dataChunkHeaderSize), len(dataRaw))
-		assert.Equal(t, int(dataChunkHeaderSize), data.chunkSize())
+		assert.Equal(t, int(dataChunkHeaderSize)+len(data.userData), len(dataRaw))
+		assert.Equal(t, int(dataChunkHeaderSize)+len(data.userData), data.chunkSize())
 
 		iData := &chunkPayloadData{
 			iData:             true,
 			beginningFragment: true,
 			endingFragment:    true,
+			userData:          []byte{0x01},
 		}
 		iDataRaw, err := iData.marshal()
 		assert.NoError(t, err)
-		assert.Equal(t, int(iDataChunkHeaderSize), len(iDataRaw))
-		assert.Equal(t, int(iDataChunkHeaderSize), iData.chunkSize())
+		assert.Equal(t, int(iDataChunkHeaderSize)+len(iData.userData), len(iDataRaw))
+		assert.Equal(t, int(iDataChunkHeaderSize)+len(iData.userData), iData.chunkSize())
+	})
+
+	t.Run("empty user data", func(t *testing.T) {
+		for name, iData := range map[string]bool{"DATA": false, "I-DATA": true} {
+			t.Run(name, func(t *testing.T) {
+				// Sending an empty chunk is refused.
+				_, err := (&chunkPayloadData{iData: iData, beginningFragment: true, endingFragment: true}).marshal()
+				assert.ErrorIs(t, err, ErrDATAZeroUserData)
+
+				// Receiving one is not, so that the association can abort with its TSN.
+				parsed := &chunkPayloadData{}
+				require.NoError(t, parsed.unmarshal(emptyPayloadChunk(t, iData, 7)))
+				assert.Empty(t, parsed.userData)
+				assert.Equal(t, uint32(7), parsed.tsn)
+				assert.Equal(t, iData, parsed.isIData())
+			})
+		}
 	})
 
 	t.Run("default MTU payload limits include padding", func(t *testing.T) {

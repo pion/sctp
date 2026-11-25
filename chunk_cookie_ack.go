@@ -11,10 +11,10 @@ import (
 /*
 chunkCookieAck represents an SCTP Chunk of type chunkCookieAck
 
-	 0                   1                   2                   3
-	 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+	0                   1                   2                   3
+	0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 	+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-	|   Type = 11   |Chunk  Flags   |     Length = 4                |
+	|   Type = 11   |  Chunk Flags  |     Length = 4                |
 	+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 */
 type chunkCookieAck struct {
@@ -35,11 +35,15 @@ func (c *chunkCookieAck) unmarshal(raw []byte) error {
 		return fmt.Errorf("%w: actually is %s", ErrChunkTypeNotCookieAck, c.typ.String())
 	}
 
+	// Flags are reserved: sender sets 0, receiver ignores. A value is not
+	// expected but is ignored as well, so the rest of the packet is processed.
 	return nil
 }
 
 func (c *chunkCookieAck) marshal() ([]byte, error) {
 	c.chunkHeader.typ = ctCookieAck
+	c.chunkHeader.flags = 0 // sender MUST set to 0
+	c.chunkHeader.raw = nil // no body
 
 	return c.chunkHeader.marshal()
 }
