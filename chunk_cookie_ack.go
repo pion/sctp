@@ -24,7 +24,6 @@ type chunkCookieAck struct {
 // Cookie ack chunk errors.
 var (
 	ErrChunkTypeNotCookieAck = errors.New("ChunkType is not of type COOKIEACK")
-	ErrCookieAckHasValue     = errors.New("COOKIE ACK must not contain a value")
 )
 
 func (c *chunkCookieAck) unmarshal(raw []byte) error {
@@ -36,12 +35,8 @@ func (c *chunkCookieAck) unmarshal(raw []byte) error {
 		return fmt.Errorf("%w: actually is %s", ErrChunkTypeNotCookieAck, c.typ.String())
 	}
 
-	// flags are reserved: sender sets 0, receiver ignores.
-	// COOKIE ACK has no body: value length must be 0.
-	if len(c.raw) != 0 {
-		return ErrCookieAckHasValue
-	}
-
+	// Flags are reserved: sender sets 0, receiver ignores. A value is not
+	// expected but is ignored as well, so the rest of the packet is processed.
 	return nil
 }
 

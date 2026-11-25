@@ -44,12 +44,8 @@ func (c *chunkCookieEcho) unmarshal(raw []byte) error {
 	}
 
 	// The sender clears the reserved flags and the receiver ignores them.
+	// An empty cookie is left for handleCookieEcho to reject.
 	c.cookie = c.raw
-
-	// RFC 9260: cookie MUST be present (non-empty).
-	if len(c.cookie) == 0 {
-		return ErrCookieEchoEmpty
-	}
 
 	return nil
 }

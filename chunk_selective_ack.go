@@ -76,7 +76,7 @@ const (
 	selectiveAckHeaderSize = 12
 )
 
-func (s *chunkSelectiveAck) unmarshal(raw []byte) error { //nolint:cyclop
+func (s *chunkSelectiveAck) unmarshal(raw []byte) error {
 	if err := s.chunkHeader.unmarshal(raw); err != nil {
 		return err
 	}
@@ -99,28 +99,16 @@ func (s *chunkSelectiveAck) unmarshal(raw []byte) error { //nolint:cyclop
 		return ErrSackSizeNotMatchPredicted
 	}
 
+	// Gap Ack Blocks are not validated here, so that a bad SACK doesn't
+	// discard the rest of its packet. processSelectiveAck rejects bad ranges.
 	offset := selectiveAckHeaderSize
-	blocks := make([]gapAckBlock, nGap)
-	var prevEnd uint16
-
-	for i := range blocks {
-		start := binary.BigEndian.Uint16(s.raw[offset:])
-		end := binary.BigEndian.Uint16(s.raw[offset+2:])
+	s.gapAckBlocks = make([]gapAckBlock, nGap)
+	for i := range s.gapAckBlocks {
+		s.gapAckBlocks[i].start = binary.BigEndian.Uint16(s.raw[offset:])
+		s.gapAckBlocks[i].end = binary.BigEndian.Uint16(s.raw[offset+2:])
 		offset += 4
-
-		if start == 0 || end < start {
-			return ErrSackGapBlockInvalidRange
-		}
-
-		if i > 0 && start <= prevEnd { // must be strictly increasing, no overlap
-			return ErrSackGapBlocksNotMonotonic
-		}
-
-		blocks[i] = gapAckBlock{start: start, end: end}
-		prevEnd = end
 	}
 
-	s.gapAckBlocks = blocks
 	s.duplicateTSN = make([]uint32, nDup)
 
 	for i := range s.duplicateTSN {

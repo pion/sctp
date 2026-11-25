@@ -133,9 +133,11 @@ func TestChunkErrorPadding(t *testing.T) {
 }
 
 func TestChunkErrorNoCauses(t *testing.T) {
+	// Sending an ERROR without causes is refused, receiving one is not.
 	_, err := (&chunkError{}).marshal()
 	assert.ErrorIs(t, err, ErrErrorNoCauses)
 
-	raw := []byte{byte(ctError), 0x00, 0x00, 0x04}
-	assert.ErrorIs(t, (&chunkError{}).unmarshal(raw), ErrErrorNoCauses)
+	c := &chunkError{}
+	require.NoError(t, c.unmarshal([]byte{byte(ctError), 0x00, 0x00, 0x04}))
+	assert.Empty(t, c.errorCauses)
 }

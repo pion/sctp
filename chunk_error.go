@@ -39,15 +39,12 @@ func (a *chunkError) unmarshal(raw []byte) error {
 
 	// flags are reserved: sender sets to 0, receiver ignores.
 
-	body := a.raw
-	if len(body) == 0 {
-		return ErrErrorNoCauses
-	}
-
 	a.errorCauses = a.errorCauses[:0]
 
-	// Trailing bytes too short for another cause, including padding that
-	// is cut short by the chunk length, are ignored.
+	// An ERROR without causes is accepted. Trailing bytes too short for
+	// another cause, including padding that is cut short by the chunk
+	// length, are ignored.
+	body := a.raw
 	for offset := 0; len(body)-offset >= errorCauseHeaderLength; {
 		ec, err := buildErrorCause(body[offset:])
 		if err != nil {

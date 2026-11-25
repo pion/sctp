@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // marshalRawPacket builds a packet from chunks that are already marshaled,
@@ -55,6 +56,48 @@ func TestPacketUnmarshal(t *testing.T) {
 	}
 
 	assert.NoError(t, pkt.unmarshal(true, rawChunk))
+}
+
+// A malformed control chunk that the association rejects (or ignores) on its
+// own must not discard the DATA bundled after it.
+func TestPacketUnmarshalKeepsChunksAfterMalformedControlChunk(t *testing.T) {
+	dataRaw, err := (&chunkPayloadData{
+		beginningFragment: true,
+		endingFragment:    true,
+		tsn:               100,
+		userData:          []byte{0x01},
+	}).marshal()
+	require.NoError(t, err)
+
+	for name, chunkRaw := range map[string][]byte{
+		"SACK with unsorted gap blocks": {
+			byte(ctSack), 0x00, 0x00, 0x18, // chunk header: type, flags, length=24
+			0x00, 0x00, 0x00, 0x63, // cumulative TSN ack = 99
+			0x00, 0x01, 0x00, 0x00, // a_rwnd
+			0x00, 0x02, 0x00, 0x00, // 2 gap blocks, 0 duplicate TSNs
+			0x00, 0x05, 0x00, 0x06, // gap block 5-6
+			0x00, 0x02, 0x00, 0x03, // gap block 2-3
+		},
+		"SACK with zero gap block start": {
+			byte(ctSack), 0x00, 0x00, 0x14, // chunk header: type, flags, length=20
+			0x00, 0x00, 0x00, 0x63, // cumulative TSN ack = 99
+			0x00, 0x01, 0x00, 0x00, // a_rwnd
+			0x00, 0x01, 0x00, 0x00, // 1 gap block, 0 duplicate TSNs
+			0x00, 0x00, 0x00, 0x01, // gap block 0-1
+		},
+		"ERROR without causes":       {byte(ctError), 0x00, 0x00, 0x04},
+		"COOKIE ACK with a value":    {byte(ctCookieAck), 0x00, 0x00, 0x08, 0x01, 0x02, 0x03, 0x04},
+		"COOKIE ECHO without cookie": {byte(ctCookieEcho), 0x00, 0x00, 0x04},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pkt := &packet{}
+			require.NoError(t, pkt.unmarshal(true, marshalRawPacket(t, 5000, 5000, 1, chunkRaw, dataRaw)))
+			require.Len(t, pkt.chunks, 2)
+			data, ok := pkt.chunks[1].(*chunkPayloadData)
+			require.True(t, ok)
+			assert.Equal(t, uint32(100), data.tsn)
+		})
+	}
 }
 
 func TestPacketMarshal(t *testing.T) {
