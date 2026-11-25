@@ -26,13 +26,9 @@ type chunkAbort struct {
 var (
 	ErrChunkTypeNotAbort     = errors.New("ChunkType is not of type ABORT")
 	ErrBuildAbortChunkFailed = errors.New("failed build Abort Chunk")
-
-	// Stricter parsing.
-	ErrAbortCauseTooShort      = errors.New("remaining bytes smaller than error cause header")
-	ErrAbortCauseLengthInvalid = errors.New("error cause length invalid or exceeds remaining bytes")
 )
 
-func (a *chunkAbort) unmarshal(raw []byte) error { //nolint:cyclop
+func (a *chunkAbort) unmarshal(raw []byte) error {
 	if err := a.chunkHeader.unmarshal(raw); err != nil {
 		return err
 	}
@@ -42,38 +38,20 @@ func (a *chunkAbort) unmarshal(raw []byte) error { //nolint:cyclop
 
 	a.errorCauses = a.errorCauses[:0]
 
+	// Trailing bytes too short for another cause, including padding that is
+	// cut short by the chunk length, are ignored.
 	body := a.raw
-
-	offset := 0
-	for {
-		remaining := len(body) - offset
-		if remaining == 0 {
-			break
-		}
-		if remaining < 4 {
-			return ErrAbortCauseTooShort
-		}
-
+	for offset := 0; len(body)-offset >= errorCauseHeaderLength; {
 		e, err := buildErrorCause(body[offset:])
 		if err != nil {
 			return fmt.Errorf("%w: %v", ErrBuildAbortChunkFailed, err) //nolint:errorlint
 		}
 
-		clen := int(e.length())
-		if clen < 4 || clen > remaining {
-			return ErrAbortCauseLengthInvalid
-		}
-
 		a.errorCauses = append(a.errorCauses, e)
-		offset += clen
 
 		// Skip alignment padding without interpreting its contents.
-		if offset < len(body) {
-			offset += getPadding(clen)
-			if offset > len(body) {
-				return ErrAbortCauseLengthInvalid
-			}
-		}
+		clen := int(e.length())
+		offset += clen + getPadding(clen)
 	}
 
 	return nil

@@ -120,7 +120,7 @@ func TestAbortChunk(t *testing.T) {
 		require.Len(t, abort.errorCauses, 1)
 	})
 
-	t.Run("Truncated padding between causes is rejected", func(t *testing.T) {
+	t.Run("Truncated padding after the last cause is ignored", func(t *testing.T) {
 		raw := []byte{
 			byte(ctAbort), 0x00, 0x00, 0x0B, // chunk header: type, flags, length=11
 			0xFF, 0xFF, 0x00, 0x05, 0xAA, // cause: code=0xFFFF, length=5, value=0xAA
@@ -128,6 +128,23 @@ func TestAbortChunk(t *testing.T) {
 			0x00, // chunk padding, outside the chunk length
 		}
 
-		assert.ErrorIs(t, (&chunkAbort{}).unmarshal(raw), ErrAbortCauseLengthInvalid)
+		abort := &chunkAbort{}
+		require.NoError(t, abort.unmarshal(raw))
+		require.Len(t, abort.errorCauses, 1)
+		assert.Equal(t, errorCauseCode(0xFFFF), abort.errorCauses[0].errorCauseCode())
+	})
+
+	t.Run("Trailing bytes shorter than a cause header are ignored", func(t *testing.T) {
+		raw := []byte{
+			byte(ctAbort), 0x00, 0x00, 0x0A, // chunk header: type, flags, length=10
+			0x00, 0x0D, 0x00, 0x04, // cause: protocolViolation, length=4
+			0xAB, 0xCD, // not enough for another cause header
+			0x00, 0x00, // chunk padding, outside the chunk length
+		}
+
+		abort := &chunkAbort{}
+		require.NoError(t, abort.unmarshal(raw))
+		require.Len(t, abort.errorCauses, 1)
+		assert.Equal(t, protocolViolation, abort.errorCauses[0].errorCauseCode())
 	})
 }

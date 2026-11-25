@@ -25,14 +25,10 @@ type chunkError struct {
 var (
 	ErrChunkTypeNotCtError   = errors.New("ChunkType is not of type ctError")
 	ErrBuildErrorChunkFailed = errors.New("failed build Error Chunk")
-
-	// Stricter parsing/validation.
-	ErrErrorNoCauses           = errors.New("ERROR chunk contains no error causes")
-	ErrErrorCauseTooShort      = errors.New("remaining bytes smaller than error cause header")
-	ErrErrorCauseLengthInvalid = errors.New("error cause length invalid or exceeds remaining bytes")
+	ErrErrorNoCauses         = errors.New("ERROR chunk contains no error causes")
 )
 
-func (a *chunkError) unmarshal(raw []byte) error { //nolint:cyclop
+func (a *chunkError) unmarshal(raw []byte) error {
 	if err := a.chunkHeader.unmarshal(raw); err != nil {
 		return err
 	}
@@ -50,37 +46,19 @@ func (a *chunkError) unmarshal(raw []byte) error { //nolint:cyclop
 
 	a.errorCauses = a.errorCauses[:0]
 
-	offset := 0
-	for {
-		remaining := len(body) - offset
-		if remaining == 0 {
-			break
-		}
-
-		if remaining < 4 {
-			return ErrErrorCauseTooShort
-		}
-
+	// Trailing bytes too short for another cause, including padding that
+	// is cut short by the chunk length, are ignored.
+	for offset := 0; len(body)-offset >= errorCauseHeaderLength; {
 		ec, err := buildErrorCause(body[offset:])
 		if err != nil {
 			return fmt.Errorf("%w: %v", ErrBuildErrorChunkFailed, err) //nolint:errorlint
 		}
 
-		clen := int(ec.length())
-		if clen < 4 || clen > remaining {
-			return ErrErrorCauseLengthInvalid
-		}
-
 		a.errorCauses = append(a.errorCauses, ec)
-		offset += clen
 
 		// Skip alignment padding without interpreting its contents.
-		if offset < len(body) {
-			offset += getPadding(clen)
-			if offset > len(body) {
-				return ErrErrorCauseLengthInvalid
-			}
-		}
+		clen := int(ec.length())
+		offset += clen + getPadding(clen)
 	}
 
 	return nil
