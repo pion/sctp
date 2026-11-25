@@ -61,8 +61,6 @@ var (
 	// New stricter parsing errors (RFC 9260).
 	ErrInitChunkMinLength      = errors.New("chunk init common body smaller than minimum length")
 	ErrInitParamHeaderTooShort = errors.New("remaining bytes smaller than parameter header")
-	ErrInitParamLengthInvalid  = errors.New("parameter length invalid or exceeds remaining bytes")
-	ErrInitTrailingGarbage     = errors.New("trailing non-zero bytes after parameters")
 )
 
 func (i *chunkInitCommon) unmarshal(raw []byte) error { //nolint:cyclop
@@ -96,11 +94,8 @@ func (i *chunkInitCommon) unmarshal(raw []byte) error { //nolint:cyclop
 			return fmt.Errorf("%w: %w", ErrInitChunkParseParamTypeFailed, err)
 		}
 
+		// paramHeader.unmarshal ensures the parameter fits in the remaining bytes.
 		plen := pHeader.length()
-		if plen < initOptionalVarHeaderLength || plen > remaining {
-			return ErrInitParamLengthInvalid
-		}
-
 		if p, err := buildParam(pHeader.typ, raw[offset:offset+plen]); err != nil {
 			i.unrecognizedParams = append(i.unrecognizedParams, pHeader)
 		} else {
@@ -122,11 +117,6 @@ func (i *chunkInitCommon) unmarshal(raw []byte) error { //nolint:cyclop
 				}
 			}
 		}
-	}
-
-	// reject if anything remains and is not zero.
-	if offset < len(raw) && !allZero(raw[offset:]) {
-		return ErrInitTrailingGarbage
 	}
 
 	return nil
