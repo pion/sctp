@@ -363,6 +363,7 @@ func (q *weightedFairQueueingPendingQueuePolicy) Pop(chunkPayload StreamSchedule
 	delete(q.chunkFinish, chunkPayload.chunkPayloadData())
 	if streamQueue.size() == 0 {
 		delete(q.streamQueues, q.selectedStream)
+		delete(q.streamFinish, q.selectedStream)
 	}
 
 	q.streamSelected = false
