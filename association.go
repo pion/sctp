@@ -5038,7 +5038,7 @@ func (a *Association) onRackAfterSACK( // nolint:gocognit,cyclop,gocyclo
 				continue
 			}
 
-			if chunk.retransmit || chunk.nSent > 1 {
+			if chunk.retransmit {
 				// Either already scheduled for retransmit or not an original send:
 				// skip but keep in list in case it's still outstanding.
 				chunk = next
@@ -5159,7 +5159,7 @@ func (a *Association) onRackTimeoutLocked() { //nolint:cyclop
 
 			continue
 		}
-		if chunk.retransmit || chunk.nSent > 1 {
+		if chunk.retransmit {
 			chunk = next
 
 			continue
