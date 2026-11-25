@@ -898,22 +898,13 @@ func TestAssociationInterleavingProtocolViolationWrongPayloadChunkType(t *testin
 }
 
 // marshalEmptyPayloadPacket builds a packet with a single DATA or I-DATA chunk
-// that carries no user data. It is assembled by hand because
-// chunkPayloadData.marshal refuses to produce such a chunk.
+// that carries no user data.
 func marshalEmptyPayloadPacket(
 	t *testing.T, sourcePort, destinationPort uint16, verificationTag uint32, iData bool, tsn uint32,
 ) []byte {
 	t.Helper()
 
-	chunkRaw := emptyPayloadChunk(t, iData, tsn)
-	raw := make([]byte, packetHeaderSize+len(chunkRaw))
-	binary.BigEndian.PutUint16(raw[0:], sourcePort)
-	binary.BigEndian.PutUint16(raw[2:], destinationPort)
-	binary.BigEndian.PutUint32(raw[4:], verificationTag)
-	copy(raw[packetHeaderSize:], chunkRaw)
-	binary.LittleEndian.PutUint32(raw[8:], generatePacketChecksum(raw))
-
-	return raw
+	return marshalRawPacket(t, sourcePort, destinationPort, verificationTag, emptyPayloadChunk(t, iData, tsn))
 }
 
 // captureAbortCauses reports the marshaled error causes of every ABORT sent by fromID.
@@ -1028,6 +1019,91 @@ func TestAssociationEmptyUserDataAbortConditions(t *testing.T) {
 			require.Equal(t, tt.expectAbort, assoc.willSendAbort)
 			if tt.expectAbort {
 				require.Equal(t, noUserData, assoc.willSendAbortCause.errorCauseCode())
+			}
+		})
+	}
+}
+
+func TestAssociationEmptyUserDataBundledWithAbort(t *testing.T) {
+	lim := test.TimeOut(time.Second * 10)
+	defer lim.Stop()
+
+	br := test.NewBridge()
+	a0, a1, err := createNewAssociationPair(br, ackModeNoDelay, 0)
+	require.NoError(t, err, "failed to create associations")
+	defer closeAssociationPair(br, a0, a1)
+
+	causes := captureAbortCauses(t, br, 1)
+	abortRaw, err := (&chunkAbort{}).marshal()
+	require.NoError(t, err)
+	require.True(t, br.Push(marshalRawPacket(t, a0.sourcePort, a0.destinationPort, a0.peerVerificationTag,
+		emptyPayloadChunk(t, false, 1), abortRaw,
+	), 0))
+
+	// The peer's ABORT is still handled, and no ABORT is sent in response to it.
+	deadline := time.Now().Add(time.Second)
+	for a1.getState() != closed {
+		require.True(t, time.Now().Before(deadline), "timed out waiting for the ABORT to be handled")
+		br.Tick()
+		time.Sleep(10 * time.Millisecond)
+	}
+	br.Tick()
+
+	a1.lock.RLock()
+	willSendAbort := a1.willSendAbort
+	a1.lock.RUnlock()
+	require.False(t, willSendAbort)
+	select {
+	case cause := <-causes:
+		require.Failf(t, "unexpected ABORT", "cause %x", cause)
+	default:
+	}
+}
+
+func TestAssociationEmptyUserDataBundledWithCookieAck(t *testing.T) {
+	const (
+		localPort uint16 = 5000
+		peerPort  uint16 = 5001
+		localTag  uint32 = 0x11111111
+	)
+	// RFC 9260 section 3.3.10.9: No User Data (9), length 8, TSN of the empty chunk.
+	expectedCause := []byte{0x00, 0x09, 0x00, 0x08, 0x00, 0x00, 0x00, 0x07}
+
+	cookieAckRaw, err := (&chunkCookieAck{}).marshal()
+	require.NoError(t, err)
+	emptyDataRaw := emptyPayloadChunk(t, false, 7)
+
+	tests := []struct {
+		name        string
+		chunks      [][]byte
+		expectAbort bool
+	}{
+		// The empty DATA arrives before the association is established, so it is dropped.
+		{name: "empty DATA first", chunks: [][]byte{emptyDataRaw, cookieAckRaw}},
+		{name: "COOKIE ACK first", chunks: [][]byte{cookieAckRaw, emptyDataRaw}, expectAbort: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assoc := createTestAssociation(t, Config{})
+			assoc.handshakeCompletedCh = make(chan error, 1)
+			assoc.sourcePort = localPort
+			assoc.destinationPort = peerPort
+			assoc.myVerificationTag = localTag
+			assoc.setState(cookieEchoed)
+
+			require.NoError(t, assoc.handleInbound(marshalRawPacket(t, peerPort, localPort, localTag, tt.chunks...)))
+
+			require.Equal(t, established, assoc.getState())
+			require.NoError(t, <-assoc.handshakeCompletedCh)
+
+			assoc.lock.RLock()
+			defer assoc.lock.RUnlock()
+			require.Equal(t, tt.expectAbort, assoc.willSendAbort)
+			if tt.expectAbort {
+				causeRaw, err := assoc.willSendAbortCause.marshal()
+				require.NoError(t, err)
+				require.Equal(t, expectedCause, causeRaw)
 			}
 		})
 	}

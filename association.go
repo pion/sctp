@@ -1371,17 +1371,17 @@ func (a *Association) unmarshalPacket(raw []byte) (*packet, error) {
 	// carry a zero checksum (skip CRC32c verification). Packets that
 	// still carry a non-zero checksum are verified anyways.
 	// Note that INIT / COOKIE ECHO always force verification inside `packet.unmarshal()`.
-	err := p.unmarshal(!a.recvZeroChecksum, raw)
+	if err := p.unmarshal(!a.recvZeroChecksum, raw); err != nil {
+		return nil, err
+	}
 
-	return p, err
+	return p, nil
 }
 
 // handleInbound parses incoming raw packets.
 func (a *Association) handleInbound(raw []byte) error {
 	pkt, err := a.unmarshalPacket(raw)
-	// An empty DATA chunk still yields a fully parsed packet, see packet.unmarshal.
-	emptyPayload := errors.Is(err, ErrDATAZeroUserData)
-	if err != nil && !emptyPayload {
+	if err != nil {
 		a.log.Warnf("[%s] unable to parse SCTP packet %s", a.name, err)
 
 		return nil
@@ -1389,12 +1389,6 @@ func (a *Association) handleInbound(raw []byte) error {
 
 	if err := checkPacket(pkt); err != nil {
 		a.log.Warnf("[%s] failed validating packet %s", a.name, err)
-
-		return nil
-	}
-
-	if emptyPayload {
-		a.abortOnEmptyPayload(pkt)
 
 		return nil
 	}
@@ -1412,32 +1406,31 @@ func (a *Association) handleInbound(raw []byte) error {
 	return nil
 }
 
-func (a *Association) abortOnEmptyPayload(pkt *packet) {
-	var emptyPayload *chunkPayloadData
+// handleEmptyData drops a DATA or I-DATA chunk that carries no user data and,
+// when this packet is allowed to trigger one, queues a No User Data ABORT.
+// The rest of the packet is still processed.
+// The caller should hold the lock.
+func (a *Association) handleEmptyData(pkt *packet, chunkPayload *chunkPayloadData) {
 	for _, c := range pkt.chunks {
-		switch c := c.(type) {
+		switch c.(type) {
 		case *chunkAbort, *chunkInitAck:
 			// RFC 9260 sections 9.1 and 5.1, respectively.
+			a.log.Debugf("[%s] dropping DATA without user data: tsn=%d", a.name, chunkPayload.tsn)
+
 			return
-		case *chunkPayloadData:
-			if emptyPayload == nil && len(c.userData) == 0 {
-				emptyPayload = c
-			}
 		}
 	}
-	if emptyPayload == nil {
-		return
-	}
 
-	a.lock.Lock()
-	defer a.lock.Unlock()
-	if !a.canHandleData(a.getState()) || a.willSendAbort || !a.validPacketForAssociation(pkt, emptyPayload) {
+	if !a.canHandleData(a.getState()) || a.willSendAbort || !a.validPacketForAssociation(pkt, chunkPayload) {
+		a.log.Debugf("[%s] dropping DATA without user data: tsn=%d", a.name, chunkPayload.tsn)
+
 		return
 	}
 
 	// RFC 9260 sections 6.2 and 3.3.10.9.
+	a.log.Warnf("[%s] received DATA without user data, aborting: tsn=%d", a.name, chunkPayload.tsn)
 	var tsn [4]byte
-	binary.BigEndian.PutUint32(tsn[:], emptyPayload.tsn)
+	binary.BigEndian.PutUint32(tsn[:], chunkPayload.tsn)
 	a.willSendAbort = true
 	a.willSendAbortCause = &errorCauseHeader{code: noUserData, raw: tsn[:]}
 	a.awakeWriteLoop()
@@ -4561,7 +4554,11 @@ func (a *Association) handleChunk(receivedPacket *packet, receivedChunk chunk) e
 		a.handleCookieAck()
 
 	case *chunkPayloadData:
-		packets = a.handleData(receivedChunk)
+		if len(receivedChunk.userData) == 0 {
+			a.handleEmptyData(receivedPacket, receivedChunk)
+		} else {
+			packets = a.handleData(receivedChunk)
+		}
 
 	case *chunkSelectiveAck:
 		err = a.handleSack(receivedChunk)

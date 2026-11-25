@@ -4,10 +4,33 @@
 package sctp
 
 import (
+	"encoding/binary"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 )
+
+// marshalRawPacket builds a packet from chunks that are already marshaled,
+// padding each one to a multiple of 4 bytes. It is used for chunks that
+// chunk.marshal refuses to produce.
+func marshalRawPacket(
+	t *testing.T, sourcePort, destinationPort uint16, verificationTag uint32, chunks ...[]byte,
+) []byte {
+	t.Helper()
+
+	raw := make([]byte, 0, packetHeaderSize)
+	raw = binary.BigEndian.AppendUint16(raw, sourcePort)
+	raw = binary.BigEndian.AppendUint16(raw, destinationPort)
+	raw = binary.BigEndian.AppendUint32(raw, verificationTag)
+	raw = append(raw, 0, 0, 0, 0) // checksum, filled in below
+	for _, chunkRaw := range chunks {
+		raw = append(raw, chunkRaw...)
+		raw = padByte(raw, getPadding(len(chunkRaw)))
+	}
+	binary.LittleEndian.PutUint32(raw[8:], generatePacketChecksum(raw))
+
+	return raw
+}
 
 func TestPacketUnmarshal(t *testing.T) {
 	pkt := &packet{}

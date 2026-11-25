@@ -119,15 +119,17 @@ func TestPayloadDataHeaderSizeAccounting(t *testing.T) {
 		assert.Equal(t, int(iDataChunkHeaderSize)+len(iData.userData), iData.chunkSize())
 	})
 
-	t.Run("empty user data is rejected", func(t *testing.T) {
+	t.Run("empty user data", func(t *testing.T) {
 		for name, iData := range map[string]bool{"DATA": false, "I-DATA": true} {
 			t.Run(name, func(t *testing.T) {
+				// Sending an empty chunk is refused.
 				_, err := (&chunkPayloadData{iData: iData, beginningFragment: true, endingFragment: true}).marshal()
 				assert.ErrorIs(t, err, ErrDATAZeroUserData)
 
+				// Receiving one is not, so that the association can abort with its TSN.
 				parsed := &chunkPayloadData{}
-				assert.ErrorIs(t, parsed.unmarshal(emptyPayloadChunk(t, iData, 7)), ErrDATAZeroUserData)
-				// The TSN is still decoded so that the association can report it.
+				require.NoError(t, parsed.unmarshal(emptyPayloadChunk(t, iData, 7)))
+				assert.Empty(t, parsed.userData)
 				assert.Equal(t, uint32(7), parsed.tsn)
 				assert.Equal(t, iData, parsed.isIData())
 			})

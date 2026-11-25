@@ -178,10 +178,8 @@ func (p *chunkPayloadData) unmarshal(raw []byte) error {
 		return fmt.Errorf("%w: unsupported payload data chunk type %d", ErrChunkTypeUnhandled, p.typ)
 	}
 
-	if len(p.userData) == 0 {
-		return ErrDATAZeroUserData
-	}
-
+	// An empty chunk is still parsed so that the rest of the packet is
+	// processed. The association answers it with a No User Data ABORT.
 	return nil
 }
 
