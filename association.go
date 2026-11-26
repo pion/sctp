@@ -502,13 +502,11 @@ func (c *Config) snapEnabled() bool {
 // createSNAPAssociation establishes an association using out-of-band handshake tokens.
 func createSNAPAssociation(ctx context.Context, config *Config) (*Association, error) {
 	// SNAP, aka sctp-init in the SDP.
-	remote := &chunkInit{}
-	err := remote.unmarshal(config.snapConfig.remoteInit)
+	remote, err := parseOutOfBandToken(config.snapConfig.remoteInit)
 	if err != nil {
 		return nil, err
 	}
-	local := &chunkInit{}
-	err = local.unmarshal(config.snapConfig.localInit)
+	local, err := parseOutOfBandToken(config.snapConfig.localInit)
 	if err != nil {
 		return nil, err
 	}
@@ -5523,4 +5521,28 @@ func GenerateOutOfBandToken(opts ...ClientOption) ([]byte, error) {
 	}
 
 	return init.marshal()
+}
+
+// ValidateOutOfBandToken reports whether token is a valid SNAP token, i.e. a
+// serialized SCTP INIT chunk.
+func ValidateOutOfBandToken(token []byte) error {
+	_, err := parseOutOfBandToken(token)
+
+	return err
+}
+
+func parseOutOfBandToken(token []byte) (*chunkInit, error) {
+	init := &chunkInit{}
+	if err := init.unmarshal(token); err != nil {
+		return nil, err
+	}
+	length := chunkHeaderSize + len(init.raw)
+	if len(token) > length+getPadding(length) {
+		return nil, fmt.Errorf("%w: %d bytes after INIT chunk", errInvalidSnapToken, len(token)-length)
+	}
+	if _, err := init.check(); err != nil {
+		return nil, err
+	}
+
+	return init, nil
 }

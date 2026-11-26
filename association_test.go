@@ -8844,3 +8844,63 @@ func TestAssociationHandleReconfig_TwoResponses(t *testing.T) {
 	assert.Empty(t, packets)
 	assert.Empty(t, assoc.reconfigs)
 }
+
+func TestValidateOutOfBandToken(t *testing.T) {
+	token, err := GenerateOutOfBandToken(Config{MaxReceiveBufferSize: 65535})
+	require.NoError(t, err)
+	require.NoError(t, ValidateOutOfBandToken(token))
+
+	modified := func(f func(b []byte) []byte) []byte {
+		return f(append([]byte{}, token...))
+	}
+
+	for _, tc := range []struct {
+		name  string
+		token []byte
+		err   error
+	}{
+		{"too short", token[:2], ErrChunkHeaderTooSmall},
+		{"truncated", token[:len(token)-1], ErrChunkHeaderNotEnoughSpace},
+		{"not an INIT", modified(func(b []byte) []byte {
+			b[0] = byte(ctInitAck)
+
+			return b
+		}), ErrChunkTypeNotTypeInit},
+		{"initiate tag zero", modified(func(b []byte) []byte {
+			binary.BigEndian.PutUint32(b[4:], 0)
+
+			return b
+		}), ErrChunkTypeInitInitateTagZero},
+		{"a_rwnd too small", modified(func(b []byte) []byte {
+			binary.BigEndian.PutUint32(b[8:], 1499)
+
+			return b
+		}), ErrInitAdvertisedReceiver1500},
+		{"zero outbound streams", modified(func(b []byte) []byte {
+			binary.BigEndian.PutUint16(b[12:], 0)
+
+			return b
+		}), ErrInitOutboundStreamRequestZero},
+		{"zero inbound streams", modified(func(b []byte) []byte {
+			binary.BigEndian.PutUint16(b[14:], 0)
+
+			return b
+		}), ErrInitInboundStreamRequestZero},
+		{"trailing data", append(append([]byte{}, token...), token...), errInvalidSnapToken},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.ErrorIs(t, ValidateOutOfBandToken(tc.token), tc.err)
+		})
+	}
+}
+
+func TestAssociationSNAPRejectsInvalidRemoteInit(t *testing.T) {
+	br := test.NewBridge()
+	local, err := GenerateOutOfBandToken(Config{MaxReceiveBufferSize: 65535})
+	require.NoError(t, err)
+	remote := append([]byte{}, local...)
+	binary.BigEndian.PutUint32(remote[4:], 0)
+
+	_, err = ClientWithOptions(WithNetConn(br.GetConn0()), WithSNAP(local, remote))
+	assert.ErrorIs(t, err, ErrChunkTypeInitInitateTagZero)
+}
