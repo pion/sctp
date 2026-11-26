@@ -4,8 +4,10 @@
 package sctp
 
 import (
+	"os"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/pion/logging"
 	"github.com/stretchr/testify/assert"
@@ -312,5 +314,37 @@ func TestStreamWriteSCTPRollsBackInterleavingMIDsOnSendError(t *testing.T) {
 			assert.Equal(t, uint32(0), s.nextUnorderedMID)
 			assert.Equal(t, uint64(0), s.BufferedAmount())
 		})
+	}
+}
+
+func TestStreamSetReadDeadlineIgnoresStaleTimer(t *testing.T) {
+	stream := newTestStream(t)
+
+	assert.NoError(t, stream.SetReadDeadline(time.Now().Add(10*time.Millisecond)))
+
+	// Hold the lock, like handleData does, while the deadline is extended
+	// and the old deadline expires.
+	stream.lock.Lock()
+	extended := make(chan struct{})
+	go func() {
+		defer close(extended)
+		assert.NoError(t, stream.SetReadDeadline(time.Now().Add(time.Hour)))
+	}()
+	time.Sleep(50 * time.Millisecond)
+	stream.lock.Unlock()
+	<-extended
+
+	readErr := make(chan error, 1)
+	go func() {
+		_, _, err := stream.ReadSCTP(make([]byte, 8))
+		readErr <- err
+	}()
+
+	select {
+	case err := <-readErr:
+		assert.Failf(t, "read returned before the extended deadline", "err: %v", err)
+	case <-time.After(50 * time.Millisecond):
+		assert.NoError(t, stream.SetReadDeadline(time.Now()))
+		assert.ErrorIs(t, <-readErr, os.ErrDeadlineExceeded)
 	}
 }
